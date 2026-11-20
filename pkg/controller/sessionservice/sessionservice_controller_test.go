@@ -1970,7 +1970,7 @@ func TestDeletionPrefersEmptyBindingsWithinBudgets(t *testing.T) {
 				members.old = []*agents.Sandbox{bound}
 				members.updated = []*agents.Sandbox{empty}
 			}
-			err := r.scaleDown(t.Context(), parent, "new-revision", members, 1, 0, status)
+			err := r.scaleDown(t.Context(), parent, "new-revision", members, 1, 0, status, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2462,6 +2462,261 @@ func TestExpireBindings(t *testing.T) {
 	}
 }
 
+func TestRebindingSkipsInvalidMemberBindings(t *testing.T) {
+	for _, mode := range []string{"migration", "duplicate repair"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := serving(3)
+			const id = "000000000000000session"
+			source, target, broken := member(parent, "source"), member(parent, "target"), member(parent, "broken")
+			for _, box := range []*agents.Sandbox{target, broken} {
+				box.Status.Phase = agents.SandboxRunning
+				box.Status.PodInfo.PodIP = "10.0.0.2"
+				box.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+			}
+			record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z"}
+			if mode == "migration" {
+				record.Phase, record.TargetSandboxUID = sessionbinding.Moving, string(target.UID)
+			} else {
+				var err error
+				target.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: record})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var err error
+			source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			broken.Annotations = map[string]string{sessionbinding.BindingsAnnotation: "invalid"}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(source, target, broken).WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if obj.GetName() == broken.Name {
+						t.Fatal("corrupt binding member was used as a target or overwritten")
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			}).Build()
+			var list agents.SandboxList
+			if err := c.List(t.Context(), &list); err != nil {
+				t.Fatal(err)
+			}
+			changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items)
+			if err != nil || !changed || !pending {
+				t.Fatalf("healthy bindings blocked: %v/%v %v", changed, pending, err)
+			}
+			for _, box := range []*agents.Sandbox{source, target, broken} {
+				var current agents.Sandbox
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(box), &current); err != nil {
+					t.Fatal(err)
+				}
+				if box == broken {
+					if current.Annotations[sessionbinding.BindingsAnnotation] != "invalid" {
+						t.Fatal("corrupt annotation was reset")
+					}
+					continue
+				}
+				records, err := sessionbinding.Decode(current.Annotations)
+				if err != nil || (box == target && (records[id].Phase != "" || records[id].CreatedAt != record.CreatedAt)) || box == source && len(records) != 0 {
+					t.Fatalf("%s bindings=%v err=%v", box.Name, records, err)
+				}
+			}
+		})
+	}
+}
+
+func TestBindingMaintenanceDoesNotBlockMemberDeletion(t *testing.T) {
+	for _, mode := range []string{"rebinding success", "unknown source", "unknown target", "unknown committed target", "rejected source", "corrupt source", "expiry success", "expiry unknown", "rollout success", "rollout unknown target"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := serving(0)
+			source, target, spare := member(parent, "a-source"), member(parent, "b-target"), member(parent, "z-spare")
+			target.Status.Phase = agents.SandboxRunning
+			target.Status.PodInfo.PodIP = "10.0.0.2"
+			target.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+			const id = "000000000000000session"
+			record := sessionbinding.Record{CreatedAt: time.Now().UTC().Format(time.RFC3339), Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID)}
+			if strings.HasPrefix(mode, "expiry") {
+				parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+				record.CreatedAt = time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+			}
+			var err error
+			source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "corrupt source" {
+				parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+				source.Annotations[sessionbinding.BindingsAnnotation] = "invalid"
+			}
+			unknownName := ""
+			if mode == "unknown source" || mode == "expiry unknown" {
+				unknownName = source.Name
+			} else if mode == "unknown target" || mode == "unknown committed target" || mode == "rollout unknown target" {
+				unknownName = target.Name
+			}
+			if strings.HasPrefix(mode, "rollout") {
+				*parent.Spec.Replicas = 1
+				parent.Spec.SandboxTemplateSpec.Template.Spec.Containers[0].Image = "app:v2"
+			}
+			lostResponse := errors.New("binding response lost")
+			inject := true
+			var deletes []string
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, source, target, spare).WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if inject && obj.GetName() == unknownName {
+						if mode == "unknown committed target" {
+							if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+								return err
+							}
+						}
+						return lostResponse
+					}
+					if inject && mode == "rejected source" && obj.GetName() == source.Name {
+						return apierrors.NewForbidden(agents.Resource("sandboxes"), obj.GetName(), errors.New("denied"))
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if _, ok := obj.(*agents.Sandbox); !ok {
+						return c.Delete(ctx, obj, opts...)
+					}
+					deletes = append(deletes, obj.GetName())
+					if inject && obj.GetName() == unknownName {
+						t.Fatal("attempted deletion after an unknown binding write")
+					}
+					options := &client.DeleteOptions{}
+					options.ApplyOptions(opts)
+					var current agents.Sandbox
+					if err := c.Get(ctx, client.ObjectKeyFromObject(obj), &current); err != nil {
+						return err
+					}
+					if options.Preconditions == nil || options.Preconditions.UID == nil || options.Preconditions.ResourceVersion == nil {
+						t.Fatal("missing snapshot DELETE conditions")
+					}
+					if current.UID != *options.Preconditions.UID || current.ResourceVersion != *options.Preconditions.ResourceVersion {
+						return apierrors.NewConflict(agents.Resource("sandboxes"), obj.GetName(), errors.New("binding changed"))
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			}).Build()
+			r := NewReconciler(c)
+			_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
+			wantErr := unknownName != "" || mode == "rejected source"
+			if (err != nil) != wantErr {
+				t.Fatalf("reconcile error=%v, wantError=%v", err, wantErr)
+			}
+			if unknownName != "" && !errors.Is(err, lostResponse) {
+				t.Fatalf("lost binding error: %v", err)
+			}
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(spare), &agents.Sandbox{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("independent member deletion blocked: %v, attempts=%v", err, deletes)
+			}
+			if mode == "rejected source" || mode == "corrupt source" {
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(source), &agents.Sandbox{}); !apierrors.IsNotFound(err) {
+					t.Fatalf("definitively rejected/corrupt binding incorrectly protected member: %v", err)
+				}
+			}
+			if unknownName != "" {
+				key := client.ObjectKey{Namespace: parent.Namespace, Name: unknownName}
+				if err := c.Get(t.Context(), key, &agents.Sandbox{}); err != nil {
+					t.Fatalf("unknown member not retained: %v", err)
+				}
+				if strings.HasPrefix(mode, "rollout") {
+					return
+				}
+				inject = false
+				for round := 0; round < 3; round++ {
+					reconcile(t, r, parent)
+				}
+				if err := c.Get(t.Context(), key, &agents.Sandbox{}); !apierrors.IsNotFound(err) {
+					t.Fatalf("unknown-member exclusion leaked into future reconciles: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestUnknownBindingMembersStillCountForCapacity(t *testing.T) {
+	for _, desired := range []int32{0, 5} {
+		t.Run(fmt.Sprint(desired), func(t *testing.T) {
+			parent := serving(desired)
+			target, spare := member(parent, "target"), member(parent, "spare")
+			target.Status.Phase = agents.SandboxRunning
+			target.Status.PodInfo.PodIP = "10.0.0.2"
+			target.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+			objects := []client.Object{parent, target, spare}
+			lost := map[string]error{}
+			for i := 0; i < 2; i++ {
+				source := member(parent, fmt.Sprintf("source-%d", i))
+				var err error
+				source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{fmt.Sprintf("%022d", i): {
+					CreatedAt: time.Now().UTC().Format(time.RFC3339), Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID),
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				objects = append(objects, source)
+				lost[source.Name] = fmt.Errorf("response lost for %s", source.Name)
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if err, unknown := lost[obj.GetName()]; unknown {
+						return err
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if _, unknown := lost[obj.GetName()]; unknown {
+						t.Fatal("unknown binding member was deleted")
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			}).Build()
+			_, err := NewReconciler(c).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
+			for _, cause := range lost {
+				if !errors.Is(err, cause) {
+					t.Fatalf("independent worker error lost: %v", err)
+				}
+			}
+			var list agents.SandboxList
+			if err := c.List(t.Context(), &list); err != nil {
+				t.Fatal(err)
+			}
+			want := int(desired)
+			if desired == 0 {
+				want = 2 // Only the two unknown members are retained.
+			}
+			if len(list.Items) != want {
+				t.Fatalf("member count=%d want=%d", len(list.Items), want)
+			}
+			var current agents.SessionService
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(parent), &current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.Replicas != 4 {
+				t.Fatalf("unknown members were excluded from observed capacity: %+v", current.Status)
+			}
+		})
+	}
+}
+
+func TestBindingWriteResultsPreserveIndependentErrors(t *testing.T) {
+	for _, firstObservation := range []bool{false, true} {
+		t.Run(fmt.Sprint(firstObservation), func(t *testing.T) {
+			missing := apierrors.NewNotFound(agents.Resource("sandboxes"), "source-a")
+			forbidden := apierrors.NewForbidden(agents.Resource("sandboxes"), "source-b", errors.New("denied"))
+			failures := []error{forbidden, missing}
+			if firstObservation {
+				slices.Reverse(failures)
+			}
+			unknown, err := bindingWriteResults(errors.Join(failures...))
+			if len(unknown) != 0 || !errors.Is(err, forbidden) || errors.Is(err, missing) {
+				t.Fatalf("unknown=%v remaining error=%v", unknown, err)
+			}
+		})
+	}
+}
+
 func TestExpiryStageInvalidatesMemberSnapshot(t *testing.T) {
 	parent := serving(0)
 	parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
@@ -2548,7 +2803,7 @@ func TestExpiryIndependentMembers(t *testing.T) {
 				t.Fatal(err)
 			}
 			changed, _, err := NewReconciler(c).expireBindings(t.Context(), parent, snapshot.Items, time.Date(2026, 11, 19, 1, 0, 0, 0, time.UTC))
-			if !changed || (err != nil) != (failure != "conflict") {
+			if !changed || (err != nil) != (failure == "patch error") {
 				t.Fatalf("changed=%v err=%v", changed, err)
 			}
 			for _, box := range []*agents.Sandbox{failed, healthy} {
@@ -3150,9 +3405,9 @@ func TestRebindingCleanupResult(t *testing.T) {
 			if err := c.List(t.Context(), &snapshot); err != nil {
 				t.Fatal(err)
 			}
-			bindings, sources, err := collectBindingMigrations(t.Context(), parent, snapshot.Items)
-			if err != nil || len(sources) != 1 {
-				t.Fatalf("sources=%v err=%v", sources, err)
+			bindings, sources := collectBindingMigrations(t.Context(), parent, snapshot.Items)
+			if len(sources) != 1 {
+				t.Fatalf("sources=%v", sources)
 			}
 			changed, err := NewReconciler(c).reconcileSourceBindings(t.Context(), parent, sources[0], bindings)
 			if !changed || targetCalls != 1 {

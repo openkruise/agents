@@ -24,6 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agents "github.com/openkruise/agents/api/v1alpha1"
@@ -53,10 +54,12 @@ func (s *Store) snapshot(ctx context.Context, serving session.SessionService) (s
 		return session.SessionServiceSnapshot{}, nil, err
 	}
 	snapshot := session.SessionServiceSnapshot{SessionService: current, Members: make([]session.SessionServiceMember, 0, len(members))}
+	boxes := make([]*agents.Sandbox, 0, len(members))
 	for _, box := range members {
 		bindings, err := sessionbinding.Decode(box.Annotations)
 		if err != nil {
-			return session.SessionServiceSnapshot{}, nil, fmt.Errorf("%w: member %s: %v", session.ErrSessionServiceDataAmbiguous, box.Name, err)
+			klog.FromContext(ctx).Info("Skipping member with invalid Session bindings", "sandbox", klog.KObj(box), "error", err)
+			continue
 		}
 		route, err := sandboxroute.RouteFromSandbox(box)
 		if err != nil {
@@ -69,8 +72,9 @@ func (s *Store) snapshot(ctx context.Context, serving session.SessionService) (s
 			}
 		}
 		snapshot.Members = append(snapshot.Members, session.SessionServiceMember{UID: string(box.UID), Version: box.ResourceVersion, Phase: string(box.Status.Phase), Ready: ready, Deleting: !box.DeletionTimestamp.IsZero(), Route: route, Bindings: bindings})
+		boxes = append(boxes, box)
 	}
-	return snapshot, members, nil
+	return snapshot, boxes, nil
 }
 
 func (s *Store) ReadSessionServiceSnapshot(ctx context.Context, serving session.SessionService) (session.SessionServiceSnapshot, error) {

@@ -92,6 +92,29 @@ func readAllocationBindings(t *testing.T, c client.Client, name string) sessionb
 	return r
 }
 
+func TestSessionServiceAllocationSkipsInvalidBindings(t *testing.T) {
+	for _, name := range []string{"a-broken", "z-broken"} {
+		t.Run(name, func(t *testing.T) {
+			const existing = "000000000000000session"
+			const created = "000000000000000000000c"
+			broken := allocationBox(name, "a")
+			broken.Annotations[sessionbinding.BindingsAnnotation] = "invalid"
+			healthy := allocationBox("healthy", "b", existing)
+			a, c, _ := allocationFixture(t, "BestEffort", nil, interceptor.Funcs{}, broken, healthy)
+			route, err := resolveForTest(t.Context(), a, existing, "serving-uid")
+			require.NoError(t, err)
+			require.Equal(t, healthy.Name, route.Name)
+			route, err = createForTest(t.Context(), a, created, "serving-uid")
+			require.NoError(t, err)
+			require.Equal(t, healthy.Name, route.Name)
+			require.Contains(t, readAllocationBindings(t, c, healthy.Name), created)
+			var current agents.Sandbox
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(broken), &current))
+			require.Equal(t, "invalid", current.Annotations[sessionbinding.BindingsAnnotation], "a skipped member must not be treated as empty or overwritten")
+		})
+	}
+}
+
 func TestSessionServiceAllocationLeastSessionsAndAffinity(t *testing.T) {
 	for _, tt := range []struct {
 		name, affinity, phase                           string

@@ -162,25 +162,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	status.UpdateRevision = revision
 	setCondition(status, parent, "Supported", true, "Supported", "Fixed-replica template provisioning is supported")
 	// Expiry is independent of migration, including for Moving records.
-	expired, nextExpiry, err := r.expireBindings(ctx, parent, snapshot.Items, time.Now())
-	if err != nil {
-		return ctrl.Result{}, err
+	expired, nextExpiry, bindingErr := r.expireBindings(ctx, parent, snapshot.Items, time.Now())
+	changed, moving := false, false
+	if !expired && bindingErr == nil {
+		// Expiry writes require a new binding observation, but do not block capacity.
+		changed, moving, bindingErr = r.reconcileRebindings(ctx, parent, snapshot.Items)
 	}
-	if expired {
-		// Binding writes invalidate this snapshot for both migration and scaling.
-		return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
-	}
-	changed, moving, err := r.reconcileRebindings(ctx, parent, snapshot.Items)
-	if err != nil {
-		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-			return ctrl.Result{RequeueAfter: observationDelay}, nil
-		}
-		return ctrl.Result{}, err
-	}
-	if changed {
-		// Do not scale from a snapshot predating a binding mutation.
-		return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
-	}
+	skipDelete, bindingErr := bindingWriteResults(bindingErr)
 	r.observeExpectations(ctx, parent, snapshot.Items)
 	if satisfied, elapsed, _ := r.Expectations.SatisfiedExpectations(expectationKey(parent)); !satisfied {
 		if elapsed >= expectations.ExpectationTimeout {
@@ -188,20 +176,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			// decides from its cached snapshot and the latest desired Revision.
 			r.Expectations.DeleteExpectations(expectationKey(parent))
 		}
-		return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
+		return ctrl.Result{RequeueAfter: observationDelay}, errors.Join(bindingErr, r.updateStatus(ctx, parent, status))
 	}
-	if err := r.reconcileMembers(ctx, parent, revision, snapshot.Items, active, status); err != nil {
+	if err := r.reconcileMembers(ctx, parent, revision, snapshot.Items, active, status, skipDelete); err != nil {
 		if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 			log.Info("member write requires fresh cached judgment", "error", err)
-			return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
+			return ctrl.Result{RequeueAfter: observationDelay}, errors.Join(bindingErr, r.updateStatus(ctx, parent, status))
 		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, errors.Join(bindingErr, err)
 	}
 
-	if err := r.updateStatus(ctx, parent, status); err != nil {
+	if err := errors.Join(bindingErr, r.updateStatus(ctx, parent, status)); err != nil {
 		return ctrl.Result{}, err
 	}
-	if moving && (nextExpiry == 0 || nextExpiry > observationDelay) {
+	if (expired || changed || moving) && (nextExpiry == 0 || nextExpiry > observationDelay) {
 		nextExpiry = observationDelay
 	}
 	return ctrl.Result{RequeueAfter: nextExpiry}, nil
@@ -481,7 +469,7 @@ func (r *Reconciler) deleteMember(ctx context.Context, parent *agents.SessionSer
 	return nil
 }
 
-func (r *Reconciler) reconcileMembers(ctx context.Context, parent *agents.SessionService, revision string, snapshot []agents.Sandbox, active []*agents.Sandbox, status *agents.SessionServiceStatus) error {
+func (r *Reconciler) reconcileMembers(ctx context.Context, parent *agents.SessionService, revision string, snapshot []agents.Sandbox, active []*agents.Sandbox, status *agents.SessionServiceStatus, skipDelete map[types.UID]struct{}) error {
 	desired := desiredReplicas(parent)
 	surge, err := utils.SessionServiceMaxSurge(parent)
 	if err != nil {
@@ -519,7 +507,7 @@ func (r *Reconciler) reconcileMembers(ctx context.Context, parent *agents.Sessio
 		return r.scaleUp(ctx, parent, revision, min(desired-updated, int32(min(space, 16))))
 	}
 
-	return r.scaleDown(ctx, parent, revision, members, desired, space, status)
+	return r.scaleDown(ctx, parent, revision, members, desired, space, status, skipDelete)
 }
 
 // memberRevisions summarizes the same observation used for capacity decisions.
@@ -555,7 +543,7 @@ func observeMemberRevisions(parent *agents.SessionService, revision string, snap
 // Bindings do not protect members. Unready members are preferred, then obsolete
 // revisions, with one shared budget preventing deletion below desired Ready capacity.
 // Reconcile reaches this function only when it cannot first create target members.
-func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionService, revision string, members memberRevisions, desired int32, space int64, status *agents.SessionServiceStatus) error {
+func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionService, revision string, members memberRevisions, desired int32, space int64, status *agents.SessionServiceStatus, skipDelete map[types.UID]struct{}) error {
 	remaining := int64(status.Replicas) - int64(desired)
 	if remaining <= 0 {
 		return nil
@@ -592,9 +580,13 @@ func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionServic
 		}
 		return a.Name < b.Name
 	})
+	var deleteErr error
 	for _, sbx := range candidates {
 		if remaining <= 0 {
 			break
+		}
+		if _, unknown := skipDelete[sbx.UID]; unknown {
+			continue
 		}
 		ready := readyMember(sbx)
 		isUpdated := sbx.Labels[sessionbinding.SessionServiceRevisionLabel] == revision
@@ -607,7 +599,14 @@ func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionServic
 			continue
 		}
 		if err := r.deleteMember(ctx, parent, sbx); err != nil {
-			return err
+			deleteErr = errors.Join(deleteErr, err)
+			if apierrors.IsConflict(err) {
+				// This member needs a fresh observation; independent candidates do not.
+				continue
+			}
+			if !apierrors.IsNotFound(err) {
+				return err
+			}
 		}
 		remaining--
 		if ready {
@@ -620,7 +619,7 @@ func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionServic
 			overCapacity--
 		}
 	}
-	return nil
+	return deleteErr
 }
 
 // expireBindings cleans each owned member from one decision snapshot. It does not
@@ -641,7 +640,7 @@ func (r *Reconciler) expireBindings(ctx context.Context, parent *agents.SessionS
 		}
 		records, decodeErr := sessionbinding.Decode(box.Annotations)
 		if decodeErr != nil {
-			err = errors.Join(err, fmt.Errorf("decode member %s expiry bindings: %w", box.Name, decodeErr))
+			logf.FromContext(ctx).Info("Skipping member with invalid Session bindings", "sandbox", client.ObjectKeyFromObject(box), "error", decodeErr)
 			continue
 		}
 		remaining := maps.Clone(records)
@@ -686,18 +685,16 @@ func (r *Reconciler) expireBindings(ctx context.Context, parent *agents.SessionS
 // Recorded targets are preferred recovery hints; duplicate Active copies from
 // late writes are repaired on subsequent observations.
 func (r *Reconciler) reconcileRebindings(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox) (changed, pending bool, err error) {
-	bindings, sources, decodeErr := collectBindingMigrations(ctx, parent, snapshot)
-	repaired, duplicates, repairErr := r.reconcileDuplicateBindings(ctx, parent, bindings, decodeErr)
+	bindings, sources := collectBindingMigrations(ctx, parent, snapshot)
+	repaired, duplicates, repairErr := r.reconcileDuplicateBindings(ctx, parent, bindings)
 	if duplicates {
 		// Repair may have changed members, or hit an unresolved conditional write.
-		// Neither migration nor scaling may use this pre-repair snapshot.
+		// Migration needs a fresh binding observation. Capacity management still
+		// uses snapshot UID/RV conditions and excludes unknown binding writes.
 		return repaired, true, repairErr
 	}
 	if len(sources) == 0 {
 		return false, false, nil
-	}
-	if decodeErr != nil {
-		return false, true, decodeErr
 	}
 	// Each source owns a private view. Successful API responses advance that view;
 	// concurrent workers sharing a target instead conflict on its captured RV.
@@ -732,7 +729,7 @@ func (r *Reconciler) reconcileRebindings(ctx context.Context, parent *agents.Ses
 // reconcileDuplicateBindings also repairs late target writes after the Moving
 // source is gone. Prefer effective members, then Ready members, then the lowest
 // UID. Even when every copy is unavailable, retain one binding without migrating.
-func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, parent *agents.SessionService, observed map[*agents.Sandbox]sessionbinding.Bindings, decodeErr error) (changed, pending bool, err error) {
+func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, parent *agents.SessionService, observed map[*agents.Sandbox]sessionbinding.Bindings) (changed, pending bool, err error) {
 	active := make(map[string][]*agents.Sandbox)
 	view := make(map[*agents.Sandbox]sessionbinding.Bindings, len(observed))
 	for box, records := range observed {
@@ -752,9 +749,6 @@ func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, parent *age
 	}
 	if len(ids) == 0 {
 		return false, false, nil
-	}
-	if decodeErr != nil {
-		return false, true, decodeErr
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
@@ -804,9 +798,8 @@ func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, parent *age
 	return changed, pending, nil
 }
 
-func collectBindingMigrations(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox) (map[*agents.Sandbox]sessionbinding.Bindings, []*agents.Sandbox, error) {
+func collectBindingMigrations(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox) (map[*agents.Sandbox]sessionbinding.Bindings, []*agents.Sandbox) {
 	bindings := make(map[*agents.Sandbox]sessionbinding.Bindings)
-	var decodeErr error
 	var sources []*agents.Sandbox
 	for i := range snapshot {
 		box := &snapshot[i]
@@ -815,8 +808,7 @@ func collectBindingMigrations(ctx context.Context, parent *agents.SessionService
 		}
 		records, e := sessionbinding.Decode(box.Annotations)
 		if e != nil {
-			logf.FromContext(ctx).Error(e, "cannot inspect member bindings for migration", "sandbox", box.Name)
-			decodeErr = fmt.Errorf("decode member %s bindings: %w", box.Name, e)
+			logf.FromContext(ctx).Info("Skipping member with invalid Session bindings", "sandbox", client.ObjectKeyFromObject(box), "error", e)
 			continue
 		}
 		bindings[box] = records
@@ -827,7 +819,7 @@ func collectBindingMigrations(ctx context.Context, parent *agents.SessionService
 			}
 		}
 	}
-	return bindings, sources, decodeErr
+	return bindings, sources
 }
 
 // reconcileSourceBindings advances sessions in order using a private member view.
@@ -1094,7 +1086,50 @@ func (r *Reconciler) patchBindings(ctx context.Context, box *agents.Sandbox, rec
 	}
 	updated := box.DeepCopy()
 	if err := r.Patch(ctx, updated, client.RawPatch(types.MergePatchType, raw)); err != nil {
-		return nil, fmt.Errorf("patch member %s bindings: %w", box.Name, err)
+		patchErr := fmt.Errorf("patch member %s bindings: %w", box.Name, err)
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) || apierrors.IsTooManyRequests(err) ||
+			apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
+			return nil, patchErr
+		}
+		return nil, &unknownBindingWrite{uid: box.UID, cause: patchErr}
 	}
 	return updated, nil
+}
+
+// unknownBindingWrite carries only the member whose PATCH outcome is uncertain.
+// It is returned through independent workers, never stored across reconciles.
+type unknownBindingWrite struct {
+	uid   types.UID
+	cause error
+}
+
+func (e *unknownBindingWrite) Error() string { return e.cause.Error() }
+func (e *unknownBindingWrite) Unwrap() error { return e.cause }
+
+// bindingWriteResults collects unknown member UIDs and retains independent
+// failures. A conflict in one worker must not hide another worker's error.
+func bindingWriteResults(err error) (map[types.UID]struct{}, error) {
+	members := make(map[types.UID]struct{})
+	var failures error
+	var collect func(error)
+	collect = func(err error) {
+		if err == nil {
+			return
+		}
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, nested := range joined.Unwrap() {
+				collect(nested)
+			}
+			return
+		}
+		var unknown *unknownBindingWrite
+		if errors.As(err, &unknown) {
+			members[unknown.uid] = struct{}{}
+		}
+		if !apierrors.IsConflict(err) && !apierrors.IsNotFound(err) {
+			failures = errors.Join(failures, err)
+		}
+	}
+	collect(err)
+	return members, failures
 }

@@ -318,7 +318,7 @@ func TestControllerDrivenRebinding(t *testing.T) {
 	target.Annotations = nil
 	target.Status.PodInfo.PodIP = "10.0.0.2"
 	target.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&agents.SessionService{}, kubernetes.SessionServiceUIDIndex, func(obj client.Object) []string { return []string{string(obj.GetUID())} }).WithStatusSubresource(parent).WithObjects(parent, source, target).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&agents.SessionService{}, kubernetes.SessionServiceUIDIndex, func(obj client.Object) []string { return []string{string(obj.GetUID())} }).WithStatusSubresource(parent).WithObjects(parent).
 		WithIndex(&appsv1.ControllerRevision{}, "sessionServiceUID", func(obj client.Object) []string {
 			uid := obj.GetLabels()[sessionbinding.SessionServiceUIDLabel]
 			if uid == "" {
@@ -326,6 +326,20 @@ func TestControllerDrivenRebinding(t *testing.T) {
 			}
 			return []string{uid}
 		}).Build()
+	// Bootstrap the real Revision before seeding members, so migration does not
+	// also start an unrelated rollout of unlabeled test objects.
+	replicas = 0
+	require.NoError(t, c.Update(t.Context(), parent))
+	_, err = controller.NewReconciler(c).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
+	require.NoError(t, err)
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(parent), parent))
+	replicas = 2
+	parent.Spec.Replicas = &replicas
+	require.NoError(t, c.Update(t.Context(), parent))
+	source.Labels[sessionbinding.SessionServiceRevisionLabel] = parent.Status.UpdateRevision
+	target.Labels[sessionbinding.SessionServiceRevisionLabel] = parent.Status.UpdateRevision
+	require.NoError(t, c.Create(t.Context(), source))
+	require.NoError(t, c.Create(t.Context(), target))
 	t.Cleanup(func() {
 		expectations.ResourceVersionExpectationDelete(source)
 		expectations.ResourceVersionExpectationDelete(target)
