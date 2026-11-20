@@ -40,8 +40,6 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
 	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils"
 	annotationutils "github.com/openkruise/agents/pkg/utils/annotations"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
@@ -158,7 +156,7 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 	// sandboxcr.preCheckCandidate.
 	if claim.Spec.InplaceUpdate != nil && claim.Spec.InplaceUpdate.Resources != nil {
 		res := claim.Spec.InplaceUpdate.Resources
-		if err := sandboxcr.ValidateResizeResources(res.Requests, res.Limits); err != nil {
+		if err := claimengine.ValidateResizeResources(res.Requests, res.Limits); err != nil {
 			msg := err.Error()
 			log.Info(msg)
 			c.recorder.Event(claim, "Warning", "InvalidInplaceUpdateResources", msg)
@@ -265,10 +263,9 @@ func (c *commonControl) EnsureClaimCompleted(ctx context.Context, args ClaimArgs
 
 // claimSandboxes attempts to claim up to batchSize sandboxes from the pool
 //
-// TODO: Move TryClaimSandbox orchestration into SandboxClaim core and put any
-// primitives shared with sandbox-manager in a neutral package.
-// known-limit: This controller still depends on sandbox-manager's claim flow
-// and options until that refactor removes the reverse dependency.
+// It drives the neutral claim engine in pkg/lifecycle/claim directly, so this
+// controller keeps a dependency closure free of pkg/sandbox-manager/** and
+// pkg/servers/**.
 func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet, batchSize int) (int, error) {
 	log := logf.FromContext(ctx)
 
@@ -282,8 +279,8 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 	limiter := rate.NewLimiter(rate.Inf, batchSize)
 	// Attempt to claim sandboxes concurrently using DoItSlowly
 	claimedCount, err := utils.DoItSlowly(batchSize, InitialClaimBatchSize, func() error {
-		// Pass nil for rand so sandboxcr uses global rand (concurrent-safe).
-		sbx, claimMetrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, claimLockChannel, limiter)
+		// Pass nil for rand so the engine uses global rand (concurrent-safe).
+		sbx, claimMetrics, claimErr := claimengine.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, claimLockChannel, limiter)
 		// Claim results exist as soon as an instance was bound, so record them on the
 		// failure path too: a post-binding failure is a claim outcome, not a no-op.
 		recordSandboxClaims(claimMetrics.ClaimResults)
@@ -319,28 +316,28 @@ func validateClaimReservedIdentityKeys(claim *agentsv1alpha1.SandboxClaim) error
 	return nil
 }
 
-// buildClaimOptions constructs ClaimSandboxOptions for TryClaimSandbox
-func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
+// buildClaimOptions constructs claim.Options for TryClaimSandbox
+func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (claimengine.Options, error) {
 	if err := validateClaimReservedIdentityKeys(claim); err != nil {
-		return infra.ClaimSandboxOptions{}, err
+		return claimengine.Options{}, err
 	}
 	// finalProbes is the effective probe set the policy is validated against:
 	// the pool probes when the claim carries none, otherwise the merged set.
 	finalProbes := sandboxSet.Spec.Probes
 	if len(claim.Spec.Probes) > 0 {
 		if errs := autopause.ValidateProbes(claim.Spec.Probes, field.NewPath("spec", "probes")); len(errs) > 0 {
-			return infra.ClaimSandboxOptions{}, fmt.Errorf("%w: %v", ErrInvalidClaimSpec, errs.ToAggregate())
+			return claimengine.Options{}, fmt.Errorf("%w: %v", ErrInvalidClaimSpec, errs.ToAggregate())
 		}
 		finalProbes = autopause.MergeProbes(sandboxSet.Spec.Probes, claim.Spec.Probes)
 		if len(finalProbes) > autopause.MaxSandboxProbes {
-			return infra.ClaimSandboxOptions{}, fmt.Errorf("%w: merged probes exceed the Sandbox limit of %d", ErrInvalidClaimSpec, autopause.MaxSandboxProbes)
+			return claimengine.Options{}, fmt.Errorf("%w: merged probes exceed the Sandbox limit of %d", ErrInvalidClaimSpec, autopause.MaxSandboxProbes)
 		}
 	}
 	if claim.Spec.AutoPausePolicy != nil {
 		// A policy may reference probes the claim itself carries, so validate
 		// it against the merged set rather than the pool probes alone.
 		if errs := autopause.ValidateAutoPausePolicy(claim.Spec.AutoPausePolicy, finalProbes, field.NewPath("spec", "autoPausePolicy")); len(errs) > 0 {
-			return infra.ClaimSandboxOptions{}, fmt.Errorf("%w: %v", ErrInvalidClaimSpec, errs.ToAggregate())
+			return claimengine.Options{}, fmt.Errorf("%w: %v", ErrInvalidClaimSpec, errs.ToAggregate())
 		}
 	}
 	var reserveFailedSandboxFor *time.Duration
@@ -355,13 +352,13 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	// BuildStorageAuthAnnotation hook (populated later, captured by reference).
 	var storageAuthKey, storageAuthValue string
 
-	opts := infra.ClaimSandboxOptions{
+	opts := claimengine.Options{
 		Namespace: claim.Namespace,
 		User:      string(claim.UID), // Use UID to ensure uniqueness across claim recreations
 		Template:  sandboxSet.Name,
 		ProbeUpdatesEnabled: utilfeature.DefaultFeatureGate.Enabled(features.AutoPauseControllerGate) &&
 			utilfeature.DefaultFeatureGate.Enabled(features.KruiseIntegrationGate),
-		Modifier: func(sbx infra.Sandbox) error {
+		Modifier: func(sbx claimengine.Handle) error {
 			// propagate annotations to sandbox
 			if len(claim.Spec.Annotations) > 0 {
 				annotations := sbx.GetAnnotations()
@@ -429,7 +426,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		Probes:                  claim.Spec.Probes,
 		ReserveFailedSandboxFor: reserveFailedSandboxFor,
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
-		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
+		UserMetadataKeys:        claimengine.BuildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
 		Claim:                   claim,
 		// A SandboxClaim is handled by agent-sandbox-controller alone, so it owns the
 		// operation metrics of every instance claimed here.
@@ -470,12 +467,12 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		opts.RuntimeConfig = claim.Spec.Runtimes
 	}
 
-	return sandboxcr.ValidateAndInitClaimOptions(opts)
+	return claimengine.ValidateAndInitClaimOptions(opts)
 }
 
 // applyInitRuntimeOptions sets InitRuntime when the claim requires it and the
 // SandboxSet template provides an agent-runtime.
-func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *infra.ClaimSandboxOptions, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) error {
+func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *claimengine.Options, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) error {
 	if claim.Spec.SkipInitRuntime {
 		return nil
 	}

@@ -29,22 +29,19 @@ import (
 
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
+	claim "github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
-const bytesPerMiB = int64(1024 * 1024)
-
-type ResourceList struct {
-	CPUMilli   int64
-	MemoryMB   int64
-	DiskSizeMB int64
-}
-
-type SandboxResource struct {
-	Requests ResourceList
-	Limits   ResourceList
-}
+// ResourceList and SandboxResource are neutral, backend-independent resource
+// summaries defined once in pkg/lifecycle/claim so the claim engine and the
+// independent Sandbox controller can share them. The infra aliases keep the
+// established infra.* names for sandbox-manager callers.
+type (
+	ResourceList    = claim.ResourceList
+	SandboxResource = claim.SandboxResource
+)
 
 type QuotaSandboxSourceProvider interface {
 	GetQuotaSandboxSource() QuotaSandboxSource
@@ -92,54 +89,11 @@ type QuotaSandboxSubscription interface {
 	Remove() error
 }
 
-func memoryBytesToFloorMiB(q resource.Quantity) int64 {
-	return q.Value() / bytesPerMiB
-}
-
-func memoryBytesToCeilMiB(q resource.Quantity) int64 {
-	bytes := q.Value()
-	if bytes <= 0 {
-		return 0
-	}
-	return (bytes + bytesPerMiB - 1) / bytesPerMiB
-}
-
-func calculateResourceList(
-	containers []corev1.Container,
-	pick func(corev1.ResourceRequirements) corev1.ResourceList,
-	memoryToMiB func(resource.Quantity) int64,
-) ResourceList {
-	out := ResourceList{}
-	for _, container := range containers {
-		resources := pick(container.Resources)
-		if resources == nil {
-			continue
-		}
-		if cpu, ok := resources[corev1.ResourceCPU]; ok {
-			out.CPUMilli += cpu.MilliValue()
-		}
-		if memory, ok := resources[corev1.ResourceMemory]; ok {
-			out.MemoryMB += memoryToMiB(memory)
-		}
-		if disk, ok := resources[corev1.ResourceEphemeralStorage]; ok {
-			out.DiskSizeMB += disk.Value() / bytesPerMiB
-		}
-	}
-	return out
-}
-
-// CalculateResourceFromContainers sums resource requests and limits from a list of containers.
+// CalculateResourceFromContainers sums resource requests and limits from a list
+// of containers. It delegates to the neutral implementation in
+// pkg/lifecycle/claim.
 func CalculateResourceFromContainers(containers []corev1.Container) SandboxResource {
-	requests := calculateResourceList(containers, func(r corev1.ResourceRequirements) corev1.ResourceList {
-		return r.Requests
-	}, memoryBytesToFloorMiB)
-	limits := calculateResourceList(containers, func(r corev1.ResourceRequirements) corev1.ResourceList {
-		return r.Limits
-	}, memoryBytesToCeilMiB)
-	return SandboxResource{
-		Requests: requests,
-		Limits:   limits,
-	}
+	return claim.CalculateResourceFromContainers(containers)
 }
 
 type TimeoutUpdateResult struct {

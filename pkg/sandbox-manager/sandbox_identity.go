@@ -19,7 +19,7 @@ package sandbox_manager
 import (
 	"errors"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	claim "github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandboxid"
 )
 
@@ -27,13 +27,17 @@ import (
 // runs the caller modifier and applies Manager-owned Sandbox ID policy last.
 // This prevents caller-supplied IDs from surviving into the new delivery:
 // enabled mode replaces them; disabled mode clears the reserved label.
+//
+// It operates on the narrow claim.Handle seam (not the full infra.Sandbox)
+// because it only reads and writes object labels, which Handle exposes via
+// metav1.Object.
 func withSandboxIDAssignment(
-	modifier func(infra.Sandbox) error,
+	modifier func(claim.Handle) error,
 	enabled bool,
 	prefix string,
 	generate func() (string, error),
-) func(infra.Sandbox) error {
-	return func(sandbox infra.Sandbox) error {
+) func(claim.Handle) error {
+	return func(sandbox claim.Handle) error {
 		if enabled && generate == nil {
 			return errors.New("short sandbox ID generator is not initialized")
 		}
