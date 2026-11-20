@@ -19,6 +19,8 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -33,6 +35,33 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
+
+// apiServerMinorVersion returns the minor version of the Kubernetes API
+// server, or 0 when it cannot be determined. It gates assertions whose
+// behavior diverges at 1.33: since then the PodResizeValidator admission
+// plugin rejects an infeasible pods/resize patch synchronously, so the
+// requested resources never land in the pod spec, whereas on <= 1.32 the
+// direct patch is accepted and the kubelet reports the resize as Infeasible
+// from pod status.
+var apiServerMinorVersion = func() func() int {
+	var minor int
+	var initialized bool
+	return func() int {
+		if initialized {
+			return minor
+		}
+		initialized = true
+		v, err := clientset.Discovery().ServerVersion()
+		if err != nil {
+			return 0
+		}
+		minor, err = strconv.Atoi(strings.TrimSuffix(v.Minor, "+"))
+		if err != nil {
+			minor = 0
+		}
+		return minor
+	}
+}()
 
 var _ = Describe("SandboxClaim", func() {
 	var (
@@ -872,6 +901,14 @@ var _ = Describe("SandboxClaim", func() {
 					return false
 				}
 				req := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+				if apiServerMinorVersion() >= 33 {
+					// From K8s 1.33 the PodResizeValidator admission plugin rejects
+					// the infeasible resize synchronously, so the pod spec keeps the
+					// pool's original CPU request.
+					return req.MilliValue() == int64(250)
+				}
+				// On K8s <= 1.32 the direct patch is accepted and the pod spec
+				// shows the requested (infeasible) CPU.
 				return req.MilliValue() == int64(999000)
 			}, time.Minute*4, time.Second).Should(BeTrue())
 		})
@@ -920,15 +957,23 @@ var _ = Describe("SandboxClaim", func() {
 				return ""
 			}, time.Minute*3, time.Second).Should(ContainSubstring("infeasible"))
 
-			By("Verifying pod CPU remains at original value (resize was not applied)")
+			By("Verifying pod CPU reflects the resize API behavior for an infeasible request")
 			pod := &corev1.Pod{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Name:      warmSandboxName,
 				Namespace: namespace,
 			}, pod)).To(Succeed())
 			cpuReq := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
-			Expect(cpuReq.MilliValue()).To(Equal(int64(999000)),
-				"Pod spec should show the requested (infeasible) CPU since the resize API accepted it")
+			if apiServerMinorVersion() >= 33 {
+				// From K8s 1.33 the PodResizeValidator admission plugin rejects
+				// the infeasible resize synchronously, so the requested CPU never
+				// reaches the pod spec and it keeps the pool's original value.
+				Expect(cpuReq.MilliValue()).To(Equal(int64(250)),
+					"Pod spec should keep the original CPU since the resize was synchronously rejected")
+			} else {
+				Expect(cpuReq.MilliValue()).To(Equal(int64(999000)),
+					"Pod spec should show the requested (infeasible) CPU since the resize API accepted it")
+			}
 		})
 
 		It("should only resize the main (first) container, not sidecar containers", func() {

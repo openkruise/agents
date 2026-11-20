@@ -240,9 +240,15 @@ func handleInPlaceUpdateCommon(
 		})
 		// ResizeNotSupportedError is returned when both the pods/resize subresource
 		// (K8s 1.33+) and the direct spec patch fallback (K8s 1.27-1.32) fail,
-		// which typically means InPlacePodVerticalScaling is not enabled.
-		// so we need treat this as terminal.
-		if errors.As(err, &resizeErr) {
+		// which typically means InPlacePodVerticalScaling is not enabled, so we
+		// need treat this as terminal.
+		// ResizeInfeasibleError is returned when the API server synchronously
+		// rejected the resize as infeasible (K8s >= 1.33 PodResizeValidator
+		// admission); retrying the same rejected request can never succeed, and
+		// control.Update already applied the image/metadata patch before
+		// returning, so this is terminal as well.
+		var infeasibleErr *inplaceupdate.ResizeInfeasibleError
+		if errors.As(err, &resizeErr) || errors.As(err, &infeasibleErr) {
 			return true, nil
 		}
 		return false, err

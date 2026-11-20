@@ -19,6 +19,7 @@ package inplaceupdate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync/atomic"
 
@@ -50,6 +51,24 @@ func (e *ResizeNotSupportedError) Error() string {
 }
 
 func (e *ResizeNotSupportedError) Unwrap() error {
+	return e.Err
+}
+
+// ResizeInfeasibleError indicates the API server synchronously rejected the
+// resize request itself as infeasible: on K8s >= 1.33 the PodResizeValidator
+// admission plugin rejects a pods/resize patch whose requests exceed the
+// node's allocatable (or whose node cannot resize at all) with a Forbidden
+// error, before the kubelet is ever involved. The resize can never be applied
+// and must not be retried; callers should treat it as terminal.
+type ResizeInfeasibleError struct {
+	Err error
+}
+
+func (e *ResizeInfeasibleError) Error() string {
+	return fmt.Sprintf("in-place pod resize infeasible: %v", e.Err)
+}
+
+func (e *ResizeInfeasibleError) Unwrap() error {
 	return e.Err
 }
 
@@ -469,6 +488,12 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 	//
 	// Therefore we MUST perform resize first: only after resources are successfully adjusted
 	// do we apply the metadata/image patch to finalize the upgrade.
+	//
+	// Exception: when the API server itself synchronously rejects the resize as
+	// infeasible (K8s >= 1.33 PodResizeValidator admission), the resize can never
+	// be applied, yet the image/metadata patch is independent of resources and
+	// still proceeds; the terminal error is returned after the patch so callers
+	// fail fast instead of retrying the rejected resize forever.
 
 	// Step 1: perform resize (resource adjustment)
 	resizeContainers := c.buildResizeContainers(InPlaceUpdateOptions{
@@ -476,6 +501,7 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 		Pod: current,
 	})
 	resourceUpdateRequired := len(resizeContainers) > 0
+	var terminalResizeErr error
 	if len(resizeContainers) > 0 {
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			err := c.resizeContainers(ctx, logger, current, resizeContainers)
@@ -498,7 +524,12 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 			logger.V(5).Info("inplace update pod resize conflict, retrying with latest resourceVersion", "resourceVersion", current.ResourceVersion)
 			return err
 		}); err != nil {
-			return false, err
+			var infeasibleErr *ResizeInfeasibleError
+			if !errors.As(err, &infeasibleErr) {
+				return false, err
+			}
+			terminalResizeErr = err
+			resourceUpdateRequired = false
 		}
 	}
 
@@ -514,11 +545,45 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 		}
 	}
 
+	if terminalResizeErr != nil {
+		return true, terminalResizeErr
+	}
 	if patchBody == "" && len(resizeContainers) == 0 {
 		return false, nil
 	}
 	logger.Info("inplace update pod success", "revision", revision, "patchBody", patchBody, "hasResizeContainers", len(resizeContainers) > 0)
 	return true, nil
+}
+
+// Causes attached by the PodResizeValidator admission plugin (K8s >= 1.33) to
+// Forbidden errors that terminally reject a pod resize: NodeCapacity when the
+// resize exceeds the node's allocatable, UnsupportedPlatform when the node
+// cannot do in-place resize at all.
+const (
+	resizeCauseNodeCapacity        metav1.CauseType = "NodeCapacity"
+	resizeCauseUnsupportedPlatform metav1.CauseType = "UnsupportedPlatform"
+)
+
+// isResizeAdmissionRejection reports whether err is a synchronous terminal
+// rejection of an infeasible resize by the PodResizeValidator admission plugin
+// (K8s >= 1.33): a Forbidden error carrying a NodeCapacity or
+// UnsupportedPlatform status cause. Transient Forbidden rejections from the
+// same plugin, e.g. "not yet ready to handle request" while its node informer
+// is still syncing, carry no such cause and must be retried by the caller.
+func isResizeAdmissionRejection(err error) bool {
+	var statusErr *apierrors.StatusError
+	if !errors.As(err, &statusErr) || statusErr.ErrStatus.Reason != metav1.StatusReasonForbidden {
+		return false
+	}
+	if statusErr.ErrStatus.Details == nil {
+		return false
+	}
+	for _, cause := range statusErr.ErrStatus.Details.Causes {
+		if cause.Type == resizeCauseNodeCapacity || cause.Type == resizeCauseUnsupportedPlatform {
+			return true
+		}
+	}
+	return false
 }
 
 // resizeContainers applies a resource resize to the pod. It patches the pods/resize subresource
@@ -533,14 +598,25 @@ func (c *InPlaceUpdateControl) resizeContainers(ctx context.Context, logger klog
 			logger.Info("inplace update pod resize succeeded via resize subresource patch (K8s >= 1.33)")
 			return nil
 		}
-		if !apierrors.IsNotFound(err) {
+		switch {
+		case apierrors.IsNotFound(err):
+			// The pods/resize subresource was introduced in K8s 1.33. On K8s 1.27-1.32,
+			// in-place pod vertical scaling is done by directly patching spec.containers[].resources.
+			logger.Info("resize subresource not found, switching to direct resource patch (K8s < 1.33)")
+			c.useDirectResourcePatch.Store(true)
+		case isResizeAdmissionRejection(err):
+			// K8s >= 1.33: the PodResizeValidator admission plugin rejects an infeasible
+			// resize synchronously, before the kubelet is involved, so no infeasibility
+			// signal is ever written to the pod status and returning the raw error would
+			// make the reconcile retry forever. The direct spec patch is not a fallback
+			// here: from K8s 1.33 the API server only accepts resource changes through
+			// the subresource, so the rejection is terminal.
+			logger.Error(err, "inplace update pod resize rejected as infeasible via resize subresource patch")
+			return &ResizeInfeasibleError{Err: err}
+		default:
 			logger.Error(err, "inplace update pod resize failed via resize subresource patch")
 			return err
 		}
-		// The pods/resize subresource was introduced in K8s 1.33. On K8s 1.27-1.32,
-		// in-place pod vertical scaling is done by directly patching spec.containers[].resources.
-		logger.Info("resize subresource not found, switching to direct resource patch (K8s < 1.33)")
-		c.useDirectResourcePatch.Store(true)
 	}
 	return c.patchPodResources(ctx, logger, pod, resizeContainers)
 }

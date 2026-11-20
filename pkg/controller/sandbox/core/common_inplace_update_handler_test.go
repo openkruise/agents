@@ -18,6 +18,8 @@ package core
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -28,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -660,6 +663,117 @@ func TestHandleInPlaceUpdateCommon_UnsupportedResizeReason(t *testing.T) {
 	}
 	if !strings.Contains(cond.Message, "in-place pod resize not supported") {
 		t.Errorf("Expected unsupported resize message, got %q", cond.Message)
+	}
+}
+
+// On K8s >= 1.33 the PodResizeValidator admission plugin rejects an infeasible
+// resize synchronously on the pods/resize subresource. The handler must treat
+// the resulting ResizeInfeasibleError as terminal (condition Failed, no retry)
+// while the image/metadata patch applied by control.Update still lands.
+func TestHandleInPlaceUpdateCommon_ResizeAdmissionRejectionFailFast(t *testing.T) {
+	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	oldPodSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:old",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+			},
+		}},
+	}
+	newPodSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:new",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+			},
+		}},
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "old-revision",
+			},
+		},
+		Spec: oldPodSpec,
+	}
+	box := buildMatchingHashBox("test-sandbox", "default", newPodSpec)
+
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "test-pod",
+		fmt.Errorf("node didn't have enough allocatable resources: cpu, requested: 500000, allocatable: 4000"))
+	var statusErr *apierrors.StatusError
+	if errors.As(forbidden, &statusErr) {
+		statusErr.ErrStatus.Details.Causes = append(statusErr.ErrStatus.Details.Causes, metav1.StatusCause{
+			Type:    metav1.CauseType("NodeCapacity"),
+			Message: "node didn't have enough allocatable resources",
+		})
+	}
+
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if sub == "resize" {
+				return forbidden
+			}
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	newStatus := &agentsv1alpha1.SandboxStatus{UpdateRevision: "new-revision"}
+	handler := &MockInPlaceUpdateHandler{
+		control:  inplaceupdate.NewInPlaceUpdateControl(wrapped, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		recorder: createTestRecorder(),
+		logger:   logr.Discard(),
+	}
+
+	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !result {
+		t.Fatal("Expected result true (infeasible resize is terminal), got false")
+	}
+
+	var cond *metav1.Condition
+	for i := range newStatus.Conditions {
+		if newStatus.Conditions[i].Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+			cond = &newStatus.Conditions[i]
+			break
+		}
+	}
+	if cond == nil {
+		t.Fatal("InplaceUpdate condition not found in status")
+	}
+	if cond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
+		t.Errorf("Expected reason %s, got %s", agentsv1alpha1.SandboxInplaceUpdateReasonFailed, cond.Reason)
+	}
+	if !strings.Contains(cond.Message, "infeasible") {
+		t.Errorf("Expected infeasible resize message, got %q", cond.Message)
+	}
+
+	// The image update is independent of resources and must still be applied.
+	updated := &corev1.Pod{}
+	if err := wrapped.Get(ctx, types.NamespacedName{Name: "test-pod", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("get updated pod: %v", err)
+	}
+	if updated.Spec.Containers[0].Image != "nginx:new" {
+		t.Errorf("Expected image update to proceed, got %q", updated.Spec.Containers[0].Image)
+	}
+	// The synchronously rejected resize never lands in the pod spec.
+	if cpu := updated.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]; cpu.MilliValue() != 250 {
+		t.Errorf("Expected cpu request to stay 250m, got %dm", cpu.MilliValue())
 	}
 }
 
