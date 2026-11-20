@@ -488,7 +488,7 @@ The pinned envd `2025.33` has synchronization risks in the subscription-cancel
 and backpressure paths; the native handler, sender and output resource cleanup
 are not yet closed. See [native Start][envd-process] and the
 [native multiplexer][envd-multiplex]. This issue and the first batch's
-commitable scope must be discussed with the maintainer; modifying or replacing
+committable scope must be discussed with the maintainer; modifying or replacing
 envd is not in this proposal's confirmed implementation scope.
 
 #### File batch and metadata handling
