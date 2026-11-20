@@ -35,7 +35,6 @@ import (
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
@@ -129,8 +128,8 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 		log.Info("route not found", "sandboxID", sandboxID)
 		return s.logAndCreateErrorResponse(http.StatusBadGateway, errorMsg, log)
 	}
-	if route.State != agentsv1alpha1.SandboxStateRunning {
-		log.Info("sandbox is not running", "sandboxID", sandboxID, "route", route)
+	if !route.CanRouteTraffic() {
+		log.Info("sandbox is not ready for traffic", "sandboxID", sandboxID, "route", route)
 		return s.logAndCreateErrorResponse(http.StatusBadGateway, errorMsg, log)
 	}
 	if extraHeaders == nil {

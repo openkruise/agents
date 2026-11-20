@@ -33,11 +33,11 @@ import (
 	"google.golang.org/grpc/status"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/utils/network"
 )
@@ -394,7 +394,48 @@ func TestServer_Process(t *testing.T) {
 		},
 		{
 			name:        "sandbox not healthy",
-			setupRoutes: []sandboxroute.Route{{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1", State: agentsv1alpha1.SandboxStateDead}},
+			setupRoutes: []sandboxroute.Route{{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1", State: sandboxstate.Dead}},
+			adapter: &testRequestAdapter{
+				isSandboxRequest: true,
+				mapResult: mapResult{
+					sandboxID:   "sandbox1",
+					sandboxPort: 9999,
+					err:         nil,
+				},
+				entry: "127.0.0.1:8080",
+			},
+			requests: []*extProcPb.ProcessingRequest{
+				{
+					Request: &extProcPb.ProcessingRequest_RequestHeaders{
+						RequestHeaders: &extProcPb.HttpHeaders{
+							Headers: &corev3.HeaderMap{
+								Headers: []*corev3.HeaderValue{
+									{Key: ":scheme", RawValue: []byte("http")},
+									{Key: ":authority", RawValue: []byte("99999-id.example.com")},
+									{Key: ":path", RawValue: []byte("/sandbox")},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+			expectResp: []*extProcPb.ProcessingResponse{
+				{
+					Response: &extProcPb.ProcessingResponse_ImmediateResponse{
+						ImmediateResponse: &extProcPb.ImmediateResponse{
+							Status: &types.HttpStatus{
+								Code: types.StatusCode(502),
+							},
+							Body: []byte("healthy sandbox sandbox1 not found"),
+						},
+					},
+				},
+			},
+		},
+		{
+			name:        "running sandbox without address",
+			setupRoutes: []sandboxroute.Route{{ID: "sandbox1", Owner: "user1", State: sandboxstate.Running}},
 			adapter: &testRequestAdapter{
 				isSandboxRequest: true,
 				mapResult: mapResult{
@@ -570,7 +611,7 @@ func TestServer_Process(t *testing.T) {
 			// Setup routes
 			for _, route := range tt.setupRoutes {
 				if route.State == "" {
-					route.State = agentsv1alpha1.SandboxStateRunning
+					route.State = sandboxstate.Running
 				}
 				if route.UID == "" {
 					route.UID = k8stypes.UID("uid-" + route.ID)

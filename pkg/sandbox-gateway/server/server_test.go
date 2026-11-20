@@ -44,12 +44,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 )
 
 func TestServeMuxRoutes(t *testing.T) {
@@ -159,7 +159,7 @@ func TestRefreshWritesInjectedRegistry(t *testing.T) {
 		Name:            "a",
 		UID:             types.UID("uid-a"),
 		ResourceVersion: "1",
-		State:           v1alpha1.SandboxStatePaused,
+		State:           sandboxstate.Paused,
 		IP:              "10.0.0.1",
 	}
 	body, err := json.Marshal(route)

@@ -29,6 +29,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
@@ -191,12 +192,17 @@ func TestConvertToE2BSandboxClaimMethodMetadata(t *testing.T) {
 }
 
 func TestConvertToE2BSandboxStateMapping(t *testing.T) {
-	// All cases use a claimed sandbox (no OwnerReferences) so that
-	// GetSandboxState uses the claimed-branch logic.
+	// Cases without OwnerReferences use the claimed-branch logic of
+	// GetSandboxState; the available case is a pool member. wantListed asserts
+	// that the default list filter agrees with the reported state. Expired and
+	// dead observations map to running for schema safety but are never listed.
+	pastTime := metav1.NewTime(time.Now().Add(-time.Hour))
+	controllerTrue := true
 	tests := []struct {
-		name      string
-		sandbox   *agentsv1alpha1.Sandbox
-		wantState string
+		name       string
+		sandbox    *agentsv1alpha1.Sandbox
+		wantState  string
+		wantListed bool
 	}{
 		{
 			name: "running but not ready is surfaced as running",
@@ -208,7 +214,8 @@ func TestConvertToE2BSandboxStateMapping(t *testing.T) {
 					},
 				},
 			},
-			wantState: agentsv1alpha1.SandboxStateRunning,
+			wantState:  models.SandboxStateRunning,
+			wantListed: true,
 		},
 		{
 			name: "running and ready is running",
@@ -220,16 +227,57 @@ func TestConvertToE2BSandboxStateMapping(t *testing.T) {
 					},
 				},
 			},
-			wantState: agentsv1alpha1.SandboxStateRunning,
+			wantState:  models.SandboxStateRunning,
+			wantListed: true,
 		},
 		{
-			name: "terminating stays dead",
+			name: "pending is excluded from lists",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPending,
+				},
+			},
+			wantState: models.SandboxStateRunning,
+		},
+		{
+			name: "terminating maps to running but is never listed",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase: agentsv1alpha1.SandboxTerminating,
 				},
 			},
-			wantState: agentsv1alpha1.SandboxStateDead,
+			wantState: models.SandboxStateRunning,
+		},
+		{
+			name: "expired deadline maps to running but is never listed",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{ShutdownTime: &pastTime},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+				},
+			},
+			wantState: models.SandboxStateRunning,
+		},
+		{
+			name: "available pool member is excluded from lists",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: agentsv1alpha1.SandboxSetControllerKind.GroupVersion().String(),
+						Kind:       agentsv1alpha1.SandboxSetControllerKind.Kind,
+						Name:       "pool",
+						UID:        "pool-uid",
+						Controller: &controllerTrue,
+					}},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			wantState: models.SandboxStateRunning,
 		},
 		{
 			name: "paused is paused",
@@ -241,116 +289,32 @@ func TestConvertToE2BSandboxStateMapping(t *testing.T) {
 					Phase: agentsv1alpha1.SandboxRunning,
 				},
 			},
-			wantState: agentsv1alpha1.SandboxStatePaused,
+			wantState:  models.SandboxStatePaused,
+			wantListed: true,
 		},
 	}
 
+	listed := getListFilter(ListSandboxesRequest{})
+	listedAsRunning := getListFilter(ListSandboxesRequest{States: []string{models.SandboxStateRunning}})
+	listedAsPaused := getListFilter(ListSandboxesRequest{States: []string{models.SandboxStatePaused}})
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sbx := &sandboxcr.Sandbox{Sandbox: tt.sandbox}
 			got := (&Controller{}).convertToE2BSandbox(sbx, "", "")
 			assert.Equal(t, tt.wantState, got.State)
+			assert.Equal(t, tt.wantListed, listed(sbx))
+			assert.Equal(t, tt.wantListed && tt.wantState == models.SandboxStateRunning, listedAsRunning(sbx))
+			assert.Equal(t, tt.wantListed && tt.wantState == models.SandboxStatePaused, listedAsPaused(sbx))
 		})
 	}
 }
 
-func TestIsSandboxViewable(t *testing.T) {
-	// All cases use a claimed sandbox (no OwnerReferences) so that
-	// GetSandboxState uses the claimed-branch logic.
-	pastTime := metav1.NewTime(time.Now().Add(-time.Hour))
-	tests := []struct {
-		name        string
-		sandbox     *agentsv1alpha1.Sandbox
-		wantVisible bool
-	}{
-		// non-viewable: terminal dead reasons
-		{
-			name: "Terminating phase is not viewable",
-			sandbox: &agentsv1alpha1.Sandbox{
-				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxTerminating},
-			},
-			wantVisible: false,
-		},
-		{
-			name: "Failed phase is not viewable",
-			sandbox: &agentsv1alpha1.Sandbox{
-				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxFailed},
-			},
-			wantVisible: false,
-		},
-		{
-			name: "Succeeded phase is not viewable",
-			sandbox: &agentsv1alpha1.Sandbox{
-				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxSucceeded},
-			},
-			wantVisible: false,
-		},
-		{
-			name: "DeletionTimestamp set is not viewable",
-			sandbox: &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &pastTime},
-			},
-			wantVisible: false,
-		},
-		// non-viewable: SandboxStateCreating
-		{
-			name: "Pending phase creating is not viewable",
-			sandbox: &agentsv1alpha1.Sandbox{
-				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
-			},
-			wantVisible: false,
-		},
-		// viewable: other dead reasons
-		{
-			name: "ShutdownTimeReached dead reason is viewable",
-			sandbox: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{ShutdownTime: &pastTime},
-			},
-			wantVisible: true,
-		},
-		{
-			name: "Running phase not ready is viewable",
-			sandbox: &agentsv1alpha1.Sandbox{
-				Status: agentsv1alpha1.SandboxStatus{
-					Phase: agentsv1alpha1.SandboxRunning,
-					Conditions: []metav1.Condition{
-						{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse},
-					},
-				},
-			},
-			wantVisible: true,
-		},
-		// viewable: normal live states
-		{
-			name: "Running and ready is viewable",
-			sandbox: &agentsv1alpha1.Sandbox{
-				Status: agentsv1alpha1.SandboxStatus{
-					Phase: agentsv1alpha1.SandboxRunning,
-					Conditions: []metav1.Condition{
-						{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
-					},
-				},
-			},
-			wantVisible: true,
-		},
-		{
-			name: "Paused is viewable",
-			sandbox: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{Paused: true},
-				Status: agentsv1alpha1.SandboxStatus{
-					Phase: agentsv1alpha1.SandboxRunning,
-				},
-			},
-			wantVisible: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sbx := &sandboxcr.Sandbox{Sandbox: tt.sandbox}
-			assert.Equal(t, tt.wantVisible, isSandboxViewable(sbx))
-		})
-	}
+func TestManagedSandboxStates(t *testing.T) {
+	assert.ElementsMatch(t, []string{
+		sandboxstate.Running,
+		sandboxstate.Paused,
+		sandboxstate.Provisioning,
+	}, managedSandboxStates)
 }
 
 func TestConvertToE2BSandboxIdentityMetadata(t *testing.T) {

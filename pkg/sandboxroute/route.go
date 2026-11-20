@@ -26,6 +26,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandboxid"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -42,6 +43,11 @@ type Route struct {
 	AccessToken        string    `json:"accessToken,omitempty"`
 	RequireTrafficAuth bool      `json:"requireTrafficAuth,omitempty"`
 	WakeOnTraffic      bool      `json:"wakeOnTraffic,omitempty"`
+}
+
+// CanRouteTraffic reports whether the sandbox is running and has a traffic address.
+func (r Route) CanRouteTraffic() bool {
+	return r.State == sandboxstate.Running && r.IP != ""
 }
 
 // String implements fmt.Stringer without exposing the access token.
@@ -88,16 +94,17 @@ func validateResourceVersion(rv string) error {
 
 // RouteFromSandbox constructs a Route from a Sandbox CR. ID, access-token,
 // and traffic-auth derivation are centralized here so every component
-// projects routes with identical compatibility policy. A sandbox without a
-// Pod IP is always treated as creating, matching the existing manager and
-// gateway behavior.
+// projects routes with identical compatibility policy.
 func RouteFromSandbox(sandbox *agentsv1alpha1.Sandbox) (Route, error) {
 	if sandbox == nil {
 		return Route{}, errors.New("project route: sandbox is nil")
 	}
 
 	ip := sandbox.Status.PodInfo.PodIP
-	state := agentsv1alpha1.SandboxStateCreating
+	// known-limit: Legacy peers route any Running payload. The legacy Route
+	// projects addressless observations as Creating until the Record/peer
+	// migration can publish lifecycle and address eligibility separately.
+	state := sandboxstate.Creating
 	if ip != "" {
 		state, _ = utils.GetSandboxState(sandbox)
 	}

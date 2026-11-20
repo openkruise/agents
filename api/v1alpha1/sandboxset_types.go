@@ -66,21 +66,6 @@ type UpdatedMetadataInClaim struct {
 	Annotations []string `json:"annotations,omitempty"`
 }
 
-const (
-	SandboxStateCreating  = "creating"
-	SandboxStateAvailable = "available"
-	SandboxStateRunning   = "running"
-	SandboxStatePaused    = "paused"
-	SandboxStateDead      = "dead"
-)
-
-// Reason values reported alongside SandboxState* by utils.GetSandboxState.
-// Exported so downstream controllers can match on them without repeating the
-// hard-coded string literal.
-const (
-	SandboxStateReasonResourcePending = "ResourcePending"
-)
-
 var SandboxSetControllerKind = GroupVersion.WithKind("SandboxSet")
 
 // SandboxSetSpec defines the desired state of SandboxSet

@@ -24,8 +24,8 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
@@ -63,7 +63,7 @@ func (sc *Controller) setSandboxTimeout(r *http.Request) *web.ApiError {
 	}
 
 	state, reason := sbx.GetState()
-	if state != v1alpha1.SandboxStateRunning {
+	if state != sandboxstate.Running {
 		log.Info("cannot set sandbox timeout for sandbox not running", "name", sbx.GetName(), "state", state, "reason", reason)
 		return withSandboxResourceContext(&web.ApiError{
 			Code:    http.StatusConflict,

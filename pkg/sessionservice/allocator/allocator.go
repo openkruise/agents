@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	session "github.com/openkruise/agents/pkg/sessionservice"
 	sessionbinding "github.com/openkruise/agents/pkg/sessionservice/binding"
 )
@@ -123,7 +124,7 @@ func servingCandidates(snapshot session.SessionServiceSnapshot, id string) []ses
 }
 
 func servingMemberAvailable(member session.SessionServiceMember) bool {
-	return !member.Deleting && member.Phase == "Running" && member.Ready && member.Route.IP != "" && member.Route.State == "running"
+	return !member.Deleting && member.Phase == "Running" && member.Ready && member.Route.CanRouteTraffic()
 }
 
 // allocationRoute excludes the member's runtime credential from admission results.
@@ -227,7 +228,7 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 				return allocationRoute(member), nil
 			}
 			// Shared routing observes a requested pause before Phase catches up.
-			if newTarget != "" || parent.Affinity == "Strict" || member.Phase == "Paused" || member.Phase == "Resuming" || member.Route.State == "paused" {
+			if newTarget != "" || parent.Affinity == "Strict" || member.Phase == "Paused" || member.Phase == "Resuming" || member.Route.State == sandboxstate.Paused {
 				return sandboxroute.Route{}, allocationUnavailable("BoundSandboxUnavailable", nil)
 			}
 			mutationStarted = true

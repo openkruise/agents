@@ -36,10 +36,10 @@ import (
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 )
 
 func TestHealthServer(t *testing.T) {
@@ -74,7 +74,7 @@ func TestNewServeMuxRefresh(t *testing.T) {
 		Name:            "a",
 		UID:             types.UID("uid-a"),
 		ResourceVersion: "1",
-		State:           v1alpha1.SandboxStatePaused,
+		State:           sandboxstate.Paused,
 		IP:              "10.0.0.1",
 	}
 	invalid := valid

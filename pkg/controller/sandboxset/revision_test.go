@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 )
 
 // newRevisionTestReconciler builds a Reconciler backed by a fake client for
@@ -746,8 +747,8 @@ func TestBuildUpdateGroupsWithLegacyRevision(t *testing.T) {
 			name: "legacy hash sandboxes treated as updated",
 			groups: GroupedSandboxes{
 				Available: []*v1alpha1.Sandbox{
-					newSandbox("a1", legacyRev, v1alpha1.SandboxStateAvailable, false, now),
-					newSandbox("a2", legacyRev, v1alpha1.SandboxStateAvailable, false, now),
+					newSandbox("a1", legacyRev, sandboxstate.Available, false, now),
+					newSandbox("a2", legacyRev, sandboxstate.Available, false, now),
 				},
 			},
 			expectUpdatedAvail: 2,
@@ -756,7 +757,7 @@ func TestBuildUpdateGroupsWithLegacyRevision(t *testing.T) {
 			name: "new hash sandboxes still treated as updated",
 			groups: GroupedSandboxes{
 				Creating: []*v1alpha1.Sandbox{
-					newSandbox("c1", newRev, v1alpha1.SandboxStateCreating, false, now),
+					newSandbox("c1", newRev, sandboxstate.Creating, false, now),
 				},
 			},
 			expectUpdatedCreating: 1,
@@ -765,7 +766,7 @@ func TestBuildUpdateGroupsWithLegacyRevision(t *testing.T) {
 			name: "truly old sandboxes still flagged as old",
 			groups: GroupedSandboxes{
 				Available: []*v1alpha1.Sandbox{
-					newSandbox("a1", oldRev, v1alpha1.SandboxStateAvailable, false, now),
+					newSandbox("a1", oldRev, sandboxstate.Available, false, now),
 				},
 			},
 			expectOldAvail: 1,
@@ -774,9 +775,9 @@ func TestBuildUpdateGroupsWithLegacyRevision(t *testing.T) {
 			name: "mixed legacy and new hashes all treated as updated",
 			groups: GroupedSandboxes{
 				Available: []*v1alpha1.Sandbox{
-					newSandbox("a1", legacyRev, v1alpha1.SandboxStateAvailable, false, now),
-					newSandbox("a2", newRev, v1alpha1.SandboxStateAvailable, false, now),
-					newSandbox("a3", oldRev, v1alpha1.SandboxStateAvailable, false, now),
+					newSandbox("a1", legacyRev, sandboxstate.Available, false, now),
+					newSandbox("a2", newRev, sandboxstate.Available, false, now),
+					newSandbox("a3", oldRev, sandboxstate.Available, false, now),
 				},
 			},
 			expectUpdatedAvail: 2,
@@ -844,9 +845,9 @@ func TestTemplateModificationTriggersRollingUpdateEndToEnd(t *testing.T) {
 	// buildUpdateGroups should classify them as Old.
 	groups := GroupedSandboxes{
 		Available: []*v1alpha1.Sandbox{
-			newSandbox("old-1", oldLegacyHash, v1alpha1.SandboxStateAvailable, false, now),
-			newSandbox("old-2", oldLegacyHash, v1alpha1.SandboxStateAvailable, false, now),
-			newSandbox("old-3", oldLegacyHash, v1alpha1.SandboxStateAvailable, false, now),
+			newSandbox("old-1", oldLegacyHash, sandboxstate.Available, false, now),
+			newSandbox("old-2", oldLegacyHash, sandboxstate.Available, false, now),
+			newSandbox("old-3", oldLegacyHash, sandboxstate.Available, false, now),
 		},
 	}
 
@@ -863,9 +864,9 @@ func TestTemplateModificationTriggersRollingUpdateEndToEnd(t *testing.T) {
 	// Verify they're correctly classified as Updated.
 	newGroups := GroupedSandboxes{
 		Available: []*v1alpha1.Sandbox{
-			newSandbox("new-1", newUpdateRevision, v1alpha1.SandboxStateAvailable, false, now),
-			newSandbox("new-2", newUpdateRevision, v1alpha1.SandboxStateAvailable, false, now),
-			newSandbox("new-3", newUpdateRevision, v1alpha1.SandboxStateAvailable, false, now),
+			newSandbox("new-1", newUpdateRevision, sandboxstate.Available, false, now),
+			newSandbox("new-2", newUpdateRevision, sandboxstate.Available, false, now),
+			newSandbox("new-3", newUpdateRevision, sandboxstate.Available, false, now),
 		},
 	}
 

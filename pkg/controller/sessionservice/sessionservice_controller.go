@@ -48,6 +48,7 @@ import (
 
 	agents "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	sessionbinding "github.com/openkruise/agents/pkg/sessionservice/binding"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -1053,7 +1054,7 @@ func bindingTargetReady(parent *agents.SessionService, box *agents.Sandbox) bool
 		return false
 	}
 	state, _ := utils.GetSandboxState(box)
-	return state == agents.SandboxStateRunning
+	return state == sandboxstate.Running
 }
 
 // patchBindings changes only the binding annotation and uses the decision's

@@ -301,7 +301,8 @@ type Sandbox interface {
 	Pause(ctx context.Context, opts PauseOptions) error   // Pause a Sandbox
 	Resume(ctx context.Context, opts ResumeOptions) error // Resume a paused Sandbox
 	GetIP() string
-	GetState() (string, string) // Get Sandbox State (pending, running, paused, killing, etc.)
+	// GetState returns a pkg/sandboxstate value and a backend diagnostic reason.
+	GetState() (string, string)
 	// GetSandboxID returns the label-aware public Sandbox ID: the short ID from
 	// the sandbox-id label when assigned, otherwise the legacy namespace--name form.
 	GetSandboxID() string

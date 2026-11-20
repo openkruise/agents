@@ -26,6 +26,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -130,7 +131,7 @@ func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1
 			return false, nil
 		}
 		state, _ := utils.GetSandboxState(s)
-		return state == agentsv1alpha1.SandboxStateRunning && s.Status.PodInfo.PodIP != "", nil
+		return state == sandboxstate.Running && s.Status.PodInfo.PodIP != "", nil
 	}
 	return cacheutils.NewWaitTask[*agentsv1alpha1.Sandbox](
 		ctx, c.waitHooks, cacheutils.WaitActionWaitReady, sbx, c.SandboxUpdateFunc(ctx), check,

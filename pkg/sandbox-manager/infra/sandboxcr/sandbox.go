@@ -516,6 +516,13 @@ func (s *Sandbox) Request(ctx context.Context, method, path string, port int, bo
 	return proxyutils.DefaultRequestFunc(ctx, s.Sandbox, method, path, port, body)
 }
 
+func validatePause(sbx *agentsv1alpha1.Sandbox) error {
+	if pausable, reason := utils.IsSandboxPausable(sbx); !pausable {
+		return errors.NewError(errors.ErrorConflict, "sandbox is not pausable, reason: %s", reason)
+	}
+	return nil
+}
+
 func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraPause)
 	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
@@ -525,8 +532,8 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error
 	if err := s.refreshFromAPIReader(ctx); err != nil {
 		return err
 	}
-	if pausable, reason := utils.IsSandboxPausable(s.Sandbox); !pausable {
-		return errors.NewError(errors.ErrorConflict, "sandbox is not pausable, reason: %s", reason)
+	if err := validatePause(s.Sandbox); err != nil {
+		return err
 	}
 
 	cond := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
@@ -547,6 +554,13 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error
 			// Pause is first-writer-wins: only the request that flips Spec.Paused
 			// from false to true may update timeout fields or annotations.
 			return false, nil
+		}
+		// A stale informer write conflicts on resourceVersion. Only a current
+		// observation can supersede the admission decision from the API reader.
+		if expectations.IsResourceVersionNewer(s.ResourceVersion, sbx.ResourceVersion) {
+			if err := validatePause(sbx); err != nil {
+				return false, err
+			}
 		}
 		sbx.Spec.Paused = true
 		if opts.Timeout != nil {

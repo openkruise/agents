@@ -26,6 +26,10 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 )
 
+// The SandboxState constants mirror the upstream E2B API state schema, which
+// enumerates only running and paused. Do not add or change values here unless
+// the E2B schema itself changes; internal lifecycle states must be mapped onto
+// these values (see e2bSandboxState) or kept out of responses entirely.
 const (
 	SandboxStateRunning = "running"
 	SandboxStatePaused  = "paused"

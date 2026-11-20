@@ -38,21 +38,11 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 	log := klog.FromContext(r.Context())
 	log.Info("describe sandbox", "id", id)
 
-	// Use claimedSandboxStates so that transient dead states can be inspected
-	// before deciding whether the sandbox is still viewable from the E2B API.
-	sbx, err := sc.getSandboxOfUser(r.Context(), id, claimedSandboxStates)
+	sbx, err := sc.getSandboxOfUser(r.Context(), id, managedSandboxStates)
 	if err != nil {
 		log.Error(err, "failed to get sandbox", "id", id)
 		return web.ApiResponse[*models.Sandbox]{}, err
 	}
-	if !isSandboxViewable(sbx) {
-		log.Info("sandbox is not viewable, treating as not found", "id", id)
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Code:    http.StatusNotFound,
-			Message: fmt.Sprintf("Cannot get sandbox %s: sandbox not found", id),
-		}
-	}
-
 	domain, apiErr := sc.resolveSandboxDomain(r)
 	if apiErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
@@ -88,7 +78,7 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		}
 	}
 
-	sbx, apiError := sc.getSandboxOfUser(r.Context(), id, claimedSandboxStates)
+	sbx, apiError := sc.getSandboxOfUser(r.Context(), id, managedSandboxStates)
 	if apiError != nil {
 		if apiError.Code == http.StatusNotFound {
 			log.Info("sandbox not found, just return success", "id", id)
@@ -99,13 +89,6 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		log.Error(apiError, "failed to get sandbox", "id", id)
 		return web.ApiResponse[struct{}]{}, apiError
 	}
-	if !isSandboxViewable(sbx) {
-		log.Info("sandbox is not viewable, just return success", "id", id)
-		return web.ApiResponse[struct{}]{
-			Code: http.StatusNoContent,
-		}, nil
-	}
-
 	quotaSpec := user.QuotaSpec
 	if quotaSpec != nil {
 		quotaSpec = quotaSpec.DeepCopy()

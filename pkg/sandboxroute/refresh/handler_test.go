@@ -28,8 +28,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 )
 
 type mutationCall struct {
@@ -93,7 +93,7 @@ func TestHandler(t *testing.T) {
 			name: "legacy ID-only route is ignored",
 			route: &sandboxroute.Route{
 				ID:    "legacy",
-				State: v1alpha1.SandboxStateDead,
+				State: sandboxstate.Dead,
 			},
 			expectStatus: http.StatusNoContent,
 		},
@@ -102,7 +102,7 @@ func TestHandler(t *testing.T) {
 			route: &sandboxroute.Route{
 				Namespace: "ns",
 				Name:      "sandbox",
-				State:     v1alpha1.SandboxStateDead,
+				State:     sandboxstate.Dead,
 			},
 			expectStatus: http.StatusBadRequest,
 		},
@@ -111,7 +111,7 @@ func TestHandler(t *testing.T) {
 			route: &sandboxroute.Route{
 				Namespace:       "ns",
 				Name:            "sandbox",
-				State:           v1alpha1.SandboxStateDead,
+				State:           sandboxstate.Dead,
 				ResourceVersion: "2",
 			},
 			deleteResult:     applied,
@@ -145,7 +145,7 @@ func TestHandler(t *testing.T) {
 		},
 		{
 			name:             "running route is upserted",
-			route:            fullRoute(v1alpha1.SandboxStateRunning, "1"),
+			route:            fullRoute(sandboxstate.Running, "1"),
 			upsertResult:     applied,
 			expectStatus:     http.StatusNoContent,
 			expectOperation:  "upsert",
@@ -154,7 +154,7 @@ func TestHandler(t *testing.T) {
 		},
 		{
 			name:             "available route is upserted and ignored result succeeds",
-			route:            fullRoute(v1alpha1.SandboxStateAvailable, "1"),
+			route:            fullRoute(sandboxstate.Available, "1"),
 			upsertResult:     ignored,
 			expectStatus:     http.StatusNoContent,
 			expectOperation:  "upsert",
@@ -163,7 +163,7 @@ func TestHandler(t *testing.T) {
 		},
 		{
 			name:             "paused route is upserted",
-			route:            fullRoute(v1alpha1.SandboxStatePaused, "1"),
+			route:            fullRoute(sandboxstate.Paused, "1"),
 			upsertResult:     applied,
 			expectStatus:     http.StatusNoContent,
 			expectOperation:  "upsert",
@@ -172,12 +172,30 @@ func TestHandler(t *testing.T) {
 		},
 		{
 			name:             "creating route is upserted with nil callback",
-			route:            fullRoute(v1alpha1.SandboxStateCreating, "1"),
+			route:            fullRoute(sandboxstate.Creating, "1"),
 			upsertResult:     applied,
 			nilAfterMutation: true,
 			expectStatus:     http.StatusNoContent,
 			expectOperation:  "upsert",
 			expectMutations:  1,
+		},
+		{
+			name:             "provisioning route is upserted",
+			route:            fullRoute(sandboxstate.Provisioning, "1"),
+			upsertResult:     applied,
+			expectStatus:     http.StatusNoContent,
+			expectOperation:  "upsert",
+			expectMutations:  1,
+			expectAfterCalls: 1,
+		},
+		{
+			name:             "expired route is upserted",
+			route:            fullRoute(sandboxstate.Expired, "1"),
+			upsertResult:     applied,
+			expectStatus:     http.StatusNoContent,
+			expectOperation:  "upsert",
+			expectMutations:  1,
+			expectAfterCalls: 1,
 		},
 		{
 			name:             "unknown non-dead state is upserted",
@@ -194,7 +212,7 @@ func TestHandler(t *testing.T) {
 				ID:              "short",
 				Namespace:       "ns",
 				UID:             types.UID("uid"),
-				State:           v1alpha1.SandboxStateRunning,
+				State:           sandboxstate.Running,
 				ResourceVersion: "1",
 			},
 			upsertResult:     invalid,
@@ -205,7 +223,7 @@ func TestHandler(t *testing.T) {
 		},
 		{
 			name:             "malformed resource version delegates validation",
-			route:            fullRoute(v1alpha1.SandboxStateRunning, "invalid"),
+			route:            fullRoute(sandboxstate.Running, "invalid"),
 			upsertResult:     invalid,
 			expectStatus:     http.StatusBadRequest,
 			expectOperation:  "upsert",
@@ -217,7 +235,7 @@ func TestHandler(t *testing.T) {
 			route: &sandboxroute.Route{
 				Namespace:       "ns",
 				Name:            "sandbox",
-				State:           v1alpha1.SandboxStateDead,
+				State:           sandboxstate.Dead,
 				ResourceVersion: "invalid",
 			},
 			deleteResult:     invalid,

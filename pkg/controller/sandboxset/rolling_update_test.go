@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 )
 
 func newSandbox(name, hash string, state string, claimed bool, createdAt time.Time) *v1alpha1.Sandbox {
@@ -56,9 +57,9 @@ func newSandbox(name, hash string, state string, claimed bool, createdAt time.Ti
 		}, v1alpha1.SandboxSetControllerKind),
 	}
 	switch state {
-	case v1alpha1.SandboxStateCreating:
+	case sandboxstate.Creating:
 		sbx.Status.Phase = v1alpha1.SandboxRunning
-	case v1alpha1.SandboxStateAvailable:
+	case sandboxstate.Available:
 		sbx.Status.Phase = v1alpha1.SandboxRunning
 		sbx.Status.PodInfo.PodIP = "1.2.3.4"
 		sbx.Status.Conditions = []metav1.Condition{
@@ -118,8 +119,8 @@ func TestBuildUpdateGroups(t *testing.T) {
 		{
 			name: "all updated",
 			groups: GroupedSandboxes{
-				Creating:  []*v1alpha1.Sandbox{newSandbox("c1", updateRev, v1alpha1.SandboxStateCreating, false, now)},
-				Available: []*v1alpha1.Sandbox{newSandbox("a1", updateRev, v1alpha1.SandboxStateAvailable, false, now)},
+				Creating:  []*v1alpha1.Sandbox{newSandbox("c1", updateRev, sandboxstate.Creating, false, now)},
+				Available: []*v1alpha1.Sandbox{newSandbox("a1", updateRev, sandboxstate.Available, false, now)},
 			},
 			updateRevision:        updateRev,
 			expectUpdatedCreating: 1,
@@ -128,8 +129,8 @@ func TestBuildUpdateGroups(t *testing.T) {
 		{
 			name: "all old",
 			groups: GroupedSandboxes{
-				Creating:  []*v1alpha1.Sandbox{newSandbox("c1", oldRev, v1alpha1.SandboxStateCreating, false, now)},
-				Available: []*v1alpha1.Sandbox{newSandbox("a1", oldRev, v1alpha1.SandboxStateAvailable, false, now)},
+				Creating:  []*v1alpha1.Sandbox{newSandbox("c1", oldRev, sandboxstate.Creating, false, now)},
+				Available: []*v1alpha1.Sandbox{newSandbox("a1", oldRev, sandboxstate.Available, false, now)},
 			},
 			updateRevision:    updateRev,
 			expectOldCreating: 1,
@@ -139,13 +140,13 @@ func TestBuildUpdateGroups(t *testing.T) {
 			name: "mixed old and new",
 			groups: GroupedSandboxes{
 				Creating: []*v1alpha1.Sandbox{
-					newSandbox("c1", updateRev, v1alpha1.SandboxStateCreating, false, now),
-					newSandbox("c2", oldRev, v1alpha1.SandboxStateCreating, false, now),
+					newSandbox("c1", updateRev, sandboxstate.Creating, false, now),
+					newSandbox("c2", oldRev, sandboxstate.Creating, false, now),
 				},
 				Available: []*v1alpha1.Sandbox{
-					newSandbox("a1", updateRev, v1alpha1.SandboxStateAvailable, false, now),
-					newSandbox("a2", oldRev, v1alpha1.SandboxStateAvailable, false, now),
-					newSandbox("a3", oldRev, v1alpha1.SandboxStateAvailable, false, now),
+					newSandbox("a1", updateRev, sandboxstate.Available, false, now),
+					newSandbox("a2", oldRev, sandboxstate.Available, false, now),
+					newSandbox("a3", oldRev, sandboxstate.Available, false, now),
 				},
 			},
 			updateRevision:        updateRev,
@@ -158,11 +159,11 @@ func TestBuildUpdateGroups(t *testing.T) {
 			name: "claimed sandboxes are excluded",
 			groups: GroupedSandboxes{
 				Creating: []*v1alpha1.Sandbox{
-					newSandbox("c1", oldRev, v1alpha1.SandboxStateCreating, true, now),
+					newSandbox("c1", oldRev, sandboxstate.Creating, true, now),
 				},
 				Available: []*v1alpha1.Sandbox{
-					newSandbox("a1", oldRev, v1alpha1.SandboxStateAvailable, true, now),
-					newSandbox("a2", oldRev, v1alpha1.SandboxStateAvailable, false, now),
+					newSandbox("a1", oldRev, sandboxstate.Available, true, now),
+					newSandbox("a2", oldRev, sandboxstate.Available, false, now),
 				},
 			},
 			updateRevision: updateRev,
@@ -171,8 +172,8 @@ func TestBuildUpdateGroups(t *testing.T) {
 		{
 			name: "used and dead sandboxes are not in groups",
 			groups: GroupedSandboxes{
-				Used: []*v1alpha1.Sandbox{newSandbox("u1", oldRev, v1alpha1.SandboxStateRunning, false, now)},
-				Dead: []*v1alpha1.Sandbox{newSandbox("d1", oldRev, v1alpha1.SandboxStateDead, false, now)},
+				Used: []*v1alpha1.Sandbox{newSandbox("u1", oldRev, sandboxstate.Running, false, now)},
+				Dead: []*v1alpha1.Sandbox{newSandbox("d1", oldRev, sandboxstate.Dead, false, now)},
 			},
 			updateRevision: updateRev,
 		},
@@ -211,15 +212,15 @@ func TestNeedsUpdate(t *testing.T) {
 func TestIsSandboxClaimed(t *testing.T) {
 	now := time.Now()
 	// unclaimed sandbox
-	unclaimed := newSandbox("s1", "rev", v1alpha1.SandboxStateAvailable, false, now)
+	unclaimed := newSandbox("s1", "rev", sandboxstate.Available, false, now)
 	assert.False(t, isSandboxClaimed(unclaimed))
 
 	// claimed via label
-	claimed := newSandbox("s2", "rev", v1alpha1.SandboxStateAvailable, true, now)
+	claimed := newSandbox("s2", "rev", sandboxstate.Available, true, now)
 	assert.True(t, isSandboxClaimed(claimed))
 
 	// claimed via removed owner reference
-	noOwner := newSandbox("s3", "rev", v1alpha1.SandboxStateAvailable, false, now)
+	noOwner := newSandbox("s3", "rev", sandboxstate.Available, false, now)
 	noOwner.OwnerReferences = nil
 	assert.True(t, isSandboxClaimed(noOwner))
 }
@@ -374,16 +375,16 @@ func TestCalculateUpdateInfo(t *testing.T) {
 			sbs := newSandboxSetForUpdate(tt.replicas, tt.maxUnavailable)
 			ug := &UpdateGroupedSandboxes{}
 			for i := 0; i < tt.updatedCreating; i++ {
-				ug.UpdatedCreating = append(ug.UpdatedCreating, newSandbox("uc"+string(rune('0'+i)), updateRev, v1alpha1.SandboxStateCreating, false, now))
+				ug.UpdatedCreating = append(ug.UpdatedCreating, newSandbox("uc"+string(rune('0'+i)), updateRev, sandboxstate.Creating, false, now))
 			}
 			for i := 0; i < tt.updatedAvailable; i++ {
-				ug.UpdatedAvailable = append(ug.UpdatedAvailable, newSandbox("ua"+string(rune('0'+i)), updateRev, v1alpha1.SandboxStateAvailable, false, now))
+				ug.UpdatedAvailable = append(ug.UpdatedAvailable, newSandbox("ua"+string(rune('0'+i)), updateRev, sandboxstate.Available, false, now))
 			}
 			for i := 0; i < tt.oldCreating; i++ {
-				ug.OldCreating = append(ug.OldCreating, newSandbox("oc"+string(rune('0'+i)), oldRev, v1alpha1.SandboxStateCreating, false, now))
+				ug.OldCreating = append(ug.OldCreating, newSandbox("oc"+string(rune('0'+i)), oldRev, sandboxstate.Creating, false, now))
 			}
 			for i := 0; i < tt.oldAvailable; i++ {
-				ug.OldAvailable = append(ug.OldAvailable, newSandbox("oa"+string(rune('0'+i)), oldRev, v1alpha1.SandboxStateAvailable, false, now))
+				ug.OldAvailable = append(ug.OldAvailable, newSandbox("oa"+string(rune('0'+i)), oldRev, sandboxstate.Available, false, now))
 			}
 
 			info := calculateUpdateInfo(sbs, ug)
@@ -430,13 +431,13 @@ func TestCalculateUpdateInfo_OldCreatingFreeDelete(t *testing.T) {
 	sbs := newSandboxSetForUpdate(5, intOrStringPtr(intstr.FromInt(0)))
 	ug := &UpdateGroupedSandboxes{
 		UpdatedAvailable: []*v1alpha1.Sandbox{
-			newSandbox("ua1", "new", v1alpha1.SandboxStateAvailable, false, now),
-			newSandbox("ua2", "new", v1alpha1.SandboxStateAvailable, false, now),
-			newSandbox("ua3", "new", v1alpha1.SandboxStateAvailable, false, now),
+			newSandbox("ua1", "new", sandboxstate.Available, false, now),
+			newSandbox("ua2", "new", sandboxstate.Available, false, now),
+			newSandbox("ua3", "new", sandboxstate.Available, false, now),
 		},
 		OldCreating: []*v1alpha1.Sandbox{
-			newSandbox("oc1", "old", v1alpha1.SandboxStateCreating, false, now),
-			newSandbox("oc2", "old", v1alpha1.SandboxStateCreating, false, now),
+			newSandbox("oc1", "old", sandboxstate.Creating, false, now),
+			newSandbox("oc2", "old", sandboxstate.Creating, false, now),
 		},
 	}
 
@@ -581,7 +582,7 @@ func TestReconcile_RollingUpdate_SurgeGate(t *testing.T) {
 	// Now simulate the pending sandbox being observed (expectation cleared).
 	scaleUpExpectation.ObserveScale(controllerKey, "create", "pending-sandbox")
 	// Add the "observed" sandbox to the fake client so groupAllSandboxes sees it.
-	observed := newSandbox("pending-sandbox", newHash, v1alpha1.SandboxStateCreating, false, now)
+	observed := newSandbox("pending-sandbox", newHash, sandboxstate.Creating, false, now)
 	observed.OwnerReferences = []metav1.OwnerReference{
 		*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind),
 	}
@@ -689,9 +690,9 @@ func TestFindOldestSandboxes(t *testing.T) {
 		{
 			name: "k equals length - returns all sandboxes",
 			sandboxes: []*v1alpha1.Sandbox{
-				newSandbox("sbx-1", "hash1", v1alpha1.SandboxStateAvailable, false, now.Add(-3*time.Hour)),
-				newSandbox("sbx-2", "hash2", v1alpha1.SandboxStateAvailable, false, now.Add(-1*time.Hour)),
-				newSandbox("sbx-3", "hash3", v1alpha1.SandboxStateAvailable, false, now.Add(-2*time.Hour)),
+				newSandbox("sbx-1", "hash1", sandboxstate.Available, false, now.Add(-3*time.Hour)),
+				newSandbox("sbx-2", "hash2", sandboxstate.Available, false, now.Add(-1*time.Hour)),
+				newSandbox("sbx-3", "hash3", sandboxstate.Available, false, now.Add(-2*time.Hour)),
 			},
 			k:         3,
 			wantNames: []string{"sbx-1", "sbx-3", "sbx-2"},
@@ -699,8 +700,8 @@ func TestFindOldestSandboxes(t *testing.T) {
 		{
 			name: "k greater than length - returns all sandboxes",
 			sandboxes: []*v1alpha1.Sandbox{
-				newSandbox("sbx-1", "hash1", v1alpha1.SandboxStateAvailable, false, now.Add(-2*time.Hour)),
-				newSandbox("sbx-2", "hash2", v1alpha1.SandboxStateAvailable, false, now.Add(-1*time.Hour)),
+				newSandbox("sbx-1", "hash1", sandboxstate.Available, false, now.Add(-2*time.Hour)),
+				newSandbox("sbx-2", "hash2", sandboxstate.Available, false, now.Add(-1*time.Hour)),
 			},
 			k:         5,
 			wantNames: []string{"sbx-1", "sbx-2"},
@@ -708,9 +709,9 @@ func TestFindOldestSandboxes(t *testing.T) {
 		{
 			name: "k equals 1 - returns oldest sandbox",
 			sandboxes: []*v1alpha1.Sandbox{
-				newSandbox("sbx-1", "hash1", v1alpha1.SandboxStateAvailable, false, now.Add(-2*time.Hour)),
-				newSandbox("sbx-2", "hash2", v1alpha1.SandboxStateAvailable, false, now.Add(-3*time.Hour)),
-				newSandbox("sbx-3", "hash3", v1alpha1.SandboxStateAvailable, false, now.Add(-1*time.Hour)),
+				newSandbox("sbx-1", "hash1", sandboxstate.Available, false, now.Add(-2*time.Hour)),
+				newSandbox("sbx-2", "hash2", sandboxstate.Available, false, now.Add(-3*time.Hour)),
+				newSandbox("sbx-3", "hash3", sandboxstate.Available, false, now.Add(-1*time.Hour)),
 			},
 			k:         1,
 			wantNames: []string{"sbx-2"},
@@ -718,11 +719,11 @@ func TestFindOldestSandboxes(t *testing.T) {
 		{
 			name: "k less than length - returns k oldest sandboxes",
 			sandboxes: []*v1alpha1.Sandbox{
-				newSandbox("sbx-1", "hash1", v1alpha1.SandboxStateAvailable, false, now.Add(-5*time.Hour)),
-				newSandbox("sbx-2", "hash2", v1alpha1.SandboxStateAvailable, false, now.Add(-2*time.Hour)),
-				newSandbox("sbx-3", "hash3", v1alpha1.SandboxStateAvailable, false, now.Add(-4*time.Hour)),
-				newSandbox("sbx-4", "hash4", v1alpha1.SandboxStateAvailable, false, now.Add(-1*time.Hour)),
-				newSandbox("sbx-5", "hash5", v1alpha1.SandboxStateAvailable, false, now.Add(-3*time.Hour)),
+				newSandbox("sbx-1", "hash1", sandboxstate.Available, false, now.Add(-5*time.Hour)),
+				newSandbox("sbx-2", "hash2", sandboxstate.Available, false, now.Add(-2*time.Hour)),
+				newSandbox("sbx-3", "hash3", sandboxstate.Available, false, now.Add(-4*time.Hour)),
+				newSandbox("sbx-4", "hash4", sandboxstate.Available, false, now.Add(-1*time.Hour)),
+				newSandbox("sbx-5", "hash5", sandboxstate.Available, false, now.Add(-3*time.Hour)),
 			},
 			k:         3,
 			wantNames: []string{"sbx-1", "sbx-3", "sbx-5"},
@@ -736,7 +737,7 @@ func TestFindOldestSandboxes(t *testing.T) {
 		{
 			name: "k equals 0 - returns empty",
 			sandboxes: []*v1alpha1.Sandbox{
-				newSandbox("sbx-1", "hash1", v1alpha1.SandboxStateAvailable, false, now.Add(-1*time.Hour)),
+				newSandbox("sbx-1", "hash1", sandboxstate.Available, false, now.Add(-1*time.Hour)),
 			},
 			k:         0,
 			wantNames: []string{},
@@ -744,9 +745,9 @@ func TestFindOldestSandboxes(t *testing.T) {
 		{
 			name: "sandboxes with same creation time - maintains order",
 			sandboxes: []*v1alpha1.Sandbox{
-				newSandbox("sbx-1", "hash1", v1alpha1.SandboxStateAvailable, false, now),
-				newSandbox("sbx-2", "hash2", v1alpha1.SandboxStateAvailable, false, now),
-				newSandbox("sbx-3", "hash3", v1alpha1.SandboxStateAvailable, false, now),
+				newSandbox("sbx-1", "hash1", sandboxstate.Available, false, now),
+				newSandbox("sbx-2", "hash2", sandboxstate.Available, false, now),
+				newSandbox("sbx-3", "hash3", sandboxstate.Available, false, now),
 			},
 			k:         2,
 			wantNames: []string{"sbx-1", "sbx-2"},
