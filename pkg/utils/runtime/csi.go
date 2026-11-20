@@ -85,6 +85,93 @@ func CSIMount(ctx context.Context, sbx *agentsv1alpha1.Sandbox, driver string, r
 	return nil
 }
 
+// CSIUnmount reverses one dynamic mount by running the sandbox-storage CLI
+// inside the Sandbox, with the same --config contract as CSIMount: the
+// base64-encoded NodePublishVolumeRequest the mount was issued with.
+//
+// Unlike CSIMount, the rtOpts are forwarded to RunCommandWithRuntime instead of
+// being dropped: even a TLS-capable sandbox takes the CLI path for unmount
+// (the runtime storage API has no unmount endpoint yet), and the transport
+// decision still has to reach the process call.
+func CSIUnmount(ctx context.Context, sbx *agentsv1alpha1.Sandbox, driver string, request string, rtOpts ...Option) error {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+	startTime := time.Now()
+	processConfig := &process.ProcessConfig{
+		Cmd: MountCommand,
+		Args: []string{
+			"unmount",
+			"--driver", driver,
+			"--config", request,
+		},
+		Cwd: nil,
+		Envs: map[string]string{
+			"POD_UID": string(sbx.Status.PodInfo.PodUID),
+		},
+	}
+
+	result, err := RunCommandWithRuntime(ctx, RunCmdFuncArgs{
+		Sbx:           sbx,
+		ProcessConfig: processConfig,
+		Timeout:       30 * time.Second,
+		// The unmount CLI manipulates mounts inside the sandbox and must run as root.
+		AuthUser: "root",
+	}, rtOpts...)
+	if err != nil {
+		log.Error(err, "failed to run command", "stdout", result.Stdout, "stderr", result.Stderr)
+		return err
+	}
+	if result.ExitCode != 0 {
+		err = fmt.Errorf("command failed: [%d] %s", result.ExitCode, result.Stderr)
+		log.Error(err, "command failed", "exitCode", result.ExitCode)
+		return err
+	}
+	log.Info("execute csi unmount command", "driverName", driver, "unmountCost", time.Since(startTime))
+	return nil
+}
+
+// runConcurrentCSI is the shared scheduling skeleton of ProcessCSIMounts and
+// ProcessCSIUnmounts: it applies fn to every entry concurrently, bounded by a
+// semaphore, and joins all errors (via errors.Join) with the total wall-clock
+// duration. The concurrency scaffolding lives in exactly this one place; the
+// per-entry semantics (transport dispatch, driver-scoped logging) stay with
+// the caller's fn.
+// If concurrency is 0 or negative, config.DefaultCSIMountConcurrency applies.
+func runConcurrentCSI[T any](ctx context.Context, sbx *agentsv1alpha1.Sandbox, list []T, concurrency int,
+	fn func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, index int, entry T) (time.Duration, error),
+) (time.Duration, error) {
+	start := time.Now()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(list))
+
+	// Use a semaphore channel to limit concurrency
+	if concurrency <= 0 {
+		concurrency = config.DefaultCSIMountConcurrency
+	}
+	sem := make(chan struct{}, concurrency)
+
+	for i, entry := range list {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, entry T) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if _, err := fn(ctx, sbx, i, entry); err != nil {
+				errCh <- err
+			}
+		}(i, entry)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+	return time.Since(start), errors.Join(errs...)
+}
+
 // ProcessCSIMounts performs CSI volume mounting operations for all mount configurations concurrently.
 // It uses opts.Concurrency to limit the number of concurrent mount goroutines.
 // If Concurrency is 0 or negative, it defaults to config.DefaultCSIMountConcurrency.
@@ -98,24 +185,8 @@ func CSIMount(ctx context.Context, sbx *agentsv1alpha1.Sandbox, driver string, r
 // pre-TLS sandboxes keep their existing behavior untouched.
 func ProcessCSIMounts(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.CSIMountOptions, rtOpts ...Option) (time.Duration, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	start := time.Now()
-
-	var wg sync.WaitGroup
-	errCh := make(chan error, len(opts.MountOptionList))
-
-	// Use a semaphore channel to limit concurrency
-	concurrency := opts.Concurrency
-	if concurrency <= 0 {
-		concurrency = config.DefaultCSIMountConcurrency
-	}
-	sem := make(chan struct{}, concurrency)
-
-	for i, opt := range opts.MountOptionList {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, opt config.MountConfig) {
-			defer wg.Done()
-			defer func() { <-sem }()
+	return runConcurrentCSI(ctx, sbx, opts.MountOptionList, opts.Concurrency,
+		func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, i int, opt config.MountConfig) (time.Duration, error) {
 			// Never log the MountConfig itself: PublishRequest carries the volume
 			// Secrets and PublishContext (see MountConfig.PublishRequest). The driver
 			// plus the position in the list is enough to correlate an entry with
@@ -123,24 +194,14 @@ func ProcessCSIMounts(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts con
 			mountDuration, err := doCSIMount(ctx, sbx, opt, rtOpts...)
 			if err != nil {
 				log.Error(err, "failed to perform CSI mount", "driver", opt.Driver, "mountIndex", i)
-				errCh <- err
-				return
+				return mountDuration, err
 			}
 			log.Info("CSI mount completed successfully",
 				"driver", opt.Driver,
 				"mountIndex", i,
 				"duration", mountDuration)
-		}(i, opt)
-	}
-
-	wg.Wait()
-	close(errCh)
-
-	var errs []error
-	for err := range errCh {
-		errs = append(errs, err)
-	}
-	return time.Since(start), errors.Join(errs...)
+			return mountDuration, nil
+		})
 }
 
 // doCSIMount performs a single CSI mount, dispatching between the two coexisting
@@ -192,6 +253,71 @@ func encodePublishRequest(publishRequest *csi.NodePublishVolumeRequest) (string,
 	data, err := proto.Marshal(protoadapt.MessageV2Of(publishRequest))
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal csi publish request: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+// ProcessCSIUnmounts unmounts all CSI mounts of a sandbox concurrently, mirroring
+// ProcessCSIMounts. It consumes CSIUnmountOptions: the resolved UnmountConfig
+// entries carry a NodeUnpublishVolumeRequest each (see MountConfig.ToUnmountConfig
+// for how one is derived from a MountConfig).
+// It uses opts.Concurrency to limit the number of concurrent unmount goroutines;
+// if Concurrency is 0 or negative, config.DefaultCSIMountConcurrency applies.
+// Returns the total duration spent on all unmount operations and all encountered
+// errors (joined via errors.Join).
+func ProcessCSIUnmounts(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.CSIUnmountOptions, rtOpts ...Option) (time.Duration, error) {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+	return runConcurrentCSI(ctx, sbx, opts.UnmountOptionList, opts.Concurrency,
+		func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, i int, opt config.UnmountConfig) (time.Duration, error) {
+			// The unpublish request carries no credentials by construction, but
+			// keep the mount-side discipline of never logging the config itself;
+			// the driver plus the position in the list is enough to correlate an
+			// entry with its per-mount logs, which add the target path.
+			unmountDuration, err := doCSIUnmount(ctx, sbx, opt, rtOpts...)
+			if err != nil {
+				log.Error(err, "failed to perform CSI unmount", "driver", opt.Driver, "mountIndex", i)
+				return unmountDuration, err
+			}
+			log.Info("CSI unmount completed successfully",
+				"driver", opt.Driver,
+				"mountIndex", i,
+				"duration", unmountDuration)
+			return unmountDuration, nil
+		})
+}
+
+// doCSIUnmount performs a single CSI unmount. Unlike doCSIMount there is no
+// runtime-storage-API branch: the /v1/storage endpoint has no unmount operation
+// yet, so the unmount always travels through the sandbox-storage CLI over the
+// envd process protocol. rtOpts is still forwarded so a TLS-capable sandbox
+// reaches the process endpoint over HTTPS.
+func doCSIUnmount(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.UnmountConfig, rtOpts ...Option) (time.Duration, error) {
+	ctx = logs.Extend(ctx, "action", "csiUnmount")
+	start := time.Now()
+	// The CLI consumes an opaque blob, so encode the message here — the last
+	// step before it becomes a command-line argument.
+	requestRaw, err := encodeUnpublishRequest(opts.UnpublishRequest)
+	if err != nil {
+		return time.Since(start), fmt.Errorf("failed to encode csi unpublish request for driver %q: %w", opts.Driver, err)
+	}
+	// Keep the unmount and the elapsed time in separate statements: in a return
+	// statement time.Since would be evaluated before the call it is meant to
+	// measure, reporting a duration that excludes the unmount itself.
+	err = CSIUnmount(ctx, sbx, opts.Driver, requestRaw, rtOpts...)
+	return time.Since(start), err
+}
+
+// encodeUnpublishRequest renders the typed CSI unpublish request as the
+// base64 protobuf blob the sandbox-storage CLI expects on its --config flag.
+// An empty request would only fail inside the sandbox: reject it here, where
+// the error can still name the mount that is misconfigured.
+func encodeUnpublishRequest(unpublishRequest *csi.NodeUnpublishVolumeRequest) (string, error) {
+	if unpublishRequest == nil {
+		return "", fmt.Errorf("csi unpublish request is required")
+	}
+	data, err := proto.Marshal(protoadapt.MessageV2Of(unpublishRequest))
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal csi unpublish request: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(data), nil
 }
