@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
@@ -78,7 +79,7 @@ func (e *SandboxEventHandler) Update(ctx context.Context, evt event.TypedUpdateE
 		(oldState != newState || isStartupFailure(oldSbx) != isStartupFailure(newSbx)) {
 		w.Add(oldReq)
 	}
-	if oldState == agentsv1alpha1.SandboxStateCreating && newState == agentsv1alpha1.SandboxStateAvailable {
+	if oldState == sandboxstate.Creating && newState == sandboxstate.Available {
 		cond := utils.GetSandboxCondition(&newSbx.Status, string(agentsv1alpha1.SandboxConditionReady))
 		var afterReady, readyCost, totalCost time.Duration
 		now := time.Now()

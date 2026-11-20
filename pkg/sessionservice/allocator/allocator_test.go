@@ -37,6 +37,7 @@ import (
 
 	agents "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	session "github.com/openkruise/agents/pkg/sessionservice"
 	sessionbinding "github.com/openkruise/agents/pkg/sessionservice/binding"
 	"github.com/openkruise/agents/pkg/sessionservice/kubernetes"
@@ -131,18 +132,18 @@ func TestSessionServiceAllocationLeastSessionsAndAffinity(t *testing.T) {
 		{name: "strict unavailable retains", affinity: "Strict", ready: false, bound: true, reason: "BoundSandboxUnavailable"},
 		{name: "paused retains", ready: false, bound: true, phase: "Paused", reason: "BoundSandboxUnavailable"},
 		{name: "resuming retains", ready: false, bound: true, phase: "Resuming", reason: "BoundSandboxUnavailable"},
-		{name: "strict paused retains", affinity: "Strict", ready: true, bound: true, phase: "Paused", reason: "BoundSandboxUnavailable", projectedState: "paused"},
-		{name: "strict resuming retains", affinity: "Strict", ready: true, bound: true, phase: "Resuming", reason: "BoundSandboxUnavailable", projectedState: "paused"},
-		{name: "best effort new spec paused skips to healthy", ready: true, paused: true, busyAlternative: true, want: "second", projectedState: "paused"},
-		{name: "strict new spec paused skips to healthy", affinity: "Strict", ready: true, paused: true, busyAlternative: true, want: "second", projectedState: "paused"},
-		{name: "best effort new expired skips to healthy", ready: true, expired: true, busyAlternative: true, want: "second", projectedState: "dead"},
-		{name: "strict new expired skips to healthy", affinity: "Strict", ready: true, expired: true, busyAlternative: true, want: "second", projectedState: "dead"},
-		{name: "best effort existing spec paused retains", ready: true, paused: true, bound: true, reason: "BoundSandboxUnavailable", projectedState: "paused"},
-		{name: "strict existing spec paused retains", affinity: "Strict", ready: true, paused: true, bound: true, reason: "BoundSandboxUnavailable", projectedState: "paused"},
-		{name: "best effort existing expired requests move", ready: true, expired: true, bound: true, reason: "SessionRebinding", projectedState: "dead"},
-		{name: "strict existing expired retains", affinity: "Strict", ready: true, expired: true, bound: true, reason: "BoundSandboxUnavailable", projectedState: "dead"},
-		{name: "best effort new paused no running capacity", ready: true, paused: true, noAlternative: true, reason: "SessionCapacityExhausted", projectedState: "paused"},
-		{name: "strict new expired no running capacity", affinity: "Strict", ready: true, expired: true, noAlternative: true, reason: "SessionCapacityExhausted", projectedState: "dead"},
+		{name: "strict paused retains", affinity: "Strict", ready: true, bound: true, phase: "Paused", reason: "BoundSandboxUnavailable", projectedState: sandboxstate.Paused},
+		{name: "strict resuming retains", affinity: "Strict", ready: true, bound: true, phase: "Resuming", reason: "BoundSandboxUnavailable", projectedState: sandboxstate.Paused},
+		{name: "best effort new spec paused skips to healthy", ready: true, paused: true, busyAlternative: true, want: "second", projectedState: sandboxstate.Paused},
+		{name: "strict new spec paused skips to healthy", affinity: "Strict", ready: true, paused: true, busyAlternative: true, want: "second", projectedState: sandboxstate.Paused},
+		{name: "best effort new expired skips to healthy", ready: true, expired: true, busyAlternative: true, want: "second", projectedState: sandboxstate.Expired},
+		{name: "strict new expired skips to healthy", affinity: "Strict", ready: true, expired: true, busyAlternative: true, want: "second", projectedState: sandboxstate.Expired},
+		{name: "best effort existing spec paused retains", ready: true, paused: true, bound: true, reason: "BoundSandboxUnavailable", projectedState: sandboxstate.Paused},
+		{name: "strict existing spec paused retains", affinity: "Strict", ready: true, paused: true, bound: true, reason: "BoundSandboxUnavailable", projectedState: sandboxstate.Paused},
+		{name: "best effort existing expired requests move", ready: true, expired: true, bound: true, reason: "SessionRebinding", projectedState: sandboxstate.Expired},
+		{name: "strict existing expired retains", affinity: "Strict", ready: true, expired: true, bound: true, reason: "BoundSandboxUnavailable", projectedState: sandboxstate.Expired},
+		{name: "best effort new paused no running capacity", ready: true, paused: true, noAlternative: true, reason: "SessionCapacityExhausted", projectedState: sandboxstate.Paused},
+		{name: "strict new expired no running capacity", affinity: "Strict", ready: true, expired: true, noAlternative: true, reason: "SessionCapacityExhausted", projectedState: sandboxstate.Expired},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			first := allocationBox("first", "a", "00000000000000000other")

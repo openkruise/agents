@@ -55,6 +55,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/pagination"
@@ -669,7 +670,7 @@ func TestSandboxManager_NamespaceAwareSandboxOptions(t *testing.T) {
 	assert.Equal(t, "team-a", list[0].GetNamespace())
 	assert.Equal(t, "sandbox-a", list[0].GetName())
 
-	got, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+	got, err := manager.GetSandbox(t.Context(), testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 		Namespace: "team-b",
 		SandboxID: sandboxid.Resolve(sandboxes[1]),
 	})
@@ -679,7 +680,7 @@ func TestSandboxManager_NamespaceAwareSandboxOptions(t *testing.T) {
 
 	getCtx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 	defer cancel()
-	_, err = manager.GetSandbox(getCtx, testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+	_, err = manager.GetSandbox(getCtx, testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 		Namespace: "team-a",
 		SandboxID: sandboxid.Resolve(sandboxes[1]),
 	})
@@ -813,14 +814,14 @@ func TestSandboxManager_GetSandbox(t *testing.T) {
 			sandboxID:         "default--running-pod",
 			expectError:       false,
 			expectedErrorCode: "",
-			expectedState:     agentsv1alpha1.SandboxStateRunning,
+			expectedState:     sandboxstate.Running,
 		},
 		{
 			name:              "Get paused pod",
 			sandboxID:         "default--paused-pod",
 			expectError:       false,
 			expectedErrorCode: "",
-			expectedState:     agentsv1alpha1.SandboxStatePaused,
+			expectedState:     sandboxstate.Paused,
 		},
 		{
 			name:              "Get available pod should return error",
@@ -859,7 +860,7 @@ func TestSandboxManager_GetSandbox(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
-			sbx, err := manager.GetSandbox(ctx, testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+			sbx, err := manager.GetSandbox(ctx, testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 				SandboxID: tt.sandboxID,
 			})
 
@@ -935,7 +936,7 @@ func TestSandboxManager_GetSandboxExpectedStates(t *testing.T) {
 			name:           "owned not-ready running sandbox is returned",
 			user:           testUser,
 			sandboxID:      sandboxid.Resolve(notReadySbx),
-			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedState:  sandboxstate.Provisioning,
 			expectedReason: "RunningResourceClaimedButNotReady",
 		},
 		{
@@ -1027,7 +1028,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 				sbx.Status.PodInfo.PodIP = "10.0.0.1"
 			},
 			expectError:   false,
-			expectedState: agentsv1alpha1.SandboxStatePaused,
+			expectedState: sandboxstate.Paused,
 			expectedIP:    "10.0.0.1",
 		},
 		{
@@ -1044,7 +1045,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 				sbx.Status.PodInfo.PodIP = "10.0.0.2"
 			},
 			expectError:   false,
-			expectedState: agentsv1alpha1.SandboxStatePaused,
+			expectedState: sandboxstate.Paused,
 			expectedIP:    "10.0.0.2",
 		},
 	}
@@ -1061,7 +1062,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 			CreateSandboxWithStatus(t, client, sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 				SandboxID: sandboxid.Resolve(sandbox),
 			})
 			if err != nil {
@@ -1101,7 +1102,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 			assert.Equal(t, testUser, route.Owner)
 			// Verify sandbox state matches expected
 			if tt.expectedState != "" {
-				actualSbx, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+				actualSbx, err := manager.GetSandbox(t.Context(), testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 					SandboxID: sandboxid.Resolve(sandbox),
 				})
 				if err == nil {
@@ -1138,7 +1139,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 				sbx.Status.PodInfo.PodIP = "10.0.0.1"
 			},
 			expectError:   false,
-			expectedState: agentsv1alpha1.SandboxStateRunning,
+			expectedState: sandboxstate.Running,
 			expectedIP:    "10.0.0.1",
 			ipChanged:     false,
 		},
@@ -1156,7 +1157,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 				sbx.Status.PodInfo.PodIP = "10.0.0.1"
 			},
 			expectError:   false,
-			expectedState: agentsv1alpha1.SandboxStateRunning,
+			expectedState: sandboxstate.Running,
 			expectedIP:    "10.0.0.2", // IP changed after resume
 			ipChanged:     true,
 		},
@@ -1174,7 +1175,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 				sbx.Status.PodInfo.PodIP = "10.0.0.1"
 			},
 			expectError:   false,
-			expectedState: agentsv1alpha1.SandboxStateRunning,
+			expectedState: sandboxstate.Running,
 			expectedIP:    "10.0.0.1",
 			ipChanged:     false,
 		},
@@ -1192,7 +1193,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 			mgr.AddWaitReconcileKey(sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 				SandboxID: sandboxid.Resolve(sandbox),
 			})
 			if err != nil {
@@ -1559,7 +1560,7 @@ func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 					Name:            sandbox.GetName(),
 					UID:             sandbox.GetUID(),
 					Owner:           testUser,
-					State:           agentsv1alpha1.SandboxStateRunning,
+					State:           sandboxstate.Running,
 					ResourceVersion: sandbox.GetResourceVersion(),
 				})
 			}
@@ -1725,7 +1726,7 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			CreateSandboxWithStatus(t, client, sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 				SandboxID: sandboxid.Resolve(sandbox),
 			})
 			if err != nil {
@@ -1771,7 +1772,7 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 				// Use a short timeout context to avoid long retry in GetSandbox
 				ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 				defer cancel()
-				_, getErr := manager.GetSandbox(ctx, testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+				_, getErr := manager.GetSandbox(ctx, testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 					SandboxID: sandboxid.Resolve(sandbox),
 				})
 				assert.Error(t, getErr, "sandbox should not be found after deletion")

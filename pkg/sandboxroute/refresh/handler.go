@@ -23,8 +23,8 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
@@ -71,10 +71,10 @@ func NewHandler(
 		}
 
 		var result sandboxroute.MutationResult
-		// Delete routes for dead and empty (unset) states; retain routes for
-		// every other state, including Paused — wake-on-traffic depends on
-		// Paused routes surviving peer sync.
-		if route.State == v1alpha1.SandboxStateDead || route.State == "" {
+		// The legacy peer protocol uses dead and empty states as deletion
+		// markers. Other states are observations, including Paused routes
+		// needed for wake-on-traffic.
+		if route.State == sandboxstate.Dead || route.State == "" {
 			if route.ResourceVersion == "" {
 				http.Error(w, "invalid route refresh payload", http.StatusBadRequest)
 				return

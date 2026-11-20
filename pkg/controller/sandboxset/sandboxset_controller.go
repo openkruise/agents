@@ -44,6 +44,7 @@ import (
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/lifecycle/pool"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -511,15 +512,19 @@ func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.
 		debugLog := log.V(logs.DebugLogLevel).WithValues("sandbox", sbx.Name)
 		state, reason := utils.GetSandboxState(sbx)
 		switch state {
-		case agentsv1alpha1.SandboxStateCreating:
+		case sandboxstate.Creating:
 			groups.Creating = append(groups.Creating, sbx)
-		case agentsv1alpha1.SandboxStateAvailable:
+		case sandboxstate.Available:
 			groups.Available = append(groups.Available, sbx)
-		case agentsv1alpha1.SandboxStateRunning:
-			fallthrough
-		case agentsv1alpha1.SandboxStatePaused:
+		case sandboxstate.Running,
+			sandboxstate.Paused,
+			sandboxstate.Provisioning:
+			// Claimed observations, ready or not, are never garbage collected
+			// by the pool.
 			groups.Used = append(groups.Used, sbx)
-		case agentsv1alpha1.SandboxStateDead:
+		case sandboxstate.Expired,
+			sandboxstate.Dead:
+			// Past the shutdown deadline or terminal: the pool reclaims them.
 			groups.Dead = append(groups.Dead, sbx)
 		default: // unknown, impossible, just in case
 			return GroupedSandboxes{}, fmt.Errorf("cannot find state for sandbox %s", sbx.Name)

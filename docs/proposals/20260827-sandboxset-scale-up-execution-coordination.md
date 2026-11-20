@@ -314,7 +314,7 @@ for sandbox in ownedSandboxes:
         continue
 
     if GetSandboxState(sandbox) == Creating
-       and stateReason == ResourcePending:
+       and sandbox.status.phase == Pending:
         deadline = sandbox.creationTimestamp + pendingTimeout
         if now >= deadline:
             timeout++

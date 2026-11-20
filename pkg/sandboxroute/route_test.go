@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandboxid"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 )
 
 func TestRouteValidation(t *testing.T) {
@@ -191,14 +193,14 @@ func TestRouteFromSandboxDerivation(t *testing.T) {
 			expectWake: true,
 		},
 		{
-			name: "empty IP normalizes to creating",
+			name: "running sandbox without IP projects creating for peer compatibility",
 			sandbox: func() *agentsv1alpha1.Sandbox {
 				sandbox := newSandbox(nil, nil)
 				sandbox.Status.PodInfo.PodIP = ""
 				return sandbox
 			}(),
 			expectID:    "ns--name",
-			expectState: agentsv1alpha1.SandboxStateCreating,
+			expectState: sandboxstate.Creating,
 			expectIP:    "",
 		},
 		{
@@ -209,7 +211,30 @@ func TestRouteFromSandboxDerivation(t *testing.T) {
 				return sandbox
 			}(),
 			expectID:    "ns--name",
-			expectState: agentsv1alpha1.SandboxStatePaused,
+			expectState: sandboxstate.Paused,
+			expectIP:    "10.0.0.1",
+		},
+		{
+			name: "not ready running phase projects provisioning",
+			sandbox: func() *agentsv1alpha1.Sandbox {
+				sandbox := newSandbox(nil, nil)
+				sandbox.Status.Conditions = nil
+				return sandbox
+			}(),
+			expectID:    "ns--name",
+			expectState: sandboxstate.Provisioning,
+			expectIP:    "10.0.0.1",
+		},
+		{
+			name: "expired sandbox with an address projects expired state",
+			sandbox: func() *agentsv1alpha1.Sandbox {
+				sandbox := newSandbox(nil, nil)
+				shutdown := metav1.NewTime(time.Now().Add(-time.Hour))
+				sandbox.Spec.ShutdownTime = &shutdown
+				return sandbox
+			}(),
+			expectID:    "ns--name",
+			expectState: sandboxstate.Expired,
 			expectIP:    "10.0.0.1",
 		},
 		{
@@ -220,7 +245,7 @@ func TestRouteFromSandboxDerivation(t *testing.T) {
 				return sandbox
 			}(),
 			expectID:    "ns--name",
-			expectState: agentsv1alpha1.SandboxStateDead,
+			expectState: sandboxstate.Dead,
 			expectIP:    "10.0.0.1",
 		},
 		{
@@ -248,7 +273,7 @@ func TestRouteFromSandboxDerivation(t *testing.T) {
 			expectState := tt.expectState
 			expectIP := tt.expectIP
 			if expectState == "" {
-				expectState = agentsv1alpha1.SandboxStateRunning
+				expectState = sandboxstate.Running
 				expectIP = "10.0.0.1"
 			}
 			assert.Equal(t, expectIP, route.IP)

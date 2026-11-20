@@ -30,6 +30,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -38,8 +39,18 @@ import (
 
 var (
 	browserWebSocketReplacer = regexp.MustCompile(`^wss?://[^/]+`)
-	claimedSandboxStates     = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused, agentsv1alpha1.SandboxStateDead}
-	liveSandboxStates        = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}
+	// Pause applies its own phase and readiness checks after lookup.
+	claimedSandboxStates = []string{
+		sandboxstate.Running, sandboxstate.Paused,
+		sandboxstate.Provisioning, sandboxstate.Expired, sandboxstate.Dead,
+	}
+	// Describe and delete admit provisioning instances. Expired and terminal
+	// instances are treated as missing.
+	managedSandboxStates = []string{
+		sandboxstate.Running, sandboxstate.Paused,
+		sandboxstate.Provisioning,
+	}
+	liveSandboxStates = []string{sandboxstate.Running, sandboxstate.Paused}
 )
 
 func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string, expectedStates []string) (infra.Sandbox, *web.ApiError) {
@@ -91,22 +102,6 @@ func getSandboxErrorCode(err error) int {
 	return http.StatusNotFound
 }
 
-func isSandboxViewable(sbx infra.Sandbox) bool {
-	state, reason := sbx.GetState()
-	if state == agentsv1alpha1.SandboxStateCreating {
-		return false
-	}
-	if state != agentsv1alpha1.SandboxStateDead {
-		return true
-	}
-	switch reason {
-	case "ResourceSucceeded", "ResourceFailed", "ResourceTerminating", "ResourceDeleted":
-		return false
-	default:
-		return true
-	}
-}
-
 func (sc *Controller) getNamespaceOfUser(user *models.CreatedTeamAPIKey) string {
 	team := keys.TeamForKey(user)
 	// Keys in the admin team can access resources in cluster scope
@@ -129,17 +124,8 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain
 		TrafficAccessToken:           sbx.GetTrafficAccessToken(),
 		TrafficAccessTokenExpiration: sbx.GetTrafficAccessTokenExpiration(),
 	}
-	// A sandbox in the Running phase that is claimed but not yet ready is
-	// reported as "dead" by GetSandboxState because the Ready condition is
-	// unsatisfied. The underlying phase is Running, so surface it as
-	// "running" to E2B API clients — this avoids returning the unparsable
-	// "dead" state to E2B SDK clients while reflecting that the sandbox is
-	// still live.
-	state, reason := sbx.GetState()
-	if state == agentsv1alpha1.SandboxStateDead && reason == "RunningResourceClaimedButNotReady" {
-		state = agentsv1alpha1.SandboxStateRunning
-	}
-	sandbox.State = state
+	state, _ := sbx.GetState()
+	sandbox.State = e2bSandboxState(state)
 	annotations := sbx.GetAnnotations()
 	labels := sbx.GetLabels()
 
@@ -178,6 +164,16 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain
 	sandbox.EndAt = endAt.Format(time.RFC3339)
 	sandbox.CPUCount, sandbox.MemoryMB, sandbox.DiskSizeMB = e2bResource(sbx.GetResource())
 	return sandbox
+}
+
+// e2bSandboxState maps lifecycle states onto the two-state E2B schema.
+// Expired and dead instances never reach responses: the management lookup
+// treats them as missing and the list filter drops them.
+func e2bSandboxState(state string) string {
+	if state == sandboxstate.Paused {
+		return models.SandboxStatePaused
+	}
+	return models.SandboxStateRunning
 }
 
 func e2bResource(resource infra.SandboxResource) (int64, int64, int64) {

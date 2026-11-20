@@ -24,7 +24,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/openkruise/agents/pkg/utils"
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -43,6 +42,8 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/controllers"
+	"github.com/openkruise/agents/pkg/sandboxstate"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
@@ -486,8 +487,14 @@ func (c *Cache) CountActiveSandboxes(ctx context.Context, opts ListSandboxesOpti
 		if utils.IsReservedFailedSandbox(list.Items[i].Labels) {
 			continue
 		}
-		state, _ := utils.GetSandboxState(&list.Items[i])
-		if state != agentsv1alpha1.SandboxStateDead {
+		// Count the instances the claim controller must not replace: one still
+		// coming up (creating), one already serving (running, paused) and the
+		// unclaimed pool stock (available) hold their slot; one past its shutdown
+		// deadline (expired) or a terminal one (dead) leaves it to be refilled.
+		// A claimed instance already running but not ready is provisioning and
+		// does not hold a slot, unlike a pending one, which is creating.
+		switch state, _ := utils.GetSandboxState(&list.Items[i]); state {
+		case sandboxstate.Creating, sandboxstate.Available, sandboxstate.Running, sandboxstate.Paused:
 			cnt++
 		}
 	}

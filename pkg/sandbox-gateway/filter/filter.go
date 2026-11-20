@@ -30,10 +30,10 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/utils"
 )
@@ -138,7 +138,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		return status
 	}
 
-	if route.State != agentsv1alpha1.SandboxStateRunning {
+	if !route.CanRouteTraffic() {
 		waker := wake.GetWaker()
 		if f.shouldWakeSandbox(route, waker, header) {
 			// Apply extra headers before returning Running so they
@@ -161,7 +161,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 			return api.Running
 		}
 		// Not running and not wakeable -> 502 (existing behavior)
-		log.Warn("Sandbox is not running", zap.String("state", route.State))
+		log.Warn("Sandbox is not ready for traffic", zap.String("state", route.State))
 		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
 			502,
 			"healthy sandbox not found: "+sandboxID,
@@ -298,7 +298,7 @@ func (f *sandboxFilter) verifierUnavailable(sandboxID string) api.StatusType {
 // change into the route registry), and the request satisfies the rule's
 // request matchers.
 func (f *sandboxFilter) shouldWakeSandbox(route sandboxroute.Route, waker *wake.Waker, header api.RequestHeaderMap) bool {
-	if route.State != agentsv1alpha1.SandboxStatePaused {
+	if route.State != sandboxstate.Paused {
 		return false
 	}
 	if !f.config.EnableWakeOnTraffic {
@@ -377,10 +377,10 @@ func (f *sandboxFilter) wakeAndContinue(
 		return
 	}
 
-	// Wake succeeded — verify the sandbox is now Running in the registry.
+	// Wake succeeded — verify the sandbox can receive traffic.
 	route, ok := registry.GetRegistry().Get(sandboxID)
-	if !ok || route.State != agentsv1alpha1.SandboxStateRunning {
-		log.Warn("Sandbox not running after wake")
+	if !ok || !route.CanRouteTraffic() {
+		log.Warn("Sandbox not ready for traffic after wake")
 		f.sendLocalReplyOnce(502, "healthy sandbox not found: "+sandboxID, "sandbox_not_running")
 		return
 	}

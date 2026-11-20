@@ -24,8 +24,8 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/tracing"
@@ -46,7 +46,7 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 	if apiErr != nil {
 		return web.ApiResponse[*models.Snapshot]{}, apiErr
 	}
-	if state, reason := sbx.GetState(); state != v1alpha1.SandboxStateRunning {
+	if state, reason := sbx.GetState(); state != sandboxstate.Running {
 		log.Info("cannot create snapshot: sandbox is not running", "state", state, "reason", reason)
 		return web.ApiResponse[*models.Snapshot]{}, withSandboxResourceContext(&web.ApiError{
 			Code:    http.StatusBadRequest,

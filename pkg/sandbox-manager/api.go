@@ -37,6 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 )
@@ -431,7 +432,7 @@ func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandb
 		log.Error(err, "failed to project deleted sandbox route")
 		return
 	}
-	route.State = v1alpha1.SandboxStateDead
+	route.State = sandboxstate.Dead
 	// Peer fanout is detached from the request ctx so client cancellation does
 	// not abort this bounded, best-effort dead-route push.
 	if err := m.proxy.SyncRouteWithPeers(context.WithoutCancel(ctx), route); err != nil {

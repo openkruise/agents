@@ -113,15 +113,14 @@ func parseListSandboxesRequest(r *http.Request) (ListSandboxesRequest, *web.ApiE
 		switch key {
 		case "state":
 			for _, state := range strings.Split(values[0], ",") {
-				innerState := convertE2bStateToInnerState(state)
-				if innerState != agentsv1alpha1.SandboxStateRunning && innerState != agentsv1alpha1.SandboxStatePaused {
+				if state != models.SandboxStateRunning && state != models.SandboxStatePaused {
 					return request, &web.ApiError{
 						Code: http.StatusBadRequest,
 						Message: fmt.Sprintf("Only '%s' and '%s' state are supported, not: '%s'",
 							models.SandboxStateRunning, models.SandboxStatePaused, values[0]),
 					}
 				}
-				request.States = append(request.States, innerState)
+				request.States = append(request.States, state)
 			}
 		case "nextToken":
 			request.NextToken = values[0]
@@ -182,27 +181,17 @@ func parseListSandboxesRequest(r *http.Request) (ListSandboxesRequest, *web.ApiE
 	return request, nil
 }
 
-func convertE2bStateToInnerState(e2bState string) string {
-	switch e2bState {
-	case models.SandboxStateRunning:
-		return agentsv1alpha1.SandboxStateRunning
-	case models.SandboxStatePaused:
-		return agentsv1alpha1.SandboxStatePaused
-	default:
-		return ""
-	}
-}
-
 func getListFilter(request ListSandboxesRequest) func(sbx infra.Sandbox) bool {
 	if len(request.States) == 0 {
-		request.States = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}
+		request.States = []string{models.SandboxStateRunning, models.SandboxStatePaused}
 	}
 	return func(sbx infra.Sandbox) bool {
-		if len(request.States) > 0 {
-			state, _ := sbx.GetState()
-			if !slices.Contains(request.States, state) {
-				return false
-			}
+		state, _ := sbx.GetState()
+		if !slices.Contains(managedSandboxStates, state) {
+			return false
+		}
+		if !slices.Contains(request.States, e2bSandboxState(state)) {
+			return false
 		}
 		if len(request.Metadata) > 0 {
 			for key, value := range request.Metadata {
