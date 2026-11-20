@@ -103,7 +103,7 @@ func TestScaleSandboxSet(t *testing.T) {
 			}
 
 			// Override AgentsClient by calling the fake client directly.
-			err := runScaleWithClient(cs.ApiV1alpha1(), opts, tt.sbsName)
+			err := runScaleWithClient(context.Background(), cs.ApiV1alpha1(), opts, tt.sbsName)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)
