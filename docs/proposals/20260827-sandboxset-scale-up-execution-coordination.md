@@ -220,6 +220,34 @@ createHeadroom = max(maxConcurrent - charged, 0)
 SandboxSet creates toward `spec.replicas` while `createHeadroom > 0`. Reaching the limit stops new
 create requests until a slot opens, but it is normal flow control rather than a startup failure.
 
+#### User guidance for `maxUnavailable`
+
+`spec.scaleStrategy.maxUnavailable` is the user-facing control for the trade-off between startup
+throughput and runaway scale-up protection. It is not a maximum replica count and it does not mean
+that every non-Available Sandbox immediately consumes the budget.
+
+The effective startup budget is resolved from the observed SandboxSet replica count:
+
+| Configuration | Startup budget behavior | Recommended use |
+| --- | --- | --- |
+| omitted | Uses the observed replica count, equivalent to 100% of the observed pool | Resource-rich clusters with reliable scheduling |
+| absolute, for example `2` | Allows two observed Failed/TimedOut startups | Resource-constrained clusters or strict protection |
+| percentage, for example `50%` | Resolves against observed replicas and rounds up | A proportional throughput/protection trade-off |
+
+For example, with `maxUnavailable: 2`, `status.replicas: 4`, and two observed startup blockers,
+SandboxSet publishes `ScalingLimited=True/StartupBudgetExhausted`. PoolAutoscaler then keeps the
+current target instead of publishing another Capacity-driven scale-up. With one blocker, the
+condition remains `False/StartupBudgetAvailable` and another target increase remains permitted.
+
+The budget counts only recognized startup failures and Pending Sandboxes past the effective
+`max-pending-timeout`. Healthy observed Creating Sandboxes do not immediately consume it, and
+Claimed/Used Sandboxes are not startup blockers for the warm pool. A Pending Sandbox may therefore
+remain below the budget until its timeout or failure classification is observed.
+
+Leaving `maxUnavailable` unset favors the fastest scale-up and allows the budget to grow with the
+observed pool. Users operating with tight scheduling or resource limits should set an explicit
+absolute or percentage value and monitor `ScalingLimited` before increasing `maxReplicas`.
+
 ### Scale-Up Cooldown and Sandbox Pending Timeout
 
 Sandbox controller owns the process-wide `--max-pending-timeout` setting. The controller registration

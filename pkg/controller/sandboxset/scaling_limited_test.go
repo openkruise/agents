@@ -98,6 +98,14 @@ func TestCalculateScalingLimited(t *testing.T) {
 			expectTimedOut:   1,
 		},
 		{
+			name:             "claimed sandboxes do not consume startup budget",
+			observedReplicas: 2,
+			groups:           GroupedSandboxes{Used: []*agentsv1alpha1.Sandbox{{ObjectMeta: metav1.ObjectMeta{Name: "claimed"}}}},
+			expectStatus:     metav1.ConditionFalse,
+			expectReason:     scalingLimitedReasonBudgetAvailable,
+			expectMessage:    "Timeout=0, Failed=0",
+		},
+		{
 			name:           "timeout exhausts budget",
 			maxUnavailable: intOrStringPtr(intstr.FromInt(1)),
 			groups:         GroupedSandboxes{Creating: []*agentsv1alpha1.Sandbox{newPending("timeout", 61*time.Second)}},
