@@ -221,7 +221,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			} else {
 				r.Recorder.Eventf(ops, v1.EventTypeNormal, "SandboxUpgrading",
 					"Upgrading sandbox %s", candidates[i].Name)
-				if len(ops.Spec.Patch.Raw) > 0 && candidates[i].Status.Phase != agentsv1alpha1.SandboxUpgrading &&
+				if !isInstallerUpdateOps(ops) && len(ops.Spec.Patch.Raw) > 0 && candidates[i].Status.Phase != agentsv1alpha1.SandboxUpgrading &&
 					candidates[i].Labels[agentsv1alpha1.LabelSandboxUpdateOps] != ops.Name && isSandboxTemplateMatchPatch(candidates[i], ops) {
 					requeueConfiguration = true
 				}
@@ -292,6 +292,7 @@ func isStateIncluded(ops *agentsv1alpha1.SandboxUpdateOps, phase agentsv1alpha1.
 }
 
 func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv1alpha1.SandboxList, ops *agentsv1alpha1.SandboxUpdateOps) (updated, failed, updating int32, candidates, resumeSucceedCandidates []*agentsv1alpha1.Sandbox, requeueResult *ctrl.Result) {
+	logger := klog.FromContext(ctx).WithValues("ops", klog.KObj(ops))
 	for i := range sandboxList.Items {
 		sbx := &sandboxList.Items[i]
 		if !sbx.DeletionTimestamp.IsZero() {
@@ -317,22 +318,22 @@ func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv
 			continue
 		}
 
+		sandboxLogger := logger.WithValues("sandbox", klog.KObj(sbx))
 		// Check ResourceVersionExpectations: skip sandbox if cache is stale
 		ResourceVersionExpectations.Observe(sbx)
 		if isSatisfied, unsatisfiedDuration := ResourceVersionExpectations.IsSatisfied(sbx); !isSatisfied {
 			if unsatisfiedDuration < expectations.ExpectationTimeout {
-				klog.InfoS("Not satisfied resourceVersion for Sandbox in SandboxUpdateOps, wait for cache event",
-					"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops))
+				sandboxLogger.Info("Not satisfied resourceVersion for Sandbox in SandboxUpdateOps, wait for cache event")
 				requeueResult = &ctrl.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}
 				return
 			}
-			klog.InfoS("ResourceVersionExpectations unsatisfied overtime for Sandbox in SandboxUpdateOps, wait for cache event timeout",
-				"timeout", unsatisfiedDuration, "sandbox", klog.KObj(sbx), "ops", klog.KObj(ops))
+			sandboxLogger.Info("ResourceVersionExpectations unsatisfied overtime for Sandbox in SandboxUpdateOps, wait for cache event timeout",
+				"timeout", unsatisfiedDuration)
 			ResourceVersionExpectations.Delete(sbx)
 		}
 
 		category := r.classifySandbox(ctx, sbx, ops)
-		klog.InfoS("Classified sandbox", "sandbox", klog.KObj(sbx), "category", category, "ops", klog.KObj(ops))
+		sandboxLogger.Info("Classified sandbox", "category", category)
 
 		switch category {
 		case sandboxUpdated:
@@ -389,6 +390,7 @@ func (s sandboxUpdateState) String() string {
 }
 
 func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) sandboxUpdateState {
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "ops", klog.KObj(ops))
 	otherOpsName := sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps]
 	// If the sandbox has a label from another ops, check whether that ops
 	// is still active. An active ops (Pending/Updating) owns the sandbox.
@@ -397,8 +399,7 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 		if err := r.Get(ctx, types.NamespacedName{Namespace: sbx.Namespace, Name: otherOpsName}, otherOps); err == nil &&
 			(otherOps.Status.Phase == agentsv1alpha1.SandboxUpdateOpsPending ||
 				otherOps.Status.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating) {
-			klog.InfoS("Sandbox is being updated by another active ops, skipping",
-				"sandbox", klog.KObj(sbx), "otherOps", otherOpsName, "ops", klog.KObj(ops))
+			logger.Info("Sandbox is being updated by another active ops, skipping", "otherOps", otherOpsName)
 			return sandboxNoNeedUpdate
 		}
 	}
@@ -444,7 +445,7 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	}
 
 	// Terminal: upgrade completed.
-	if isUpgradeSucceeded(sbx) {
+	if isUpgradeSucceeded(sbx, ops) {
 		return sandboxUpdated
 	}
 
@@ -455,13 +456,20 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 			(cond.Reason == agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed ||
 				cond.Reason == agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed ||
 				cond.Reason == agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed ||
-				cond.Reason == agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed) {
+				cond.Reason == agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed ||
+				cond.Reason == agentsv1alpha1.SandboxUpgradingReasonInstallingFailed) {
 			return sandboxFailed
 		}
 		// Non-terminal: resume succeeded, waiting for phase 2 template patch.
 		// Reconcile applies the patch and removes the resume trigger annotation,
 		// which kicks off the actual pod-replacement upgrade.
+		// InstallerUpdate has no phase 2 — the sandbox controller advances from
+		// ResumeSucceed to PreUpgrade on its own — so such a sandbox is simply
+		// in progress.
 		if cond.Reason == agentsv1alpha1.SandboxUpgradingReasonResumeSucceed {
+			if isInstallerUpdateOps(ops) {
+				return sandboxUpdating
+			}
 			return sandboxResumeSucceed
 		}
 	}
@@ -481,8 +489,9 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	// resume trigger and the sandbox was un-paused (spec.Paused=false)
 	// before it reached ResumeSucceed, so the template patch was never
 	// applied. Treat it as resume-succeeded so Reconcile applies the
-	// pending template patch.
-	if cond == nil && sbx.Status.Phase == agentsv1alpha1.SandboxRunning {
+	// pending template patch. InstallerUpdate has no phase-2 patch to apply,
+	// so it skips this heuristic and counts as in-progress.
+	if cond == nil && sbx.Status.Phase == agentsv1alpha1.SandboxRunning && !isInstallerUpdateOps(ops) {
 		return sandboxResumeSucceed
 	}
 
@@ -500,13 +509,12 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 	return nil
 }
 
-// isUpgradeSucceeded reports whether the sandbox's Upgrading condition is in
-// the terminal-success state (Reason=Succeeded, Status=True).
-func isUpgradeSucceeded(sbx *agentsv1alpha1.Sandbox) bool {
+func isUpgradeSucceeded(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
 	cond := findCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionUpgrading))
 	return cond != nil &&
 		cond.Reason == agentsv1alpha1.SandboxUpgradingReasonSucceeded &&
-		cond.Status == metav1.ConditionTrue
+		cond.Status == metav1.ConditionTrue &&
+		(!isInstallerUpdateOps(ops) || sbx.Status.CompletedPatchVersion == string(ops.UID))
 }
 
 // syncSandboxUpgradeState aligns the sandbox's upgrade-failed label and
@@ -528,38 +536,40 @@ func (r *Reconciler) syncSandboxUpgradeState(ctx context.Context, sbx *agentsv1a
 	wantFailedLabel := state == sandboxFailed
 	clearPolicy := state == sandboxUpdated && sbx.Spec.UpgradePolicy != nil
 
-	var labelPatch string
-	if wantFailedLabel && !hasFailedLabel {
-		labelPatch = fmt.Sprintf(`"%s":"%s"`, agentsv1alpha1.LabelSandboxUpgradeFailed, agentsv1alpha1.True)
-	} else if !wantFailedLabel && hasFailedLabel {
-		labelPatch = fmt.Sprintf(`"%s":null`, agentsv1alpha1.LabelSandboxUpgradeFailed)
-	}
-	if labelPatch == "" && !clearPolicy {
+	if hasFailedLabel == wantFailedLabel && !clearPolicy {
 		return // already in desired state
 	}
 
-	patchJSON := "{"
-	if labelPatch != "" {
-		patchJSON += fmt.Sprintf(`"metadata":{"labels":{%s}}`, labelPatch)
-		if clearPolicy {
-			patchJSON += ","
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "state", state)
+	payload := map[string]any{}
+	if hasFailedLabel != wantFailedLabel {
+		var labelValue any
+		if wantFailedLabel {
+			labelValue = agentsv1alpha1.True
+		}
+		payload["metadata"] = map[string]any{
+			"labels": map[string]any{
+				agentsv1alpha1.LabelSandboxUpgradeFailed: labelValue,
+			},
 		}
 	}
 	if clearPolicy {
-		patchJSON += `"spec":{"upgradePolicy":null}`
+		payload["spec"] = map[string]any{"upgradePolicy": nil}
 	}
-	patchJSON += "}"
+	data, err := json.Marshal(payload)
+	if err != nil {
+		logger.Error(err, "Failed to encode sandbox cleanup patch")
+		return
+	}
 
 	rcvObject := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Namespace: sbx.Namespace, Name: sbx.Name},
 	}
-	if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchJSON))); err != nil {
-		klog.ErrorS(err, "Failed to sync sandbox upgrade state",
-			"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "state", state)
+	if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, data)); err != nil {
+		logger.Error(err, "Failed to sync sandbox upgrade state")
 		return
 	}
-	klog.InfoS("Synced sandbox upgrade state",
-		"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "state", state)
+	logger.Info("Synced sandbox upgrade state")
 	ResourceVersionExpectations.Expect(rcvObject)
 }
 
@@ -577,6 +587,7 @@ func calculateMaxUnavailable(maxUnavailable *intstrutil.IntOrString, total int32
 }
 
 func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.SandboxUpdateOps) (ctrl.Result, error) {
+	logger := klog.FromContext(ctx).WithValues("ops", klog.KObj(ops))
 	if !controllerutil.ContainsFinalizer(ops, finalizerName) {
 		return ctrl.Result{}, nil
 	}
@@ -598,26 +609,34 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 		if sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps] != ops.Name {
 			continue
 		}
-		specPatch := ""
-		// Preserve independent policies and policies still needed by unfinished upgrades.
-		if !pauseResumeOnly && isUpgradeSucceeded(sbx) && sbx.Spec.UpgradePolicy != nil {
-			specPatch = `,"spec":{"upgradePolicy":null}`
+		metadata := map[string]any{
+			"labels": map[string]any{
+				agentsv1alpha1.LabelSandboxUpdateOps: nil,
+			},
 		}
-		metadataPatch := fmt.Sprintf(`"labels":{"%s":null}`, agentsv1alpha1.LabelSandboxUpdateOps)
 		if !pauseResumeOnly {
-			metadataPatch += fmt.Sprintf(`,"annotations":{"%s":null}`, agentsv1alpha1.AnnotationUpgradeResumeTrigger)
+			metadata["annotations"] = map[string]any{
+				agentsv1alpha1.AnnotationUpgradeResumeTrigger: nil,
+			}
 		}
-		patchJSON := fmt.Sprintf(`{"metadata":{%s}%s}`, metadataPatch, specPatch)
+		payload := map[string]any{"metadata": metadata}
+		// Preserve independent policies and policies still needed by unfinished upgrades.
+		if !pauseResumeOnly && isUpgradeSucceeded(sbx, ops) && sbx.Spec.UpgradePolicy != nil {
+			payload["spec"] = map[string]any{"upgradePolicy": nil}
+		}
+		sandboxLogger := logger.WithValues("sandbox", klog.KObj(sbx))
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to encode cleanup patch for sandbox %s/%s: %w", sbx.Namespace, sbx.Name, err)
+		}
 		rcvObject := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Namespace: sbx.Namespace, Name: sbx.Name},
 		}
-		if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchJSON))); err != nil {
-			klog.ErrorS(err, "Failed to remove ops label and annotation from sandbox",
-				"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops))
+		if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, data)); err != nil {
+			sandboxLogger.Error(err, "Failed to remove ops label and annotation from sandbox")
 			return ctrl.Result{}, err
 		}
-		klog.InfoS("Removed ops label and annotation from sandbox",
-			"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops))
+		sandboxLogger.Info("Removed ops label and annotation from sandbox")
 	}
 
 	// Remove finalizer
@@ -625,8 +644,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 	if err := r.Update(ctx, ops); err != nil {
 		return ctrl.Result{}, err
 	}
-	klog.InfoS("Finalizer removed, SandboxUpdateOps can be deleted",
-		"ops", klog.KObj(ops))
+	logger.Info("Finalizer removed, SandboxUpdateOps can be deleted")
 	return ctrl.Result{}, nil
 }
 

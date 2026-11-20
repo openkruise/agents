@@ -41,6 +41,15 @@ func boolPtr(b bool) *bool {
 }
 
 func TestIsActivePodUpdate(t *testing.T) {
+	podWithInstallerState := func(state corev1.ContainerState) *corev1.Pod {
+		return &corev1.Pod{Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			EphemeralContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "installer-abcd1234",
+				State: state,
+			}},
+		}}
+	}
 	tests := []struct {
 		name        string
 		oldPod      *corev1.Pod
@@ -1135,6 +1144,41 @@ func TestIsActivePodUpdate(t *testing.T) {
 			expected:    true,
 			description: "should return true when container waiting reason changes",
 		},
+		{
+			name:     "ephemeral installer status added",
+			oldPod:   &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}},
+			newPod:   podWithInstallerState(corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{}}),
+			expected: true,
+		},
+		{
+			name:     "ephemeral installer starts",
+			oldPod:   podWithInstallerState(corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{}}),
+			newPod:   podWithInstallerState(corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}),
+			expected: true,
+		},
+		{
+			name:     "ephemeral installer completes successfully without other pod changes",
+			oldPod:   podWithInstallerState(corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}),
+			newPod:   podWithInstallerState(corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}),
+			expected: true,
+		},
+		{
+			name:     "ephemeral installer exits unsuccessfully",
+			oldPod:   podWithInstallerState(corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}),
+			newPod:   podWithInstallerState(corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}),
+			expected: true,
+		},
+		{
+			name:     "ephemeral installer image pull reason changes",
+			oldPod:   podWithInstallerState(corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ErrImagePull"}}),
+			newPod:   podWithInstallerState(corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}),
+			expected: true,
+		},
+		{
+			name:   "identical ephemeral installer statuses do not trigger updates",
+			oldPod: podWithInstallerState(corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}),
+			newPod: podWithInstallerState(corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}),
+		},
 	}
 
 	for _, tt := range tests {
@@ -1603,6 +1647,16 @@ func TestSandboxPodEventHandler_Create(t *testing.T) {
 }
 
 func TestSandboxPodEventHandler_Update(t *testing.T) {
+	runningInstallerPod := newAgentPod("sbx-1", "default")
+	runningInstallerPod.Status.Phase = corev1.PodRunning
+	runningInstallerPod.Status.EphemeralContainerStatuses = []corev1.ContainerStatus{{
+		Name:  "installer-abcd1234",
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}}
+	completedInstallerPod := runningInstallerPod.DeepCopy()
+	completedInstallerPod.Status.EphemeralContainerStatuses[0].State = corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{ExitCode: 0},
+	}
 	tests := []struct {
 		name               string
 		featureGateEnabled bool
@@ -1631,6 +1685,25 @@ func TestSandboxPodEventHandler_Update(t *testing.T) {
 			oldPod:             newAgentPod("sbx-1", "default"),
 			newPod:             newAgentPod("sbx-1", "default"),
 			expectEnqueue:      false,
+		},
+		{
+			name:               "installer completion enqueues with label filtering enabled",
+			featureGateEnabled: true,
+			oldPod:             runningInstallerPod,
+			newPod:             completedInstallerPod,
+			expectEnqueue:      true,
+		},
+		{
+			name:          "installer completion enqueues with label filtering disabled",
+			oldPod:        runningInstallerPod,
+			newPod:        completedInstallerPod,
+			expectEnqueue: true,
+		},
+		{
+			name:               "unchanged installer status is not enqueued",
+			featureGateEnabled: true,
+			oldPod:             completedInstallerPod,
+			newPod:             completedInstallerPod.DeepCopy(),
 		},
 		{
 			name:               "feature gate disabled - non-agent pod skipped",
