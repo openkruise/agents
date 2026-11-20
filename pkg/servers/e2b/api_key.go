@@ -18,6 +18,7 @@ package e2b
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -181,6 +182,53 @@ func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], 
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
+}
+
+func (sc *Controller) UpdateAPIKey(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
+	ctx := r.Context()
+	key := GetTargetAPIKeyFromContext(ctx)
+	if key == nil {
+		// CheckDeleteAPIKeyPermission middleware is required but was not in the chain.
+		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: "target API key not found in context",
+		}
+	}
+
+	var request models.UpdateTeamAPIKey
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: fmt.Sprintf("Invalid request body: %v", err),
+		}
+	}
+	if request.Name == "" {
+		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "api-key name is required",
+		}
+	}
+
+	if err := sc.keys.RenameKey(ctx, key, request.Name); err != nil {
+		switch {
+		case errors.Is(err, keys.ErrAdminKeyNotRenamable):
+			return web.ApiResponse[struct{}]{}, &web.ApiError{
+				Code:    http.StatusForbidden,
+				Message: err.Error(),
+			}
+		case errors.Is(err, keys.ErrAPIKeyNotFound):
+			return web.ApiResponse[struct{}]{}, &web.ApiError{
+				Code:    http.StatusNotFound,
+				Message: "API key not found",
+			}
+		}
+		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: fmt.Sprintf("Failed to update API key: %v", err),
+		}
+	}
+
+	return web.ApiResponse[struct{}]{}, nil
 }
 
 func (sc *Controller) cleanupDeletedAPIKeyQuota(ctx context.Context, apiKeyID string) {
