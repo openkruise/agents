@@ -162,7 +162,7 @@ webhooks:
       name: webhook-service
       namespace: system
       path: /validate-sandboxtemplate
-  failurePolicy: Ignore
+  failurePolicy: Fail
   name: v-sbt.kb.io
   rules:
   - apiGroups:
@@ -171,8 +171,10 @@ webhooks:
     - v1alpha1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - sandboxtemplates
+    - sandboxtemplates/status
   sideEffects: None
 - admissionReviewVersions:
   - v1

@@ -249,16 +249,20 @@ spec:
                 - message: backend is immutable
                   rule: self == oldSelf
               buildOptions:
-                description: |-
-                  BuildOptions is the declarative snapshot of the Template Build request.
-                  It is populated by a build entry and consumed by the SandboxTemplate
-                  controller. Logical Template admission keeps it immutable after the
-                  build input is accepted.
+                description: BuildOptions stores the accepted build recipe; admission
+                  freezes finalized Versions.
                 properties:
+                  checkpoint:
+                    description: Checkpoint captures the completed build as a restorable
+                      artifact.
+                    type: boolean
                   fromTemplate:
                     description: FromTemplate names an existing logical Template used
                       as the build base.
                     type: string
+                  imageAcceleration:
+                    description: ImageAcceleration requests best-effort image pre-warming.
+                    type: boolean
                   readyCommand:
                     description: ReadyCommand checks business process readiness before
                       capture.
@@ -313,36 +317,75 @@ spec:
                     - command
                     type: object
                   steps:
-                    description: Steps is the ordered provisioning command sequence.
+                    description: Steps is the ordered provisioning sequence.
                     items:
-                      description: |-
-                        TemplateBuildCommand is one self-contained shell command in a Template
-                        Build. User, Cwd, and Env are the complete execution context folded from
-                        the caller's build DSL.
+                      description: TemplateBuildStep is a command or a COPY operation.
                       properties:
                         command:
-                          description: Command is the shell command to execute.
-                          minLength: 1
-                          type: string
-                        cwd:
-                          description: Cwd optionally selects the working directory
-                            inside the container.
-                          type: string
-                          x-kubernetes-validations:
-                          - message: cwd must be an absolute path
-                            rule: self == '' || self.startsWith('/')
-                        env:
-                          additionalProperties:
-                            type: string
-                          description: Env is the complete environment of this command.
+                          description: |-
+                            TemplateBuildCommand is one self-contained shell command in a Template
+                            Build. User, Cwd, and Env are the complete execution context folded from
+                            the caller's build DSL.
+                          properties:
+                            command:
+                              description: Command is the shell command to execute.
+                              minLength: 1
+                              type: string
+                            cwd:
+                              description: Cwd optionally selects the working directory
+                                inside the container.
+                              type: string
+                              x-kubernetes-validations:
+                              - message: cwd must be an absolute path
+                                rule: self == '' || self.startsWith('/')
+                            env:
+                              additionalProperties:
+                                type: string
+                              description: Env is the complete environment of this
+                                command.
+                              type: object
+                            user:
+                              description: User optionally selects the executing user
+                                inside the container.
+                              type: string
+                          required:
+                          - command
                           type: object
-                        user:
-                          description: User optionally selects the executing user
-                            inside the container.
-                          type: string
-                      required:
-                      - command
+                        copy:
+                          description: TemplateBuildCopy materializes an uploaded
+                            build-context file or directory.
+                          properties:
+                            dest:
+                              minLength: 1
+                              type: string
+                              x-kubernetes-validations:
+                              - message: dest must be an absolute path
+                                rule: self.startsWith('/')
+                            filesHash:
+                              type: string
+                            forceUpload:
+                              type: boolean
+                            mode:
+                              format: int32
+                              maximum: 4095
+                              minimum: 0
+                              type: integer
+                            src:
+                              minLength: 1
+                              type: string
+                              x-kubernetes-validations:
+                              - message: src must be a relative path
+                                rule: '!self.startsWith(''/'')'
+                            user:
+                              type: string
+                          required:
+                          - dest
+                          - src
+                          type: object
                       type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of command or copy is required
+                        rule: has(self.command) != has(self.copy)
                     type: array
                     x-kubernetes-list-type: atomic
                 type: object

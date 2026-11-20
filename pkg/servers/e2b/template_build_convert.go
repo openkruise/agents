@@ -23,6 +23,8 @@ import (
 	"path"
 	"strings"
 
+	"k8s.io/utils/ptr"
+
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -85,7 +87,7 @@ func convertBuildRecipe(req models.TemplateBuildStartV2) (*convertedBuild, *web.
 				}
 				user = step.Args[1]
 			}
-			converted.BuildOptions.Steps = append(converted.BuildOptions.Steps, cursor.command(step.Args[0], user))
+			converted.BuildOptions.Steps = append(converted.BuildOptions.Steps, agentsv1alpha1.TemplateBuildStep{Command: ptr.To(cursor.command(step.Args[0], user))})
 		case "WORKDIR":
 			if len(step.Args) != 1 || !path.IsAbs(step.Args[0]) {
 				return nil, badRequest("steps[%d].args must carry one absolute path", i)

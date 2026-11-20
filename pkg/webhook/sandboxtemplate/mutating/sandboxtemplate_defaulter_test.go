@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	jsonpatch "github.com/evanphx/json-patch/v5"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -35,6 +36,59 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 )
+
+func TestManagedBuildCaptureDefaulting(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		managed    bool
+		step       *v1alpha1.TemplateBuildStep
+		checkpoint bool
+	}{
+		{name: "managed command", managed: true, step: &v1alpha1.TemplateBuildStep{Command: &v1alpha1.TemplateBuildCommand{Command: "echo build"}}, checkpoint: true},
+		{name: "managed COPY", managed: true, step: &v1alpha1.TemplateBuildStep{Copy: &v1alpha1.TemplateBuildCopy{Src: "app.py", Dest: "/app.py", FilesHash: "hash"}}, checkpoint: true},
+		{name: "managed definition without steps", managed: true},
+		{name: "unmanaged steps retain capture setting", step: &v1alpha1.TemplateBuildStep{Command: &v1alpha1.TemplateBuildCommand{Command: "echo build"}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := runtime.NewScheme()
+			require.NoError(t, v1alpha1.AddToScheme(s))
+			version := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "build", Namespace: "default"}, Spec: v1alpha1.SandboxTemplateSpec{BuildOptions: &v1alpha1.SandboxTemplateBuildOptions{}}}
+			if tt.managed {
+				version.Labels = map[string]string{v1alpha1.LabelTemplateName: "template"}
+			}
+			if tt.step != nil {
+				version.Spec.BuildOptions.Steps = []v1alpha1.TemplateBuildStep{*tt.step}
+			}
+			raw, err := json.Marshal(version)
+			require.NoError(t, err)
+			handler := &Defaulter{Decoder: admission.NewDecoder(s)}
+			request := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Create, Object: runtime.RawExtension{Raw: raw}}}
+			response := handler.Handle(t.Context(), request)
+			require.True(t, response.Allowed)
+			if tt.checkpoint {
+				data, err := json.Marshal(response.Patches)
+				require.NoError(t, err)
+				patch, err := jsonpatch.DecodePatch(data)
+				require.NoError(t, err)
+				raw, err = patch.Apply(raw)
+				require.NoError(t, err)
+			} else {
+				require.Empty(t, response.Patches)
+			}
+			var defaulted v1alpha1.SandboxTemplate
+			require.NoError(t, json.Unmarshal(raw, &defaulted))
+			require.Equal(t, tt.checkpoint, defaulted.Spec.BuildOptions.Checkpoint)
+			request.Object.Raw = raw
+			response = handler.Handle(t.Context(), request)
+			require.True(t, response.Allowed)
+			require.Empty(t, response.Patches, "defaulting must be idempotent")
+		})
+	}
+	handler := &Defaulter{}
+	response := handler.Handle(t.Context(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{SubResource: "status"}})
+	require.True(t, response.Allowed)
+	require.Empty(t, response.Patches)
+}
 
 func TestDefaulter_Handle(t *testing.T) {
 	err := v1alpha1.AddToScheme(scheme.Scheme)

@@ -24,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
@@ -36,6 +38,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/autopause"
+	"github.com/openkruise/agents/pkg/sandboxtemplate"
 	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
 )
 
@@ -54,7 +57,7 @@ func (h *SandboxSetValidatingHandler) Enabled() bool {
 	return true
 }
 
-func (h *SandboxSetValidatingHandler) Handle(_ context.Context, req admission.Request) admission.Response {
+func (h *SandboxSetValidatingHandler) Handle(ctx context.Context, req admission.Request) admission.Response {
 	obj := &agentsv1alpha1.SandboxSet{}
 	err := h.Decoder.Decode(req, obj)
 	if err != nil {
@@ -65,6 +68,26 @@ func (h *SandboxSetValidatingHandler) Handle(_ context.Context, req admission.Re
 	errList = append(errList, validateSandboxSetSpec(obj.Spec, field.NewPath("spec"))...)
 	if len(errList) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())
+	}
+	versions := &agentsv1alpha1.SandboxTemplateList{}
+	if err := h.Client.List(ctx, versions, client.InNamespace(obj.Namespace), client.MatchingLabels{agentsv1alpha1.LabelTemplateName: obj.Name}); err != nil {
+		if !meta.IsNoMatchError(err) {
+			return admission.Errored(http.StatusServiceUnavailable, fmt.Errorf("check pool name: %w", err))
+		}
+	} else if len(versions.Items) > 0 {
+		return admission.Errored(http.StatusConflict, fmt.Errorf("name %q is occupied by template Builds", obj.Name))
+	}
+	if obj.Spec.TemplateRef != nil {
+		template := &agentsv1alpha1.SandboxTemplate{}
+		err := h.Client.Get(ctx, client.ObjectKey{Namespace: obj.Namespace, Name: obj.Spec.TemplateRef.Name}, template)
+		if err == nil && sandboxtemplate.IsBuildVersion(template) {
+			if template.DeletionTimestamp != nil || !sandboxtemplate.IsStaticReady(template) {
+				return admission.Errored(http.StatusUnprocessableEntity, field.Forbidden(field.NewPath("spec", "templateRef"), "only Ready static Versions can be referenced"))
+			}
+		}
+		if err != nil && !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
+			return admission.Errored(http.StatusServiceUnavailable, fmt.Errorf("read referenced template: %w", err))
+		}
 	}
 	return admission.Allowed("")
 }

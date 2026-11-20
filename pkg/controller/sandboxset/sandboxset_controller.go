@@ -402,6 +402,9 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 			return nil, fmt.Errorf("failed to resolve sandbox template %s/%s: %w",
 				sbs.Namespace, sbs.Spec.TemplateRef.Name, err)
 		}
+		if err := r.validateTemplateRef(ctx, refTemplate); err != nil {
+			return nil, err
+		}
 		if refTemplate.Spec.Template == nil {
 			err := fmt.Errorf("sandbox template %s/%s has no pod template", sbs.Namespace, sbs.Spec.TemplateRef.Name)
 			r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to build sandbox: %s", err)
