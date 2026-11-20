@@ -226,6 +226,29 @@ func TestStorageMountCallBehavior(t *testing.T) {
 			wantMinCalls:    2,
 		},
 		{
+			// io.LimitReader stops at the cap and returns a nil error, so a body
+			// longer than maxRuntimeResponseBody used to look like a complete
+			// payload. The leftover prefix is not valid JSON and was reported as
+			// a decode failure, which is also retried. Hitting the cap is a
+			// bounded read, and repeating the request cannot shrink the body.
+			name: "body over the read cap is a bounded read error and is not retried",
+			handler: func(t *testing.T, w http.ResponseWriter, call int32) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				payload := make([]byte, maxRuntimeResponseBody+1)
+				prefix := []byte(`{"success":true,"mountPath":"`)
+				copy(payload, prefix)
+				for i := len(prefix); i < len(payload); i++ {
+					payload[i] = 'a'
+				}
+				_, _ = w.Write(payload)
+			},
+			wantErr:         true,
+			wantErrContains: []string{"failed to read runtime API", "exceeds"},
+			wantErrExcludes: []string{"failed to decode"},
+			wantCalls:       exactCalls(1),
+		},
+		{
 			// No handler: the sandbox carries no runtime URL, so the call cannot
 			// be addressed at all.
 			name:            "no runtime url on the sandbox",

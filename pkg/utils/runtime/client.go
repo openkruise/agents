@@ -52,6 +52,11 @@ const (
 	maxRuntimeResponseBody = 1 << 20 // 1 MiB
 )
 
+// errRuntimeResponseTooLarge reports that a runtime response body did not end
+// within maxRuntimeResponseBody. It is permanent: reading the same response
+// again cannot make the body smaller, so call must not retry it.
+var errRuntimeResponseTooLarge = errors.New("runtime response body exceeds limit")
+
 // basicAuthHeader encodes user (with an empty password) as an HTTP Basic
 // Authorization header value. It is the single encoding point for the user
 // identity that callers opt into: via WithAuthUser on the Runtime client and
@@ -509,15 +514,23 @@ func (r *runtimeClient) call(ctx context.Context, method, path string, reqBody, 
 		if err != nil {
 			return fmt.Errorf("failed to call runtime API %s: %w", path, err)
 		}
+		// An oversized body is closed without draining. Copying the remainder
+		// would keep reading a response the cap already rejected.
+		var oversized bool
 		defer func() {
 			// Drain and close so the shared transport can reuse the connection;
 			// the one-shot pinned transport closes it eagerly instead
 			// (keep-alives disabled).
-			_, _ = io.Copy(io.Discard, resp.Body)
+			if !oversized {
+				_, _ = io.Copy(io.Discard, resp.Body)
+			}
 			_ = resp.Body.Close()
 		}()
 
-		bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxRuntimeResponseBody))
+		bodyBytes, readErr := readRuntimeResponseBody(resp.Body)
+		if errors.Is(readErr, errRuntimeResponseTooLarge) {
+			oversized = true
+		}
 
 		if resp.StatusCode >= http.StatusBadRequest {
 			// The status code alone already classifies the failure, so a mid-body
@@ -534,9 +547,11 @@ func (r *runtimeClient) call(ctx context.Context, method, path string, reqBody, 
 			}
 		}
 
-		// On a 2xx a truncated body would otherwise surface as a misleading
-		// decode error (or a silently empty respOut): report the transport
-		// failure itself so the retry predicate treats it as transient.
+		// On a 2xx, do not decode the bytes. A short read is a transport
+		// failure and stays retryable. A body past the cap is
+		// errRuntimeResponseTooLarge and is not retried. Decoding the
+		// prefix would otherwise surface as a misleading JSON error, or
+		// as a silently empty respOut.
 		if readErr != nil {
 			return fmt.Errorf("failed to read runtime API %s response body: %w", path, readErr)
 		}
@@ -579,6 +594,10 @@ func retriableRuntimeError(ctx context.Context) func(error) bool {
 		if ctx.Err() != nil {
 			return false
 		}
+		// A body past the read cap will be past it on every attempt.
+		if errors.Is(err, errRuntimeResponseTooLarge) {
+			return false
+		}
 		var apiErr *APIError
 		if errors.As(err, &apiErr) {
 			return !apiErr.IsClientError()
@@ -608,4 +627,20 @@ func extractErrorMessage(body []byte) string {
 		}
 	}
 	return strings.TrimSpace(string(body))
+}
+
+// readRuntimeResponseBody reads at most maxRuntimeResponseBody bytes.
+// io.LimitReader reports a nil error when it stops at the cap, which is
+// indistinguishable from a body that ended exactly on the boundary. One extra
+// byte is read so a longer body is returned as errRuntimeResponseTooLarge
+// instead of being decoded as a truncated JSON prefix.
+func readRuntimeResponseBody(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxRuntimeResponseBody+1))
+	if err != nil {
+		return data, err
+	}
+	if len(data) > maxRuntimeResponseBody {
+		return data[:maxRuntimeResponseBody], fmt.Errorf("%w (%d bytes)", errRuntimeResponseTooLarge, maxRuntimeResponseBody)
+	}
+	return data, nil
 }
