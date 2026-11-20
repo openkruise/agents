@@ -2151,7 +2151,7 @@ func TestRebindingUnknownWriteRecovery(t *testing.T) {
 }
 
 func TestRebindingTargetFailure(t *testing.T) {
-	for _, mode := range []string{"full", "storage full", "stale full", "stale available", "parent limit lowered", "missing", "recreated", "foreign target", "unready", "paused", "expired", "already bound full", "already bound unready", "already bound paused", "already bound deleting", "deleting", "unrelated duplicate", "no alternative", "preferred available"} {
+	for _, mode := range []string{"full", "storage full", "stale full", "stale available", "parent limit lowered", "missing", "recreated", "foreign target", "unready", "paused", "expired", "already bound full", "already bound unready", "already bound paused", "already bound deleting", "already bound starts deleting", "already bound terminal", "already bound deleting no alternative", "deleting", "unrelated duplicate", "no alternative", "preferred available"} {
 		t.Run(mode, func(t *testing.T) {
 			const sid = "000000000000000session"
 			parent := serving(3)
@@ -2195,7 +2195,10 @@ func TestRebindingTargetFailure(t *testing.T) {
 			if mode == "already bound paused" {
 				target.Spec.Paused = true
 			}
-			if mode == "already bound deleting" || mode == "deleting" {
+			if mode == "already bound terminal" {
+				target.Status.Phase = agents.SandboxFailed
+			}
+			if mode == "already bound deleting" || mode == "already bound deleting no alternative" || mode == "deleting" {
 				timestamp := metav1.Now()
 				target.DeletionTimestamp = &timestamp
 				target.Finalizers = []string{"test/retain"}
@@ -2221,14 +2224,30 @@ func TestRebindingTargetFailure(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if mode == "no alternative" {
+			if mode == "no alternative" || mode == "already bound deleting no alternative" {
 				next.Status.Conditions = nil
 			}
 			objects := []client.Object{parent, source, next}
 			if mode != "missing" {
 				objects = append(objects, target)
 			}
-			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).Build()
+			if mode == "already bound starts deleting" {
+				target.Finalizers = []string{"test/retain"}
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+						return err
+					}
+					if mode == "already bound starts deleting" && obj.GetName() == target.Name {
+						if err := c.Delete(ctx, obj); err != nil {
+							return err
+						}
+						return c.Get(ctx, client.ObjectKeyFromObject(obj), obj)
+					}
+					return nil
+				},
+			}).Build()
 			var list agents.SandboxList
 			if err := c.List(t.Context(), &list); err != nil {
 				t.Fatal(err)
@@ -2266,11 +2285,11 @@ func TestRebindingTargetFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch mode {
-			case "stale available":
+			case "stale available", "already bound starts deleting":
 				if !changed || records[sid] != record {
 					t.Fatalf("conflicting write changed migration target: %+v", records)
 				}
-			case "no alternative":
+			case "no alternative", "already bound deleting no alternative":
 				if changed || records[sid] != record {
 					t.Fatalf("no alternative lost hint: %+v", records)
 				}
@@ -2279,7 +2298,7 @@ func TestRebindingTargetFailure(t *testing.T) {
 					t.Fatalf("source not cleaned after recovery: %+v", records)
 				}
 				chosen := next
-				if strings.HasPrefix(mode, "already bound") || mode == "preferred available" {
+				if strings.HasPrefix(mode, "already bound") && mode != "already bound deleting" && mode != "already bound terminal" || mode == "preferred available" {
 					chosen = target
 				}
 				if err := c.Get(t.Context(), client.ObjectKeyFromObject(chosen), &current); err != nil {
@@ -2757,7 +2776,7 @@ func TestRebindingConcurrencyBoundAndCancellation(t *testing.T) {
 }
 
 func TestRebindingRepairsLateActiveWrite(t *testing.T) {
-	for _, mode := range []string{"late write", "reverse snapshot", "stale loser", "stale winner", "lost cleanup response"} {
+	for _, mode := range []string{"late write", "reverse snapshot", "stale loser", "stale winner", "lost cleanup response", "deleting lower UID", "terminal lower UID", "unready lower UID", "winner deleting in response"} {
 		t.Run(mode, func(t *testing.T) {
 			parent := serving(3)
 			const id = "000000000000000session"
@@ -2769,12 +2788,35 @@ func TestRebindingRepairsLateActiveWrite(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if strings.HasSuffix(mode, "lower UID") {
+				loser.Status.Phase = agents.SandboxRunning
+				loser.Status.PodInfo.PodIP = "10.0.0.2"
+				loser.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
+				switch mode {
+				case "deleting lower UID":
+					now := metav1.Now()
+					winner.DeletionTimestamp = &now
+					winner.Finalizers = []string{"test/retain"}
+				case "terminal lower UID":
+					winner.Status.Phase = agents.SandboxFailed
+				}
+				winner, loser = loser, winner
+			}
+			if mode == "winner deleting in response" {
+				winner.Finalizers = []string{"test/retain"}
+			}
 			// The source has already been cleaned. A late old-target write now
 			// leaves two Active copies, so repair cannot depend on Moving records.
 			lost := false
 			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(winner, loser).WithInterceptorFuncs(interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 				if err := c.Patch(ctx, obj, patch, opts...); err != nil {
 					return err
+				}
+				if mode == "winner deleting in response" && obj.GetName() == winner.Name {
+					if err := c.Delete(ctx, obj); err != nil {
+						return err
+					}
+					return c.Get(ctx, client.ObjectKeyFromObject(obj), obj)
 				}
 				if mode == "lost cleanup response" && obj.GetName() == loser.Name && !lost {
 					lost = true
@@ -2827,7 +2869,7 @@ func TestRebindingRepairsLateActiveWrite(t *testing.T) {
 				t.Fatal("loser unrelated state lost")
 			}
 			_, exists := records[id]
-			if exists != (mode == "stale loser" || mode == "stale winner") {
+			if exists != (mode == "stale loser" || mode == "stale winner" || mode == "winner deleting in response") {
 				t.Fatalf("loser=%v", records)
 			}
 		})
@@ -2889,12 +2931,57 @@ func TestRebindingRetargetLateWriteAfterSourceCleanup(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := 0
-		if box == oldTarget {
+		if box == newTarget {
 			want = 1
 		}
 		if len(records) != want {
 			t.Fatalf("%s bindings=%v", box.Name, records)
 		}
+	}
+}
+
+func TestRebindingIneffectiveDuplicatesKeepOneBinding(t *testing.T) {
+	for _, affinity := range []string{"BestEffort", "Strict"} {
+		t.Run(affinity, func(t *testing.T) {
+			parent := serving(2)
+			parent.Spec.SessionPolicy.Affinity = affinity
+			const id = "000000000000000session"
+			boxes := []*agents.Sandbox{member(parent, "a-old"), member(parent, "b-old")}
+			var objects []client.Object
+			for _, box := range boxes {
+				box.Status.Phase = agents.SandboxFailed
+				var err error
+				box.Annotations, err = sessionbinding.Encode(map[string]string{"example.com/keep": "yes"}, sessionbinding.Bindings{id: {CreatedAt: "2026-11-18T10:00:00Z"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				objects = append(objects, box)
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).Build()
+			for round := 0; round < 2; round++ {
+				var list agents.SandboxList
+				if err := c.List(t.Context(), &list); err != nil {
+					t.Fatal(err)
+				}
+				changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items)
+				if err != nil || changed != (round == 0) || pending != (round == 0) {
+					t.Fatalf("repair=%v/%v %v", changed, pending, err)
+				}
+			}
+			for i, box := range boxes {
+				var current agents.Sandbox
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(box), &current); err != nil {
+					t.Fatal(err)
+				}
+				records, err := sessionbinding.Decode(current.Annotations)
+				if err != nil || len(records) != 1-i || current.Annotations["example.com/keep"] != "yes" {
+					t.Fatalf("%s bindings=%v err=%v", box.Name, records, err)
+				}
+				if i == 0 && records[id].Phase != "" {
+					t.Fatal("duplicate repair must not initiate migration")
+				}
+			}
+		})
 	}
 }
 

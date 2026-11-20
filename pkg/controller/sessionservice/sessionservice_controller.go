@@ -687,7 +687,7 @@ func (r *Reconciler) expireBindings(ctx context.Context, parent *agents.SessionS
 // late writes are repaired on subsequent observations.
 func (r *Reconciler) reconcileRebindings(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox) (changed, pending bool, err error) {
 	bindings, sources, decodeErr := collectBindingMigrations(ctx, parent, snapshot)
-	repaired, duplicates, repairErr := r.reconcileDuplicateBindings(ctx, bindings, decodeErr)
+	repaired, duplicates, repairErr := r.reconcileDuplicateBindings(ctx, parent, bindings, decodeErr)
 	if duplicates {
 		// Repair may have changed members, or hit an unresolved conditional write.
 		// Neither migration nor scaling may use this pre-repair snapshot.
@@ -730,9 +730,9 @@ func (r *Reconciler) reconcileRebindings(ctx context.Context, parent *agents.Ses
 }
 
 // reconcileDuplicateBindings also repairs late target writes after the Moving
-// source is gone. UID ordering gives every observation the same winner; readiness
-// and a former target hint do not reverse this choice.
-func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, observed map[*agents.Sandbox]sessionbinding.Bindings, decodeErr error) (changed, pending bool, err error) {
+// source is gone. Prefer effective members, then Ready members, then the lowest
+// UID. Even when every copy is unavailable, retain one binding without migrating.
+func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, parent *agents.SessionService, observed map[*agents.Sandbox]sessionbinding.Bindings, decodeErr error) (changed, pending bool, err error) {
 	active := make(map[string][]*agents.Sandbox)
 	view := make(map[*agents.Sandbox]sessionbinding.Bindings, len(observed))
 	for box, records := range observed {
@@ -759,8 +759,20 @@ func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, observed ma
 	sort.Strings(ids)
 	for _, id := range ids {
 		members := active[id]
-		sort.Slice(members, func(i, j int) bool { return members[i].UID < members[j].UID })
+		sort.Slice(members, func(i, j int) bool {
+			iEffective, jEffective := effectiveMember(parent, members[i]), effectiveMember(parent, members[j])
+			if iEffective != jEffective {
+				return iEffective
+			}
+			iReady, jReady := readyMember(members[i]), readyMember(members[j])
+			if iReady != jReady {
+				return iReady
+			}
+			return members[i].UID < members[j].UID
+		})
 		winner := members[0]
+		wasEffective, wasReady := effectiveMember(parent, winner), readyMember(winner)
+		pending = true
 		confirmed, patchErr := r.patchBindings(ctx, winner, view[winner])
 		if patchErr != nil {
 			return changed, true, patchErr
@@ -770,6 +782,10 @@ func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, observed ma
 		view[winner], err = sessionbinding.Decode(winner.Annotations)
 		if err != nil {
 			return changed, true, err
+		}
+		// If confirmation exposes a lower priority, reselect from a fresh snapshot.
+		if wasEffective && !effectiveMember(parent, winner) || wasReady && !readyMember(winner) {
+			continue
 		}
 		for _, loser := range members[1:] {
 			remaining := maps.Clone(view[loser])
@@ -785,7 +801,7 @@ func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, observed ma
 			}
 		}
 	}
-	return changed, true, nil
+	return changed, pending, nil
 }
 
 func collectBindingMigrations(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox) (map[*agents.Sandbox]sessionbinding.Bindings, []*agents.Sandbox, error) {
@@ -910,6 +926,9 @@ func (m *bindingMigration) ensureTargetRecorded(ctx context.Context) error {
 				}
 				continue
 			}
+			if !effectiveMember(m.parent, box) {
+				continue
+			}
 			if other.Phase != "" || active != nil {
 				return fmt.Errorf("SessionBindingConflict: session %s has conflicting bindings", m.id)
 			}
@@ -976,6 +995,9 @@ func (m *bindingMigration) canAcceptBinding(box *agents.Sandbox) bool {
 }
 
 func (m *bindingMigration) ensureTargetActive(ctx context.Context) (bool, error) {
+	if !effectiveMember(m.parent, m.target) {
+		return false, nil
+	}
 	if _, exists := m.bindings[m.target][m.id]; exists {
 		// Confirm the observed target against the API with the same UID/RV before
 		// removing its source, regardless of the target's current readiness.
@@ -983,7 +1005,7 @@ func (m *bindingMigration) ensureTargetActive(ctx context.Context) (bool, error)
 		if err := m.patchAndObserve(ctx, m.target, m.bindings[m.target]); err != nil {
 			return false, err
 		}
-		return true, nil
+		return effectiveMember(m.parent, m.target), nil
 	}
 	if !bindingTargetReady(m.parent, m.target) {
 		return false, nil
@@ -1015,7 +1037,7 @@ func (m *bindingMigration) ensureTargetActive(ctx context.Context) (bool, error)
 	if err := m.patchAndObserve(ctx, m.target, next); err != nil {
 		return false, err
 	}
-	return true, nil
+	return effectiveMember(m.parent, m.target), nil
 }
 
 func (m *bindingMigration) cleanupSource(ctx context.Context) error {
