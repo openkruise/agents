@@ -161,7 +161,8 @@ func TestCreateVolume(t *testing.T) {
 		assert.Error(t, err)
 		// Verify error message contains PVC namespace/name and timeout info
 		assert.Contains(t, err.Error(), "sandbox-system/pending-volume")
-		assert.Contains(t, err.Error(), "timed out")
+		assert.Contains(t, err.Error(), "was not bound within 100ms")
+		assert.Contains(t, err.Error(), "Check its binding status")
 	})
 }
 

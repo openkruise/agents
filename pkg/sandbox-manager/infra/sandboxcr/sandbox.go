@@ -567,7 +567,9 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error
 	}
 	log.Info("waiting sandbox pause")
 	start := time.Now()
-	if err = pauseTask.Wait(pauseWaitMaxTimeout); err != nil {
+	paused, err := pauseTask.WaitForObject(s.Sandbox, pauseWaitMaxTimeout)
+	if err != nil {
+		err = sandboxWaitTimeoutError(err, "pause", sandboxid.Resolve(s.Sandbox))
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			log.Info("stop waiting sandbox pause: request canceled by client (disconnected or client-side timeout)",
 				"err", err, "ctxErr", ctxErr)
@@ -577,7 +579,9 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error
 		return err
 	}
 	log.Info("sandbox paused", "cost", time.Since(start))
-	return s.InplaceRefresh(ctx, false)
+	// The waiter only accepts snapshots at or beyond our spec write.
+	s.Sandbox = paused.DeepCopy()
+	return nil
 }
 
 const postResumeOperationTimeout = 30 * time.Second
@@ -641,7 +645,8 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) (err err
 	}
 	log.Info("waiting sandbox resume")
 	start := time.Now()
-	if err = resumeTask.Wait(resumeWaitMaxTimeout); err != nil {
+	if _, err = resumeTask.WaitForObject(s.Sandbox, resumeWaitMaxTimeout); err != nil {
+		err = sandboxWaitTimeoutError(err, "resume", sandboxid.Resolve(s.Sandbox))
 		// A canceled request context surfaces here as "client rate limiter Wait
 		// returned an error: context canceled" from client-go, which is misleading:
 		// it is not a throttling failure but a propagation of ctx.Err(). Log it at
@@ -659,7 +664,7 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) (err err
 
 	// If the original context deadline was consumed by the wait, create a fresh
 	// context for post-resume operations (inplace refresh).
-	// This can happen when the wait succeeds via double-check right at the deadline boundary.
+	// The request may expire after the waiter has already observed readiness.
 	postCtx := ctx
 	if ctx.Err() != nil {
 		var postCancel context.CancelFunc

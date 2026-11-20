@@ -41,6 +41,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
@@ -188,98 +189,6 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	assert.False(t, updatedSbx.Spec.Paused)
 }
 
-// TestSandbox_Resume_ContextExpiredAfterWait tests the scenario where the wait operation
-// succeeds right at the deadline boundary, causing the context to expire. The Resume function
-// should create a fresh context for post-resume operations (ReInit, CSI mount, inplace refresh).
-func TestSandbox_Resume_ContextExpiredAfterWait(t *testing.T) {
-	utestutils.InitLogOutput()
-
-	serverOpts := testutils.TestRuntimeServerOptions{
-		RunCommandResult: runtime.RunCommandResult{
-			PID:    1,
-			Exited: true,
-		},
-		RunCommandImmediately: true,
-		InitErrCode:           0,
-	}
-	server := testutils.NewTestRuntimeServer(serverOpts)
-	defer server.Close()
-
-	sandbox := &v1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-			Labels: map[string]string{
-				v1alpha1.LabelSandboxIsClaimed: "true",
-			},
-			Annotations: map[string]string{
-				v1alpha1.AnnotationRuntimeURL: server.URL,
-			},
-		},
-		Status: v1alpha1.SandboxStatus{
-			Phase: v1alpha1.SandboxPaused,
-			PodInfo: v1alpha1.PodInfo{
-				PodIP: "10.0.0.1",
-			},
-		},
-		Spec: v1alpha1.SandboxSpec{
-			Paused: true,
-		},
-	}
-
-	// Initialize as paused state
-	sandbox.Status.Conditions = append(sandbox.Status.Conditions, metav1.Condition{
-		Type:   string(v1alpha1.SandboxConditionPaused),
-		Status: metav1.ConditionTrue,
-	})
-	state, reason := utils.GetSandboxState(sandbox)
-	assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
-
-	cache, fc, err := cachetest.NewTestCache(t)
-	require.NoError(t, err)
-	require.NoError(t, cache.Run(t.Context()))
-	defer cache.Stop(t.Context())
-	CreateSandboxWithStatus(t, fc, sandbox)
-	time.Sleep(10 * time.Millisecond)
-
-	s := AsSandbox(sandbox, cache)
-
-	// Register sandbox key for wait simulation
-	mockMgr := cache.GetMockManager()
-	mockMgr.AddWaitReconcileKey(sandbox)
-
-	// Use a very short timeout (200ms) and update sandbox at 190ms
-	// This simulates the scenario where wait succeeds right at the deadline boundary
-	modified := s.Sandbox.DeepCopy()
-	mergeFrom := ctrl.MergeFrom(s.Sandbox)
-	time.AfterFunc(190*time.Millisecond, func() {
-		modified.Status.Phase = v1alpha1.SandboxRunning
-		modified.Status.Conditions = []metav1.Condition{
-			{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Resume"},
-		}
-		_ = fc.Status().Patch(t.Context(), modified, mergeFrom)
-	})
-
-	// Context timeout is slightly longer than the update delay, but short enough
-	// that context may expire during the wait's double-check phase
-	resumeCtx, resumeCancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer resumeCancel()
-
-	err = s.Resume(resumeCtx, infra.ResumeOptions{})
-
-	// Should succeed because Resume creates a fresh context for post-resume operations
-	require.NoError(t, err)
-
-	// Verify sandbox is in Running state
-	var updatedSbx v1alpha1.Sandbox
-	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &updatedSbx))
-	state, reason = utils.GetSandboxState(&updatedSbx)
-	assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
-	assert.False(t, updatedSbx.Spec.Paused)
-	assert.Nil(t, updatedSbx.Spec.ShutdownTime)
-	assert.Nil(t, updatedSbx.Spec.PauseTime)
-}
-
 //goland:noinspection GoDeprecation
 func TestSandbox_Pause(t *testing.T) {
 	utestutils.InitLogOutput()
@@ -322,7 +231,7 @@ func TestSandbox_Pause(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 			},
 			expectedState:   "",
-			expectError:     "object is not satisfied during double check",
+			expectError:     "timed out after",
 			useShortTimeout: true,
 		},
 		{
@@ -422,6 +331,25 @@ func TestSandbox_Pause(t *testing.T) {
 			}
 
 			if tt.simulatePauseCompleted {
+				// The task uses the real cache. Any extra caller-side Get after
+				// the write would turn its successful observation into a failure.
+				var written atomic.Bool
+				c := interceptor.NewClient(fc.(ctrl.WithWatch), interceptor.Funcs{
+					Get: func(ctx context.Context, c ctrl.WithWatch, key ctrl.ObjectKey, obj ctrl.Object, opts ...ctrl.GetOption) error {
+						if written.Load() {
+							return assert.AnError
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+					Update: func(ctx context.Context, c ctrl.WithWatch, obj ctrl.Object, opts ...ctrl.UpdateOption) error {
+						err := c.Update(ctx, obj, opts...)
+						if err == nil {
+							written.Store(true)
+						}
+						return err
+					},
+				})
+				s.Cache = &apiReaderOverrideCache{Provider: cache, client: c, apiReader: c}
 				mockMgr := cache.GetMockManager()
 				mockMgr.AddWaitReconcileKey(sandbox)
 				modified := s.Sandbox.DeepCopy()
@@ -770,7 +698,7 @@ func TestSandbox_PauseAlreadyPausedShortCircuitsWithActiveResumeWaitHook(t *test
 	require.True(t, ok)
 	entry := val.(*cacheutils.WaitEntry[*v1alpha1.Sandbox])
 	assert.Equal(t, cacheutils.WaitActionResume, entry.Action)
-	entry.Close()
+	waitCancel()
 	select {
 	case <-waitDone:
 	case <-time.After(2 * time.Second):
@@ -905,7 +833,7 @@ func TestSandbox_Resume(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
 			expectedState:   "",
-			expectError:     "object is not satisfied during double check",
+			expectError:     "timed out after",
 			useShortTimeout: true,
 		},
 		{
@@ -960,7 +888,7 @@ func TestSandbox_Resume(t *testing.T) {
 			// PostResumeInit=False and does NOT set Ready=True. E2B Resume times out
 			// because NewSandboxResumeTask gates on Ready=True.
 			expectedState:   "",
-			expectError:     "object is not satisfied during double check",
+			expectError:     "timed out after",
 			initErrCode:     500,
 			withInitRuntime: true,
 			useShortTimeout: true,
@@ -1175,14 +1103,15 @@ func TestSandbox_ResumeConflictsWithActivePauseWaitHook(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "another action(Pause)'s wait task already exists")
 
-	if val, ok := cache.GetWaitHooks().Load(key); ok {
-		val.(*cacheutils.WaitEntry[*v1alpha1.Sandbox]).Close()
-	}
+	waitCancel()
 	select {
-	case <-waitDone:
+	case waitErr := <-waitDone:
+		require.Error(t, waitErr)
 	case <-time.After(2 * time.Second):
 		t.Fatal("pause wait hook did not release")
 	}
+	_, exists := cache.GetWaitHooks().Load(key)
+	assert.False(t, exists)
 }
 
 func TestSandbox_ResumeConflictsWithActivePauseWaitHookBeforeMutation(t *testing.T) {
@@ -1928,9 +1857,15 @@ func TestSandbox_ResumeFailurePathsLeaveRealTimeout(t *testing.T) {
 				defer cancel()
 				err := s.Resume(resumeCtx, infra.ResumeOptions{Timeout: &resumeTimeout})
 				require.ErrorIs(t, err, cacheutils.ErrWaitNotSatisfied)
+				// The caller's own deadline ends the wait, so retries can stop.
+				require.ErrorIs(t, err, context.DeadlineExceeded)
 				var werr *cacheutils.WaitNotSatisfiedError
 				require.ErrorAs(t, err, &werr)
-				assert.True(t, werr.DuringDoubleCheck, "expected double-check failure")
+				assert.Equal(t, cacheutils.WaitActionResume, werr.Action)
+				// The timeout is classified in the infra layer, so the HTTP layer
+				// maps the status from the manager error code alone.
+				assert.Equal(t, managererrors.ErrorInternal, managererrors.GetErrCode(err))
+				assert.Contains(t, err.Error(), "not confirmed")
 			},
 		},
 		{
@@ -1956,10 +1891,7 @@ func TestSandbox_ResumeFailurePathsLeaveRealTimeout(t *testing.T) {
 					client:   interceptedClient,
 				})
 				err := s.Resume(resumeCtx, infra.ResumeOptions{Timeout: &resumeTimeout})
-				require.ErrorIs(t, err, cacheutils.ErrWaitNotSatisfied)
-				var werr *cacheutils.WaitNotSatisfiedError
-				require.ErrorAs(t, err, &werr)
-				assert.True(t, werr.DuringDoubleCheck, "expected double-check failure")
+				require.ErrorIs(t, err, context.Canceled)
 			},
 		},
 		{

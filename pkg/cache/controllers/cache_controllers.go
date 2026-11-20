@@ -104,8 +104,7 @@ func (r *WaitReconciler[T]) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if errors.IsNotFound(err) {
 			log.V(logs.DebugLogLevel).Info("object not found, may have been deleted")
 			if entry, ok := r.loadWaitHook(waitKey); ok {
-				entry.Close()
-				log.V(logs.DebugLogLevel).Info("existing wait entry closed")
+				entry.RequestRead()
 			}
 			expectations.ResourceVersionExpectationDelete(obj)
 		} else {
@@ -126,10 +125,7 @@ func (r *WaitReconciler[T]) checkWaitHooks(ctx context.Context, key string, obj 
 	}
 	log := klog.FromContext(ctx)
 	log.V(logs.DebugLogLevel).Info("object with wait hook changed", "resourceVersion", obj.GetResourceVersion())
-	satisfied, err := entry.Check(obj)
-	if satisfied || err != nil {
-		entry.Close()
-	}
+	entry.Observe(obj)
 }
 
 func (r *WaitReconciler[T]) loadWaitHook(key string) (*cacheutils.WaitEntry[T], bool) {

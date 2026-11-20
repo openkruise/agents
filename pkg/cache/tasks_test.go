@@ -56,7 +56,6 @@ func TestNewSandboxPauseTask_BoundAction(t *testing.T) {
 	defer task.Release()
 
 	assert.Equal(t, cacheutils.WaitActionPause, task.Action())
-	assert.Same(t, sbx, task.Object())
 
 	key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
 	_, ok := c.GetWaitHooks().Load(key)
@@ -89,7 +88,6 @@ func TestNewSandboxResumeTask_BoundAction(t *testing.T) {
 	defer task.Release()
 
 	assert.Equal(t, cacheutils.WaitActionResume, task.Action())
-	assert.Same(t, sbx, task.Object())
 
 	key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
 	_, ok := c.GetWaitHooks().Load(key)
@@ -301,7 +299,7 @@ func TestNewPVCTask_PendingTimeout(t *testing.T) {
 	task := c.NewPVCTask(context.Background(), pvc)
 	err = task.Wait(100 * time.Millisecond)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "object is not satisfied")
+	assert.Contains(t, err.Error(), "timed out after 100ms")
 }
 
 func TestNewPVCTask_LostPhase_ReturnsError(t *testing.T) {
@@ -332,5 +330,5 @@ func TestNewPVCTask_BoundWithoutVolumeName_NotSatisfied(t *testing.T) {
 	task := c.NewPVCTask(context.Background(), pvc)
 	err = task.Wait(100 * time.Millisecond)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "object is not satisfied")
+	assert.Contains(t, err.Error(), "timed out after 100ms")
 }

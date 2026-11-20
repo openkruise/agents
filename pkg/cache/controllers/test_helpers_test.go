@@ -55,6 +55,42 @@ func newMockManagerBuilderForTest(t *testing.T) *MockManagerBuilder {
 	return b
 }
 
+// startTestWait registers a real waiter before returning. The first read
+// supplies the unfinished input; subsequent reads use the test client so a
+// reconciler cache miss exercises the waiter's confirmation path.
+func startTestWait[T client.Object](t *testing.T, hooks *sync.Map, obj T, reader client.Reader, action cacheutils.WaitAction, check cacheutils.CheckFunc[T]) <-chan error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	stopped := make(chan struct{})
+	update := func(ctx context.Context, target T) (T, error) {
+		select {
+		case <-started:
+			fresh := target.DeepCopyObject().(T)
+			err := reader.Get(ctx, client.ObjectKeyFromObject(target), fresh)
+			return fresh, err
+		default:
+			close(started)
+			return target, nil
+		}
+	}
+	task, err := cacheutils.NewAcquiredWaitTask(ctx, hooks, action, obj, update, func(snapshot T) (bool, error) {
+		if client.Object(snapshot) == client.Object(obj) {
+			return false, nil
+		}
+		return check(snapshot)
+	})
+	require.NoError(t, err)
+	go func() {
+		defer close(stopped)
+		done <- task.Wait(time.Minute)
+	}()
+	<-started
+	t.Cleanup(func() { cancel(); <-stopped })
+	return done
+}
+
 func TestMockManager_WaitSimulation_Basic(t *testing.T) {
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
@@ -62,17 +98,14 @@ func TestMockManager_WaitSimulation_Basic(t *testing.T) {
 	fakeClient := newFakeClientWithScheme(t, sbx)
 
 	waitHooks := &sync.Map{}
-	waitHookKey := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
 
 	reconcileCount := atomic.Int32{}
-	entry := cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
-		context.Background(),
+	entry := startTestWait(t, waitHooks, sbx, fakeClient,
 		cacheutils.WaitActionWaitReady,
 		func(obj *agentsv1alpha1.Sandbox) (bool, error) {
 			return reconcileCount.Add(1) >= 2, nil
 		},
 	)
-	waitHooks.Store(waitHookKey, entry)
 
 	mgr := newMockManagerBuilderForTest(t).
 		WithClient(fakeClient).
@@ -85,7 +118,8 @@ func TestMockManager_WaitSimulation_Basic(t *testing.T) {
 	require.NoError(t, mgr.Start(ctx))
 
 	select {
-	case <-entry.Done():
+	case err := <-entry:
+		require.NoError(t, err)
 		assert.GreaterOrEqual(t, reconcileCount.Load(), int32(2))
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout")
@@ -102,22 +136,14 @@ func TestMockManager_WaitSimulation_MultiType(t *testing.T) {
 	sbxDone := make(chan struct{})
 	cpDone := make(chan struct{})
 
-	waitHooks.Store(
-		cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx),
-		cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](context.Background(), cacheutils.WaitActionWaitReady,
-			func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-				close(sbxDone)
-				return true, nil
-			}),
-	)
-	waitHooks.Store(
-		cacheutils.WaitHookKey[*agentsv1alpha1.Checkpoint](cp),
-		cacheutils.NewWaitEntry[*agentsv1alpha1.Checkpoint](context.Background(), cacheutils.WaitActionCheckpoint,
-			func(obj *agentsv1alpha1.Checkpoint) (bool, error) {
-				close(cpDone)
-				return true, nil
-			}),
-	)
+	startTestWait(t, waitHooks, sbx, fakeClient, cacheutils.WaitActionWaitReady, func(obj *agentsv1alpha1.Sandbox) (bool, error) {
+		close(sbxDone)
+		return true, nil
+	})
+	startTestWait(t, waitHooks, cp, fakeClient, cacheutils.WaitActionCheckpoint, func(obj *agentsv1alpha1.Checkpoint) (bool, error) {
+		close(cpDone)
+		return true, nil
+	})
 
 	mgr := newMockManagerBuilderForTest(t).
 		WithClient(fakeClient).
@@ -147,14 +173,10 @@ func TestMockManager_WaitSimulation_ContextCancel(t *testing.T) {
 
 	waitHooks := &sync.Map{}
 	reconcileCount := atomic.Int32{}
-	waitHooks.Store(
-		cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx),
-		cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](context.Background(), cacheutils.WaitActionWaitReady,
-			func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-				reconcileCount.Add(1)
-				return false, nil
-			}),
-	)
+	startTestWait(t, waitHooks, sbx, fakeClient, cacheutils.WaitActionWaitReady, func(obj *agentsv1alpha1.Sandbox) (bool, error) {
+		reconcileCount.Add(1)
+		return false, nil
+	})
 
 	mgr := newMockManagerBuilderForTest(t).
 		WithClient(fakeClient).
@@ -174,66 +196,19 @@ func TestMockManager_WaitSimulation_ContextCancel(t *testing.T) {
 	assert.LessOrEqual(t, reconcileCount.Load(), countBefore+1)
 }
 
-func TestMockManager_WaitSimulation_ErrorAndSatisfied(t *testing.T) {
-	sbxErr := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sbx-error", Namespace: "default"}}
-	sbxOK := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sbx-ok", Namespace: "default"}}
-	fakeClient := newFakeClientWithScheme(t, sbxErr, sbxOK)
+func TestMockManager_WaitSimulation_CheckerError(t *testing.T) {
+	sbx := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sbx-error", Namespace: "default"}}
+	fakeClient := newFakeClientWithScheme(t, sbx)
 
 	waitHooks := &sync.Map{}
 
-	// Test error causes entry to close
-	entryErr := cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
-		context.Background(),
+	// A checker error ends the wait instead of leaving it pending.
+	entry := startTestWait(t, waitHooks, sbx, fakeClient,
 		cacheutils.WaitActionWaitReady,
 		func(obj *agentsv1alpha1.Sandbox) (bool, error) {
 			return false, assert.AnError
 		},
 	)
-	waitHooks.Store(cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbxErr), entryErr)
-
-	// Test satisfied condition causes entry to close
-	entryOK := cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
-		context.Background(),
-		cacheutils.WaitActionWaitReady,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-			return true, nil
-		},
-	)
-	waitHooks.Store(cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbxOK), entryOK)
-
-	mgr := newMockManagerBuilderForTest(t).
-		WithClient(fakeClient).
-		WithWaitSimulation(sbxErr, sbxOK).
-		Build()
-	mgr.SetWaitHooks(waitHooks)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	require.NoError(t, mgr.Start(ctx))
-
-	select {
-	case <-entryErr.Done():
-	case <-time.After(1 * time.Second):
-		t.Fatal("error entry timeout")
-	}
-	select {
-	case <-entryOK.Done():
-	case <-time.After(1 * time.Second):
-		t.Fatal("ok entry timeout")
-	}
-}
-
-func TestMockManager_WaitSimulation_ObjectNotFound(t *testing.T) {
-	sbx := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "non-existent", Namespace: "default"}}
-	fakeClient := newFakeClientWithScheme(t) // Do not create the object
-
-	waitHooks := &sync.Map{}
-	entry := cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
-		context.Background(),
-		cacheutils.WaitActionWaitReady,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-	)
-	waitHooks.Store(cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx), entry)
 
 	mgr := newMockManagerBuilderForTest(t).
 		WithClient(fakeClient).
@@ -246,10 +221,10 @@ func TestMockManager_WaitSimulation_ObjectNotFound(t *testing.T) {
 	require.NoError(t, mgr.Start(ctx))
 
 	select {
-	case <-entry.Done():
-		// NotFound closes the entry
+	case err := <-entry:
+		require.ErrorIs(t, err, assert.AnError)
 	case <-time.After(1 * time.Second):
-		t.Fatal("timeout")
+		t.Fatal("error entry timeout")
 	}
 }
 
@@ -258,11 +233,7 @@ func TestMockManager_WaitSimulation_Concurrent(t *testing.T) {
 	fakeClient := newFakeClientWithScheme(t, sbx)
 
 	waitHooks := &sync.Map{}
-	waitHooks.Store(
-		cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx),
-		cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](context.Background(), cacheutils.WaitActionWaitReady,
-			func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil }),
-	)
+	startTestWait(t, waitHooks, sbx, fakeClient, cacheutils.WaitActionWaitReady, func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil })
 
 	mgr := newMockManagerBuilderForTest(t).
 		WithClient(fakeClient).

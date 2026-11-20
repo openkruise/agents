@@ -34,6 +34,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -713,6 +714,10 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 	tracing.EndSpan(waitCtx, waitSpan, err)
 	if err != nil {
 		log.Error(err, "checkpoint wait failed")
+		var waitErr *cacheutils.WaitNotSatisfiedError
+		if errors.As(err, &waitErr) {
+			return "", managererrors.WrapError(managererrors.ErrorInternal, err, "timed out after %s waiting for the checkpoint of sandbox %s. Check the sandbox status before retrying", waitErr.Timeout, sandboxid.Resolve(sbx))
+		}
 		return "", fmt.Errorf("failed to wait checkpoint ready: %w", err)
 	}
 	fresh := &v1alpha1.Checkpoint{}
