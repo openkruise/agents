@@ -98,6 +98,7 @@ func RegisterE2BRoute[T any](mux *http.ServeMux, method, path string, handler we
 // the request does not reach business handling. Earlier validation may return 400.
 func (sc *Controller) CheckBusinessReady(ctx context.Context, _ *http.Request) (context.Context, *web.ApiError) {
 	if !sc.businessReady() {
+		klog.FromContext(ctx).Info("Control API request rejected while business admission is closed", "status", http.StatusServiceUnavailable)
 		return ctx, &web.ApiError{Code: http.StatusServiceUnavailable, Message: "service initialization incomplete"}
 	}
 	return ctx, nil

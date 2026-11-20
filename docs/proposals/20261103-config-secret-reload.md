@@ -42,41 +42,24 @@ granularity is expressed by splitting a component, not by widening the result
 contract.
 
 Invalid shape, deletion and temporary read failure preserve all live components.
-By default, startup waits for the first usable configuration before opening
-business listeners. With `--ready-before-config=true` and a non-empty
-`--secret-config`, controlled HTTP, route-refresh and ext-proc listeners start
-after fixed security validation, while configuration-dependent workers and peer
-membership remain deferred. Control API business handlers stay closed until
-initial configuration, runtime initialization and initial route delivery finish.
-While waiting for the configuration Secret, any HTTP error status is valid
-as long as the request is rejected before authentication, storage access or
-business handling. The admission check returns 503. Earlier request validation
-can return another error, such as 400 for an invalid tracing request ID. Sandbox
-traffic is deliberately not gated: the data plane depends only on route
-delivery, not on configuration, and keeping admission out of the ext-proc path
-is an accepted simplification. Before initial route delivery, Sandbox requests
-keep the existing missing-route response (502) and may serve routes already
-synchronized from peers. Control-plane health and metrics retain their existing
-listener placement. The flag is restart-only and has no effect on the static
-flag/environment source.
+By default, sandbox-manager waits for the first usable configuration before
+opening business listeners. With `--ready-before-config` and `--secret-config`,
+the pod can become Ready and rolling replacement can proceed while the Secret
+is still missing or invalid. The control API rejects business requests until
+configuration, runtime initialization and initial route delivery finish.
+Health and metrics remain available. Envoy forwards Sandbox traffic whenever
+it has a route.
 
-This opt-in mode permits Ready pods to receive traffic and advance rolling
-replacement before business is available. A successful startup probe no longer
-bounds configuration waiting: missing or invalid configuration can leave the pod
-Ready with the Control API rejecting business requests indefinitely and Sandbox
-traffic following the available routes. No process-level configuration deadline is
-inferred from probes. Corrections activate the same process without rebinding
-listeners. Termination permanently closes admission and cleans up started
-resources within the shutdown budget, including interrupted startup.
-Later reload failures preserve the existing last-valid-configuration behavior.
+The pod can stay Ready indefinitely while waiting. Correcting the Secret lets
+the same process serve business requests without restarting. On termination,
+the process closes admission and stops the listeners it started.
 
 API-key storage keeps one stable public object. Configured administrator-key
 intent is separate from store observation: direct store edits are not overwritten
 by unrelated configuration updates. Secret storage retains its bootstrap read
-boundary and informer refresh protocol. The dispatcher is the sole configuration
-configuration gate: startup waits for every component's first confirmation before
-starting Manager business workers (and, by default, listeners). It selects on the dispatcher's one-shot
-initialization signal, alongside cancellation and premature source exit.
+boundary and informer refresh protocol. The dispatcher signals readiness after
+every component confirms its initial configuration. Manager business workers
+wait for this signal, and startup stops if canceled or if the source exits early.
 The API controller requires a configuration source;
 the entrypoint supplies either the Secret observer or static flag/env input.
 Empty increments leave store observation to the informer. MySQL prepares candidate connections

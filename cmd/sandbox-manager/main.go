@@ -265,6 +265,9 @@ func main() {
 	}
 
 	// Validate required flags
+	if readyBeforeConfig && secretConfigRef == "" {
+		klog.InfoS("Ignoring --ready-before-config because --secret-config is unset")
+	}
 	if sysNs == "" {
 		klog.Fatalf("--system-namespace is required")
 	}
