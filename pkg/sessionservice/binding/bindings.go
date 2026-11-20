@@ -24,12 +24,15 @@ import (
 	"io"
 	"regexp"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
 	SessionServiceUIDLabel      = "agents.kruise.io/session-service-uid"
 	SessionServiceRevisionLabel = "agents.kruise.io/session-service-revision"
 	BindingsAnnotation          = "agents.kruise.io/session-bindings"
+	Moving                      = "Moving"
 	MaxRecords                  = 512
 	MaxBindingBytes             = 128 * 1024
 	MaxAnnotationBytes          = 256 * 1024
@@ -37,9 +40,16 @@ const (
 
 var sessionID = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
 
-// Record contains the last observed activity of a Session binding.
+// Record stores immutable Session creation time and its preferred migration target.
 type Record struct {
-	LastRequestAt string `json:"lastRequestAt"`
+	CreatedAt string `json:"createdAt"`
+
+	Phase string `json:"phase,omitempty"`
+	// TargetSandboxUID persists the chosen destination before any target write.
+	// Recovery prefers this UID while it can accept the binding. An unavailable
+	// target may be replaced; late writes are reconciled by Active-binding deduplication.
+	// UID distinguishes a same-name replacement from the original destination.
+	TargetSandboxUID string `json:"targetSandboxUID,omitempty"`
 }
 
 type Bindings map[string]Record
@@ -70,8 +80,11 @@ func Decode(annotations map[string]string) (Bindings, error) {
 			return nil, fmt.Errorf("decode binding %q: %w", id, err)
 		}
 		var record Record
-		if err := json.Unmarshal(fields["lastRequestAt"], &record.LastRequestAt); err != nil {
-			return nil, fmt.Errorf("binding %q lastRequestAt: %w", id, err)
+		if err := json.Unmarshal(value, &record); err != nil {
+			return nil, fmt.Errorf("binding %q: %w", id, err)
+		}
+		if err := json.Unmarshal(fields["createdAt"], &record.CreatedAt); err != nil {
+			return nil, fmt.Errorf("binding %q createdAt: %w", id, err)
 		}
 		if err := validate(id, record); err != nil {
 			return nil, err
@@ -120,9 +133,15 @@ func validate(id string, record Record) error {
 	if !ValidSessionID(id) {
 		return fmt.Errorf("invalid session ID %q", id)
 	}
-	timestamp, err := time.Parse(time.RFC3339, record.LastRequestAt)
-	if err != nil || len(record.LastRequestAt) != 20 || timestamp.UTC().Format(time.RFC3339) != record.LastRequestAt {
-		return fmt.Errorf("binding %q requires an RFC3339 second-resolution UTC lastRequestAt", id)
+	if record.Phase != "" && record.Phase != Moving {
+		return fmt.Errorf("binding %q has unsupported phase %q", id, record.Phase)
+	}
+	if record.Phase != Moving && record.TargetSandboxUID != "" {
+		return fmt.Errorf("binding %q requires Moving for a target", id)
+	}
+	timestamp, err := time.Parse(time.RFC3339, record.CreatedAt)
+	if err != nil || len(record.CreatedAt) != 20 || timestamp.UTC().Format(time.RFC3339) != record.CreatedAt {
+		return fmt.Errorf("binding %q requires an RFC3339 second-resolution UTC createdAt", id)
 	}
 	return nil
 }
@@ -174,4 +193,33 @@ func object(raw []byte) (map[string]json.RawMessage, error) {
 		return nil, fmt.Errorf("unexpected trailing JSON: %v", err)
 	}
 	return result, nil
+}
+
+// ExpiresAt returns the fixed creation deadline, or zero when expiry is disabled.
+// Moving records and their Active targets use the same creation timestamp.
+func ExpiresAt(record Record, lifetime string) (time.Time, error) {
+	if lifetime == "" {
+		return time.Time{}, nil
+	}
+	duration, err := time.ParseDuration(lifetime)
+	if err != nil || duration <= 0 {
+		return time.Time{}, fmt.Errorf("invalid Session creation lifetime %q", lifetime)
+	}
+	created, err := time.Parse(time.RFC3339, record.CreatedAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid Session creation time: %w", err)
+	}
+	return created.Add(duration), nil
+}
+
+// MergePatch replaces only the binding annotation, conditioned on UID and resourceVersion.
+func MergePatch(obj metav1.Object, bindings Bindings) ([]byte, error) {
+	annotations, err := Encode(obj.GetAnnotations(), bindings)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"metadata": map[string]any{
+		"uid": obj.GetUID(), "resourceVersion": obj.GetResourceVersion(),
+		"annotations": map[string]string{BindingsAnnotation: annotations[BindingsAnnotation]},
+	}})
 }

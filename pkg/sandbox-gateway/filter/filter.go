@@ -60,17 +60,6 @@ const (
 // OnDestroy(DestroyReason) (StreamFilter interface).
 var _ api.StreamFilter = (*sandboxFilter)(nil)
 
-// FilterFactory creates a new sandbox filter instance for each stream.
-func FilterFactory(c interface{}, callbacks api.FilterCallbackHandler) api.StreamFilter {
-	cfg := c.(*FilterConfig)
-	return &sandboxFilter{
-		callbacks:      callbacks,
-		config:         cfg.Config,
-		adapter:        cfg.Adapter,
-		jwtAuthManager: cfg.jwtAuthManager,
-	}
-}
-
 type sandboxFilter struct {
 	api.PassThroughStreamFilter
 	callbacks      api.FilterCallbackHandler

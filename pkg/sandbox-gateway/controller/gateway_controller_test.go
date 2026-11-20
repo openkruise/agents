@@ -25,9 +25,11 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
@@ -35,7 +37,13 @@ import (
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	"github.com/openkruise/agents/pkg/sessionservice/kubernetes"
 )
+
+func TestSessionServiceDisabledSkipsRuntime(t *testing.T) {
+	// Disabled startup must not touch discovery, clients, or create an informer.
+	require.NoError(t, addSessionServiceRuntime(context.Background(), nil, nil, nil, ManagerOptions{}))
+}
 
 func TestAddJWTAuthManager(t *testing.T) {
 	reader := fake.NewClientBuilder().Build()
@@ -363,4 +371,28 @@ func testSandbox(namespace, name, uid, resourceVersion, id string) *agentsv1alph
 			}},
 		},
 	}
+}
+
+func TestSessionServiceCacheRetainsGatewayScope(t *testing.T) {
+	config, err := servingObjectOptions("tenant", "scope=gateway")
+	require.NoError(t, err)
+	require.Contains(t, config.Namespaces, "tenant")
+	require.NotNil(t, config.Label)
+	require.Equal(t, "scope=gateway", config.Label.String())
+}
+
+func TestSessionServiceUIDLookupUsesIsolatedCache(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	parent := &agentsv1alpha1.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "app", UID: "parent-uid"}}
+	isolated := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent).WithIndex(&agentsv1alpha1.SessionService{}, kubernetes.SessionServiceUIDIndex, func(obj client.Object) []string { return []string{string(obj.GetUID())} }).Build()
+	// The process client has neither the object nor its UID index.
+	process := fake.NewClientBuilder().WithScheme(scheme).Build()
+	cli := servingClient{Client: process, serving: isolated}
+	store := kubernetes.NewStore(cli, func() bool { return true })
+	got, err := store.GetSessionServiceByUID(t.Context(), "parent-uid")
+	require.NoError(t, err)
+	require.Equal(t, "tenant", got.Namespace)
+	require.Equal(t, "app", got.Name)
+	require.Equal(t, "parent-uid", got.UID)
 }

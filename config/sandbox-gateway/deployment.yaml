@@ -53,6 +53,9 @@ spec:
                   curl -sS --max-time 5 -X POST http://localhost:9901/drain_listeners?graceful
                   sleep 30
           env:
+            # Opt in to SessionService routing and its dedicated watch; restart to apply.
+            - name: ENABLE_SESSION_SERVICE
+              value: "false"
             - name: GOMAXPROCS
               value: "2"
             - name: POD_IP

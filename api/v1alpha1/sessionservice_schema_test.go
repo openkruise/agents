@@ -156,6 +156,18 @@ func TestSessionServiceSchema(t *testing.T) {
 		{name: "empty ports", mutate: func(s map[string]interface{}) { s["ports"] = []interface{}{} }, invalid: true},
 		{name: "port zero", mutate: func(s map[string]interface{}) { s["ports"] = []interface{}{int64(0)} }, invalid: true},
 		{name: "port too high", mutate: func(s map[string]interface{}) { s["ports"] = []interface{}{int64(65536)} }, invalid: true},
+		{name: "creation expiry", mutate: func(s map[string]interface{}) {
+			s["sessionPolicy"].(map[string]interface{})["expireAfterCreation"] = "6h"
+		}},
+		{name: "zero creation expiry", invalid: true, mutate: func(s map[string]interface{}) {
+			s["sessionPolicy"].(map[string]interface{})["expireAfterCreation"] = "0s"
+		}},
+		{name: "negative creation expiry", invalid: true, mutate: func(s map[string]interface{}) {
+			s["sessionPolicy"].(map[string]interface{})["expireAfterCreation"] = "-1h"
+		}},
+		{name: "malformed creation expiry", invalid: true, mutate: func(s map[string]interface{}) {
+			s["sessionPolicy"].(map[string]interface{})["expireAfterCreation"] = "tomorrow"
+		}},
 		{name: "negative idle", mutate: func(s map[string]interface{}) { s["sessionPolicy"].(map[string]interface{})["pauseAfterIdle"] = "-1m" }, invalid: true},
 		{name: "zero idle", mutate: func(s map[string]interface{}) { s["sessionPolicy"].(map[string]interface{})["expireAfterIdle"] = "0s" }, invalid: true},
 		{name: "valid idle declaration", mutate: func(s map[string]interface{}) { s["sessionPolicy"].(map[string]interface{})["pauseAfterIdle"] = "30m" }},

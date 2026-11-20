@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
@@ -183,9 +184,9 @@ func TestScaleDownBindingPolicy(t *testing.T) {
 		raw  *string
 	}{
 		{name: "absent"}, {name: "empty", raw: ptr("{}")},
-		{name: "bound", raw: ptr(`{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`)},
+		{name: "bound", raw: ptr(`{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}`)},
 		{name: "malformed", raw: ptr(`{`)},
-		{name: "invalid activity", raw: ptr(`{"000000000000000000000s":{"lastRequestAt":"invalid"}}`)},
+		{name: "invalid activity", raw: ptr(`{"000000000000000000000s":{"createdAt":"invalid"}}`)},
 	} {
 		for _, affinity := range []string{"BestEffort", "Strict"} {
 			t.Run(fmt.Sprintf("%s/%s", tt.name, affinity), func(t *testing.T) {
@@ -239,7 +240,7 @@ func TestConflictRejudgesFreshSnapshot(t *testing.T) {
 		if err := c.Get(ctx, client.ObjectKeyFromObject(obj), &fresh); err != nil {
 			return err
 		}
-		fresh.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`}
+		fresh.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}`}
 		if err := c.Update(ctx, &fresh); err != nil {
 			return err
 		}
@@ -746,7 +747,7 @@ func TestConcurrentSessionServiceIsolation(t *testing.T) {
 
 func TestLostCreateResponseConvergesWithoutNameReplay(t *testing.T) {
 	for _, restart := range []bool{false, true} {
-		for _, bindings := range []string{"{}", `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`, "invalid"} {
+		for _, bindings := range []string{"{}", `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}`, "invalid"} {
 			t.Run(fmt.Sprintf("restart=%t/bindings=%s", restart, bindings), func(t *testing.T) {
 				parent := serving(1)
 				hide, attempts := true, 0
@@ -788,7 +789,8 @@ func TestLostCreateResponseConvergesWithoutNameReplay(t *testing.T) {
 					t.Fatalf("expected two independently generated members: %+v", members.Items)
 				}
 				for i := range members.Items {
-					members.Items[i].Annotations[sessionbinding.BindingsAnnotation] = bindings
+					// Give each member a distinct Session; duplicate repair is tested separately.
+					members.Items[i].Annotations[sessionbinding.BindingsAnnotation] = strings.ReplaceAll(bindings, "000000000000000000000s", fmt.Sprintf("%022d", i))
 					if err := c.Update(t.Context(), &members.Items[i]); err != nil {
 						t.Fatal(err)
 					}
@@ -987,7 +989,7 @@ func TestDeleteExpectationReplacementWaitsForTimeout(t *testing.T) {
 	replacement := member(parent, "a")
 	replacement.UID = "new-member-uid"
 	replacement.ResourceVersion = ""
-	replacement.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`}
+	replacement.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}`}
 	if err := c.Create(context.Background(), replacement); err != nil {
 		t.Fatal(err)
 	}
@@ -1150,7 +1152,7 @@ func TestDeletingSessionServiceLeavesMembersToGarbageCollector(t *testing.T) {
 	parent.DeletionTimestamp = &now
 	parent.Finalizers = []string{"test/keep"}
 	box := member(parent, "bound")
-	box.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`}
+	box.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}`}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithObjects(parent, box).WithInterceptorFuncs(interceptor.Funcs{
 		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
 			t.Fatal("created during SessionService deletion")
@@ -1192,7 +1194,7 @@ func rollingFixture(t *testing.T, count int32) (*agents.SessionService, client.C
 		sbx := &members.Items[i]
 		sbx.Status.Phase = agents.SandboxRunning
 		sbx.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
-		sbx.Annotations[sessionbinding.BindingsAnnotation] = `{"000000000000000000000s":{"lastRequestAt":"2026-11-14T00:00:00Z"}}`
+		sbx.Annotations[sessionbinding.BindingsAnnotation] = `{"000000000000000000000s":{"createdAt":"2026-11-14T00:00:00Z"}}`
 		if err := c.Update(context.Background(), sbx); err != nil {
 			t.Fatal(err)
 		}
@@ -1575,9 +1577,9 @@ func TestRollingReplicaReductionBlocksNewCreates(t *testing.T) {
 		oldPresent bool
 	}{
 		{name: "empty target surplus", bindings: "{}"},
-		{name: "bound target surplus", bindings: `{"000000000000000000000s":{"lastRequestAt":"2026-11-14T00:00:00Z"}}`},
+		{name: "bound target surplus", bindings: `{"000000000000000000000s":{"createdAt":"2026-11-14T00:00:00Z"}}`},
 		{name: "invalid target bindings", bindings: "{"},
-		{name: "bound pending targets with Ready old", bindings: `{"000000000000000000000s":{"lastRequestAt":"2026-11-14T00:00:00Z"}}`, oldPresent: true},
+		{name: "bound pending targets with Ready old", bindings: `{"000000000000000000000s":{"createdAt":"2026-11-14T00:00:00Z"}}`, oldPresent: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			parent, c, r, old := rollingFixture(t, 2)
@@ -1599,7 +1601,7 @@ func TestRollingReplicaReductionBlocksNewCreates(t *testing.T) {
 				}
 				sbx.Status.Phase = agents.SandboxRunning
 				sbx.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
-				sbx.Annotations[sessionbinding.BindingsAnnotation] = tt.bindings
+				sbx.Annotations[sessionbinding.BindingsAnnotation] = strings.ReplaceAll(tt.bindings, "000000000000000000000s", fmt.Sprintf("%022d", i))
 				if err := c.Update(context.Background(), sbx); err != nil {
 					t.Fatal(err)
 				}
@@ -1941,7 +1943,7 @@ func TestDeletionPrefersEmptyBindingsWithinBudgets(t *testing.T) {
 		emptyUpdated           bool
 		want                   string
 	}{
-		{name: "bound before empty by name", annotation: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`, emptyReady: true, boundReady: true, want: "z-empty"},
+		{name: "bound before empty by name", annotation: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}`, emptyReady: true, boundReady: true, want: "z-empty"},
 		{name: "malformed is not empty", annotation: `{`, emptyReady: true, boundReady: true, want: "z-empty"},
 		{name: "ready budget overrides preference", annotation: `{`, emptyReady: true, boundReady: false, want: "a-bound"},
 		{name: "target revision protected", annotation: `{`, emptyReady: true, boundReady: true, emptyUpdated: true, want: "a-bound"},
@@ -1968,7 +1970,7 @@ func TestDeletionPrefersEmptyBindingsWithinBudgets(t *testing.T) {
 				members.old = []*agents.Sandbox{bound}
 				members.updated = []*agents.Sandbox{empty}
 			}
-			err := r.scaleDown(t.Context(), parent, "new-revision", members, 1, 0, status)
+			err := r.scaleDown(t.Context(), parent, "new-revision", members, 1, 0, status, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2035,5 +2037,1450 @@ func TestMemberWritesRelyOnWatchReconciliation(t *testing.T) {
 	reconcile(t, r, parent)
 	if satisfied, _, _ := r.Expectations.SatisfiedExpectations(expectationKey(parent)); !satisfied {
 		t.Fatal("watch-triggered snapshot did not satisfy expectation")
+	}
+}
+
+// The normal path completes without waiting for another informer observation.
+func TestRebindingCompletesInSingleReconcile(t *testing.T) {
+	for _, mode := range []string{"normal", "terminating source"} {
+		t.Run(mode, func(t *testing.T) {
+			const sid = "000000000000000session"
+			parent := serving(2)
+			parent.Spec.SessionPolicy.Affinity = "BestEffort"
+			source, target := member(parent, "source"), member(parent, "target")
+			if mode == "terminating source" {
+				now := metav1.Now()
+				source.DeletionTimestamp = &now
+				source.Finalizers = []string{"test/retain"}
+			}
+			record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving}
+			var err error
+			source.Annotations, err = sessionbinding.Encode(map[string]string{"example.com/keep": "yes"}, sessionbinding.Bindings{sid: record, "00000000000000000other": {CreatedAt: "2026-11-18T09:00:00Z"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target.Status.Phase = agents.SandboxRunning
+			target.Status.PodInfo.PodIP = "10.0.0.2"
+			target.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, source, target).Build()
+			var list agents.SandboxList
+			if err := c.List(t.Context(), &list); err != nil {
+				t.Fatal(err)
+			}
+			changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items)
+			if err != nil || !changed || !pending {
+				t.Fatalf("changed=%t pending=%t err=%v", changed, pending, err)
+			}
+			var current agents.Sandbox
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(source), &current); err != nil {
+				t.Fatal(err)
+			}
+			records, err := sessionbinding.Decode(current.Annotations)
+			if err != nil || len(records) != 1 || records["00000000000000000other"].CreatedAt != "2026-11-18T09:00:00Z" || current.Annotations["example.com/keep"] != "yes" {
+				t.Fatalf("source=%+v err=%v", current.Annotations, err)
+			}
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(target), &current); err != nil {
+				t.Fatal(err)
+			}
+			records, err = sessionbinding.Decode(current.Annotations)
+			if err != nil || records[sid].Phase != "" || records[sid].CreatedAt != record.CreatedAt {
+				t.Fatalf("target=%+v err=%v", records, err)
+			}
+		})
+	}
+}
+
+func TestRebindingUnknownWriteRecovery(t *testing.T) {
+	for _, loseAt := range []int{1, 2, 3} {
+		t.Run(fmt.Sprintf("lost patch %d", loseAt), func(t *testing.T) {
+			const sid = "000000000000000session"
+			parent := serving(2)
+			source, target := member(parent, "source"), member(parent, "target")
+			record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving}
+			var err error
+			source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{sid: record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target.Status.Phase = agents.SandboxRunning
+			target.Status.PodInfo.PodIP = "10.0.0.2"
+			target.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
+			patches := 0
+			lost := false
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, source, target).WithInterceptorFuncs(interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patches++
+				if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+					return err
+				}
+				if patches == loseAt {
+					lost = true
+					return context.DeadlineExceeded
+				}
+				return nil
+			}}).Build()
+			for range 8 {
+				var list agents.SandboxList
+				if err := c.List(t.Context(), &list); err != nil {
+					t.Fatal(err)
+				}
+				_, _, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items)
+				if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatal(err)
+				}
+			}
+			if !lost {
+				t.Fatal("write result loss was not injected")
+			}
+			var current agents.Sandbox
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(source), &current); err != nil {
+				t.Fatal(err)
+			}
+			records, err := sessionbinding.Decode(current.Annotations)
+			if err != nil || len(records) != 0 {
+				t.Fatalf("source=%+v %v", records, err)
+			}
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(target), &current); err != nil {
+				t.Fatal(err)
+			}
+			records, err = sessionbinding.Decode(current.Annotations)
+			if err != nil || records[sid].CreatedAt != record.CreatedAt || records[sid].Phase != "" {
+				t.Fatalf("target=%+v %v", records, err)
+			}
+		})
+	}
+}
+
+func TestRebindingTargetFailure(t *testing.T) {
+	for _, mode := range []string{"full", "storage full", "stale full", "stale available", "parent limit lowered", "missing", "recreated", "foreign target", "unready", "paused", "expired", "already bound full", "already bound unready", "already bound paused", "already bound deleting", "already bound starts deleting", "already bound terminal", "already bound deleting no alternative", "deleting", "unrelated duplicate", "no alternative", "preferred available"} {
+		t.Run(mode, func(t *testing.T) {
+			const sid = "000000000000000session"
+			parent := serving(3)
+			limit := int32(1)
+			parent.Spec.SessionPolicy.MaxSessionsPerSandbox = &limit
+			source, target, next := member(parent, "source"), member(parent, "target"), member(parent, "next")
+			for _, box := range []*agents.Sandbox{target, next} {
+				box.Status.Phase = agents.SandboxRunning
+				box.Status.PodInfo.PodIP = "10.0.0.2"
+				box.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
+			}
+			record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID)}
+			if mode == "recreated" {
+				target.UID = "replacement-uid"
+			}
+			if mode == "foreign target" {
+				target.OwnerReferences[0].UID = "another-parent"
+			}
+			if mode == "paused" {
+				target.Spec.Paused = true
+			}
+			if mode == "expired" {
+				timestamp := metav1.NewTime(time.Now().Add(-time.Hour))
+				target.Spec.ShutdownTime = &timestamp
+			}
+			if mode == "storage full" {
+				limit = 2
+			}
+			var err error
+			source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{sid: record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targetRecords := sessionbinding.Bindings{"00000000000000000other": {CreatedAt: record.CreatedAt}}
+			if strings.HasPrefix(mode, "already bound") {
+				targetRecords = sessionbinding.Bindings{sid: {CreatedAt: record.CreatedAt}}
+			}
+			if mode == "unready" || mode == "already bound unready" {
+				target.Status.Conditions = nil
+			}
+			if mode == "already bound paused" {
+				target.Spec.Paused = true
+			}
+			if mode == "already bound terminal" {
+				target.Status.Phase = agents.SandboxFailed
+			}
+			if mode == "already bound deleting" || mode == "already bound deleting no alternative" || mode == "deleting" {
+				timestamp := metav1.Now()
+				target.DeletionTimestamp = &timestamp
+				target.Finalizers = []string{"test/retain"}
+			}
+			if mode == "unready" || mode == "stale available" || mode == "preferred available" || mode == "deleting" {
+				targetRecords = sessionbinding.Bindings{}
+			}
+			target.Annotations, err = sessionbinding.Encode(nil, targetRecords)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "storage full" {
+				size := 0
+				for key, value := range target.Annotations {
+					size += len(key) + len(value)
+				}
+				const paddingKey = "example.com/padding"
+				target.Annotations[paddingKey] = strings.Repeat("x", sessionbinding.MaxAnnotationBytes-size-len(paddingKey)-40)
+			}
+			if mode == "unrelated duplicate" {
+				next.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{sid: {CreatedAt: record.CreatedAt}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "no alternative" || mode == "already bound deleting no alternative" {
+				next.Status.Conditions = nil
+			}
+			objects := []client.Object{parent, source, next}
+			if mode != "missing" {
+				objects = append(objects, target)
+			}
+			if mode == "already bound starts deleting" {
+				target.Finalizers = []string{"test/retain"}
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+						return err
+					}
+					if mode == "already bound starts deleting" && obj.GetName() == target.Name {
+						if err := c.Delete(ctx, obj); err != nil {
+							return err
+						}
+						return c.Get(ctx, client.ObjectKeyFromObject(obj), obj)
+					}
+					return nil
+				},
+			}).Build()
+			var list agents.SandboxList
+			if err := c.List(t.Context(), &list); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "stale full" || mode == "stale available" {
+				var current agents.Sandbox
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(target), &current); err != nil {
+					t.Fatal(err)
+				}
+				records := sessionbinding.Bindings{}
+				if mode == "stale available" {
+					records[sid] = sessionbinding.Record{CreatedAt: record.CreatedAt}
+				}
+				current.Annotations, err = sessionbinding.Encode(nil, records)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := c.Update(t.Context(), &current); err != nil {
+					t.Fatal(err)
+				}
+			}
+			changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items)
+			if !pending {
+				t.Fatal("lost migration task")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var current agents.Sandbox
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(source), &current); err != nil {
+				t.Fatal(err)
+			}
+			records, err := sessionbinding.Decode(current.Annotations)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "stale available", "already bound starts deleting":
+				if !changed || records[sid] != record {
+					t.Fatalf("conflicting write changed migration target: %+v", records)
+				}
+			case "no alternative", "already bound deleting no alternative":
+				if changed || records[sid] != record {
+					t.Fatalf("no alternative lost hint: %+v", records)
+				}
+			default:
+				if !changed || len(records) != 0 {
+					t.Fatalf("source not cleaned after recovery: %+v", records)
+				}
+				chosen := next
+				if strings.HasPrefix(mode, "already bound") && mode != "already bound deleting" && mode != "already bound terminal" || mode == "preferred available" {
+					chosen = target
+				}
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(chosen), &current); err != nil {
+					t.Fatal(err)
+				}
+				active, err := sessionbinding.Decode(current.Annotations)
+				if err != nil || active[sid].CreatedAt != record.CreatedAt || active[sid].Phase != "" {
+					t.Fatalf("recovery target=%+v err=%v", active, err)
+				}
+				if mode == "deleting" {
+					if err := c.Get(t.Context(), client.ObjectKeyFromObject(target), &current); err != nil {
+						t.Fatal(err)
+					}
+					records, err := sessionbinding.Decode(current.Annotations)
+					if err != nil || len(records) != 0 {
+						t.Fatalf("terminating target accepted binding: %+v err=%v", records, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRebindingBatchProgress(t *testing.T) {
+	for _, mode := range []string{"success", "conflict", "error"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := serving(4)
+			var objects []client.Object
+			for i := 0; i < 2; i++ {
+				source := member(parent, fmt.Sprintf("source-%d", i))
+				target := member(parent, fmt.Sprintf("target-%d", i))
+				// Distinct sessions avoid a duplicate binding across independent tasks.
+				id := fmt.Sprintf("%021d%d", 0, i)
+				record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID)}
+				var err error
+				source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: record})
+				if err != nil {
+					t.Fatal(err)
+				}
+				target.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: {CreatedAt: record.CreatedAt}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				objects = append(objects, source, target)
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetName() == "source-0" {
+					if mode == "conflict" {
+						return apierrors.NewConflict(agents.GroupVersion.WithResource("sandboxs").GroupResource(), obj.GetName(), errors.New("concurrent write"))
+					}
+					if mode == "error" {
+						return errors.New("patch failed")
+					}
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			}}).Build()
+			var snapshot agents.SandboxList
+			if err := c.List(t.Context(), &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, snapshot.Items)
+			if !changed || !pending {
+				t.Fatalf("lost batch progress: changed=%v pending=%v err=%v", changed, pending, err)
+			}
+			if (err != nil) != (mode == "error") {
+				t.Fatalf("unexpected batch error: %v", err)
+			}
+			for i := 0; i < 2; i++ {
+				var source agents.Sandbox
+				if err := c.Get(t.Context(), client.ObjectKey{Namespace: parent.Namespace, Name: fmt.Sprintf("source-%d", i)}, &source); err != nil {
+					t.Fatal(err)
+				}
+				records, err := sessionbinding.Decode(source.Annotations)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := 0
+				if i == 0 && mode != "success" {
+					want = 1
+				}
+				if len(records) != want {
+					t.Fatalf("source %d: got %d bindings, want %d", i, len(records), want)
+				}
+			}
+		})
+	}
+}
+
+func TestExpireBindings(t *testing.T) {
+	now := time.Date(2026, 11, 19, 1, 0, 0, 0, time.UTC)
+	for _, mode := range []string{"disabled", "before deadline", "at deadline", "moving", "foreign", "conflict", "canceled"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := serving(1)
+			parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+			box := member(parent, "source")
+			record := sessionbinding.Record{CreatedAt: "2026-11-19T00:00:00Z"}
+			if mode == "disabled" {
+				parent.Spec.SessionPolicy.ExpireAfterCreation = ""
+			}
+			if mode == "before deadline" {
+				record.CreatedAt = "2026-11-19T00:30:00Z"
+			}
+			if mode == "moving" {
+				record.Phase = sessionbinding.Moving
+				record.TargetSandboxUID = "unavailable-target"
+			}
+			if mode == "foreign" {
+				box.OwnerReferences[0].UID = "foreign"
+			}
+			var err error
+			box.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{"000000000000000session": record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, box).Build()
+			var snapshot agents.SandboxList
+			if err := c.List(t.Context(), &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "conflict" {
+				current := box.DeepCopy()
+				current.Annotations["example.com/concurrent"] = "preserved"
+				if err := c.Update(t.Context(), current); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if mode == "canceled" {
+				cancel()
+			}
+			changed, next, err := NewReconciler(c).expireBindings(ctx, parent, snapshot.Items, now)
+			if mode == "canceled" {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("expected cancellation: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var current agents.Sandbox
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(box), &current); err != nil {
+				t.Fatal(err)
+			}
+			records, err := sessionbinding.Decode(current.Annotations)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantRemoved := mode == "at deadline" || mode == "moving"
+			if changed != wantRemoved || (len(records) == 0) != wantRemoved {
+				t.Fatalf("changed=%v records=%v", changed, records)
+			}
+			if mode == "before deadline" && next != 30*time.Minute {
+				t.Fatalf("next=%v", next)
+			}
+			if mode == "conflict" && (next != observationDelay || current.Annotations["example.com/concurrent"] != "preserved") {
+				t.Fatalf("stale snapshot was replayed: %+v next=%v", current.Annotations, next)
+			}
+		})
+	}
+}
+
+func TestRebindingSkipsInvalidMemberBindings(t *testing.T) {
+	for _, mode := range []string{"migration", "duplicate repair"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := serving(3)
+			const id = "000000000000000session"
+			source, target, broken := member(parent, "source"), member(parent, "target"), member(parent, "broken")
+			for _, box := range []*agents.Sandbox{target, broken} {
+				box.Status.Phase = agents.SandboxRunning
+				box.Status.PodInfo.PodIP = "10.0.0.2"
+				box.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+			}
+			record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z"}
+			if mode == "migration" {
+				record.Phase, record.TargetSandboxUID = sessionbinding.Moving, string(target.UID)
+			} else {
+				var err error
+				target.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: record})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var err error
+			source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			broken.Annotations = map[string]string{sessionbinding.BindingsAnnotation: "invalid"}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(source, target, broken).WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if obj.GetName() == broken.Name {
+						t.Fatal("corrupt binding member was used as a target or overwritten")
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			}).Build()
+			var list agents.SandboxList
+			if err := c.List(t.Context(), &list); err != nil {
+				t.Fatal(err)
+			}
+			changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items)
+			if err != nil || !changed || !pending {
+				t.Fatalf("healthy bindings blocked: %v/%v %v", changed, pending, err)
+			}
+			for _, box := range []*agents.Sandbox{source, target, broken} {
+				var current agents.Sandbox
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(box), &current); err != nil {
+					t.Fatal(err)
+				}
+				if box == broken {
+					if current.Annotations[sessionbinding.BindingsAnnotation] != "invalid" {
+						t.Fatal("corrupt annotation was reset")
+					}
+					continue
+				}
+				records, err := sessionbinding.Decode(current.Annotations)
+				if err != nil || (box == target && (records[id].Phase != "" || records[id].CreatedAt != record.CreatedAt)) || box == source && len(records) != 0 {
+					t.Fatalf("%s bindings=%v err=%v", box.Name, records, err)
+				}
+			}
+		})
+	}
+}
+
+func TestBindingMaintenanceDoesNotBlockMemberDeletion(t *testing.T) {
+	for _, mode := range []string{"rebinding success", "unknown source", "unknown target", "unknown committed target", "rejected source", "corrupt source", "expiry success", "expiry unknown", "rollout success", "rollout unknown target"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := serving(0)
+			source, target, spare := member(parent, "a-source"), member(parent, "b-target"), member(parent, "z-spare")
+			target.Status.Phase = agents.SandboxRunning
+			target.Status.PodInfo.PodIP = "10.0.0.2"
+			target.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+			const id = "000000000000000session"
+			record := sessionbinding.Record{CreatedAt: time.Now().UTC().Format(time.RFC3339), Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID)}
+			if strings.HasPrefix(mode, "expiry") {
+				parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+				record.CreatedAt = time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+			}
+			var err error
+			source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "corrupt source" {
+				parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+				source.Annotations[sessionbinding.BindingsAnnotation] = "invalid"
+			}
+			unknownName := ""
+			if mode == "unknown source" || mode == "expiry unknown" {
+				unknownName = source.Name
+			} else if mode == "unknown target" || mode == "unknown committed target" || mode == "rollout unknown target" {
+				unknownName = target.Name
+			}
+			if strings.HasPrefix(mode, "rollout") {
+				*parent.Spec.Replicas = 1
+				parent.Spec.SandboxTemplateSpec.Template.Spec.Containers[0].Image = "app:v2"
+			}
+			lostResponse := errors.New("binding response lost")
+			inject := true
+			var deletes []string
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, source, target, spare).WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if inject && obj.GetName() == unknownName {
+						if mode == "unknown committed target" {
+							if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+								return err
+							}
+						}
+						return lostResponse
+					}
+					if inject && mode == "rejected source" && obj.GetName() == source.Name {
+						return apierrors.NewForbidden(agents.Resource("sandboxes"), obj.GetName(), errors.New("denied"))
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if _, ok := obj.(*agents.Sandbox); !ok {
+						return c.Delete(ctx, obj, opts...)
+					}
+					deletes = append(deletes, obj.GetName())
+					if inject && obj.GetName() == unknownName {
+						t.Fatal("attempted deletion after an unknown binding write")
+					}
+					options := &client.DeleteOptions{}
+					options.ApplyOptions(opts)
+					var current agents.Sandbox
+					if err := c.Get(ctx, client.ObjectKeyFromObject(obj), &current); err != nil {
+						return err
+					}
+					if options.Preconditions == nil || options.Preconditions.UID == nil || options.Preconditions.ResourceVersion == nil {
+						t.Fatal("missing snapshot DELETE conditions")
+					}
+					if current.UID != *options.Preconditions.UID || current.ResourceVersion != *options.Preconditions.ResourceVersion {
+						return apierrors.NewConflict(agents.Resource("sandboxes"), obj.GetName(), errors.New("binding changed"))
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			}).Build()
+			r := NewReconciler(c)
+			_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
+			wantErr := unknownName != "" || mode == "rejected source"
+			if (err != nil) != wantErr {
+				t.Fatalf("reconcile error=%v, wantError=%v", err, wantErr)
+			}
+			if unknownName != "" && !errors.Is(err, lostResponse) {
+				t.Fatalf("lost binding error: %v", err)
+			}
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(spare), &agents.Sandbox{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("independent member deletion blocked: %v, attempts=%v", err, deletes)
+			}
+			if mode == "rejected source" || mode == "corrupt source" {
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(source), &agents.Sandbox{}); !apierrors.IsNotFound(err) {
+					t.Fatalf("definitively rejected/corrupt binding incorrectly protected member: %v", err)
+				}
+			}
+			if unknownName != "" {
+				key := client.ObjectKey{Namespace: parent.Namespace, Name: unknownName}
+				if err := c.Get(t.Context(), key, &agents.Sandbox{}); err != nil {
+					t.Fatalf("unknown member not retained: %v", err)
+				}
+				if strings.HasPrefix(mode, "rollout") {
+					return
+				}
+				inject = false
+				for round := 0; round < 3; round++ {
+					reconcile(t, r, parent)
+				}
+				if err := c.Get(t.Context(), key, &agents.Sandbox{}); !apierrors.IsNotFound(err) {
+					t.Fatalf("unknown-member exclusion leaked into future reconciles: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestUnknownBindingMembersStillCountForCapacity(t *testing.T) {
+	for _, desired := range []int32{0, 5} {
+		t.Run(fmt.Sprint(desired), func(t *testing.T) {
+			parent := serving(desired)
+			target, spare := member(parent, "target"), member(parent, "spare")
+			target.Status.Phase = agents.SandboxRunning
+			target.Status.PodInfo.PodIP = "10.0.0.2"
+			target.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+			objects := []client.Object{parent, target, spare}
+			lost := map[string]error{}
+			for i := 0; i < 2; i++ {
+				source := member(parent, fmt.Sprintf("source-%d", i))
+				var err error
+				source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{fmt.Sprintf("%022d", i): {
+					CreatedAt: time.Now().UTC().Format(time.RFC3339), Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID),
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				objects = append(objects, source)
+				lost[source.Name] = fmt.Errorf("response lost for %s", source.Name)
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if err, unknown := lost[obj.GetName()]; unknown {
+						return err
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if _, unknown := lost[obj.GetName()]; unknown {
+						t.Fatal("unknown binding member was deleted")
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			}).Build()
+			_, err := NewReconciler(c).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
+			for _, cause := range lost {
+				if !errors.Is(err, cause) {
+					t.Fatalf("independent worker error lost: %v", err)
+				}
+			}
+			var list agents.SandboxList
+			if err := c.List(t.Context(), &list); err != nil {
+				t.Fatal(err)
+			}
+			want := int(desired)
+			if desired == 0 {
+				want = 2 // Only the two unknown members are retained.
+			}
+			if len(list.Items) != want {
+				t.Fatalf("member count=%d want=%d", len(list.Items), want)
+			}
+			var current agents.SessionService
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(parent), &current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.Replicas != 4 {
+				t.Fatalf("unknown members were excluded from observed capacity: %+v", current.Status)
+			}
+		})
+	}
+}
+
+func TestBindingWriteResultsPreserveIndependentErrors(t *testing.T) {
+	for _, firstObservation := range []bool{false, true} {
+		t.Run(fmt.Sprint(firstObservation), func(t *testing.T) {
+			missing := apierrors.NewNotFound(agents.Resource("sandboxes"), "source-a")
+			forbidden := apierrors.NewForbidden(agents.Resource("sandboxes"), "source-b", errors.New("denied"))
+			failures := []error{forbidden, missing}
+			if firstObservation {
+				slices.Reverse(failures)
+			}
+			unknown, err := bindingWriteResults(errors.Join(failures...))
+			if len(unknown) != 0 || !errors.Is(err, forbidden) || errors.Is(err, missing) {
+				t.Fatalf("unknown=%v remaining error=%v", unknown, err)
+			}
+		})
+	}
+}
+
+func TestExpiryStageInvalidatesMemberSnapshot(t *testing.T) {
+	parent := serving(0)
+	parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+	box := member(parent, "source")
+	var err error
+	box.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{"000000000000000session": {CreatedAt: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339), Phase: sessionbinding.Moving}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, box).Build()
+	result := reconcile(t, NewReconciler(c), parent)
+	if result.RequeueAfter != observationDelay {
+		t.Fatalf("missing observation requeue: %v", result)
+	}
+	var current agents.Sandbox
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(box), &current); err != nil {
+		t.Fatalf("scaled from pre-cleanup snapshot: %v", err)
+	}
+	records, err := sessionbinding.Decode(current.Annotations)
+	if err != nil || len(records) != 0 {
+		t.Fatalf("expired Moving binding retained: %v %v", records, err)
+	}
+}
+
+func TestExpiredMigrationDoesNotAdvance(t *testing.T) {
+	parent := serving(2)
+	parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+	source, target := member(parent, "source"), member(parent, "target")
+	target.Status.Phase = agents.SandboxRunning
+	target.Status.PodInfo.PodIP = "10.0.0.2"
+	target.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+	var err error
+	source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{"000000000000000session": {CreatedAt: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339), Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, source, target).Build()
+	var snapshot agents.SandboxList
+	if err := c.List(t.Context(), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	changed, _, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, snapshot.Items)
+	if err != nil || changed {
+		t.Fatalf("expired migration advanced: changed=%v err=%v", changed, err)
+	}
+	var current agents.Sandbox
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(target), &current); err != nil {
+		t.Fatal(err)
+	}
+	records, err := sessionbinding.Decode(current.Annotations)
+	if err != nil || len(records) != 0 {
+		t.Fatalf("expired target written: %v %v", records, err)
+	}
+}
+
+func TestExpiryIndependentMembers(t *testing.T) {
+	for _, failure := range []string{"conflict", "patch error", "malformed"} {
+		t.Run(failure, func(t *testing.T) {
+			parent := serving(2)
+			parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+			failed, healthy := member(parent, "a-failed"), member(parent, "b-healthy")
+			for _, box := range []*agents.Sandbox{failed, healthy} {
+				var err error
+				box.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{"000000000000000session": {CreatedAt: "2026-11-19T00:00:00Z"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if failure == "malformed" {
+				failed.Annotations[sessionbinding.BindingsAnnotation] = "invalid"
+			}
+			original := failed.Annotations[sessionbinding.BindingsAnnotation]
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, failed, healthy).WithInterceptorFuncs(interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetName() == failed.Name {
+					if failure == "conflict" {
+						return apierrors.NewConflict(agents.GroupVersion.WithResource("sandboxes").GroupResource(), failed.Name, errors.New("concurrent write"))
+					}
+					return errors.New("write unavailable")
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			}}).Build()
+			var snapshot agents.SandboxList
+			if err := c.List(t.Context(), &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			changed, _, err := NewReconciler(c).expireBindings(t.Context(), parent, snapshot.Items, time.Date(2026, 11, 19, 1, 0, 0, 0, time.UTC))
+			if !changed || (err != nil) != (failure == "patch error") {
+				t.Fatalf("changed=%v err=%v", changed, err)
+			}
+			for _, box := range []*agents.Sandbox{failed, healthy} {
+				var current agents.Sandbox
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(box), &current); err != nil {
+					t.Fatal(err)
+				}
+				if box == failed {
+					if current.Annotations[sessionbinding.BindingsAnnotation] != original {
+						t.Fatal("failed member overwritten")
+					}
+				} else {
+					records, err := sessionbinding.Decode(current.Annotations)
+					if err != nil || len(records) != 0 {
+						t.Fatalf("independent member not cleaned: %v %v", records, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestExpirySchedulesDeadline(t *testing.T) {
+	parent := serving(1)
+	parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+	box := member(parent, "source")
+	box.Status.Phase = agents.SandboxRunning
+	var err error
+	box.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{"000000000000000session": {CreatedAt: time.Now().UTC().Format(time.RFC3339)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, box).Build()
+	result := reconcile(t, NewReconciler(c), parent)
+	if result.RequeueAfter <= 59*time.Minute || result.RequeueAfter > time.Hour {
+		t.Fatalf("expiry not scheduled: %v", result)
+	}
+}
+
+func TestRebindingSingleReconcile(t *testing.T) {
+	for _, mode := range []string{"same source", "same source shared target", "shared target", "independent sources", "partial error", "canceled"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := serving(4)
+			limit := int32(1)
+			if mode == "same source shared target" {
+				limit = 2
+			}
+			parent.Spec.SessionPolicy.MaxSessionsPerSandbox = &limit
+			var objects []client.Object
+			var sources []*agents.Sandbox
+			for i := 0; i < 2; i++ {
+				source := member(parent, fmt.Sprintf("source-%d", i))
+				if strings.HasPrefix(mode, "same source") && i == 1 {
+					source = sources[0]
+				}
+				records, err := sessionbinding.Decode(source.Annotations)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if records == nil {
+					records = sessionbinding.Bindings{}
+				}
+				record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving}
+				if mode == "independent sources" {
+					record.TargetSandboxUID = fmt.Sprintf("target-%d-uid", i)
+				}
+				records[fmt.Sprintf("%022d", i)] = record
+				source.Annotations, err = sessionbinding.Encode(source.Annotations, records)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.HasPrefix(mode, "same source") || i == 0 {
+					sources = append(sources, source)
+				}
+				target := member(parent, fmt.Sprintf("target-%d", i))
+				target.Status.Phase = agents.SandboxRunning
+				target.Status.PodInfo.PodIP = "10.0.0.2"
+				target.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
+				if (mode != "shared target" && mode != "same source shared target") || i == 0 {
+					objects = append(objects, target)
+				}
+			}
+			for _, source := range sources {
+				objects = append(objects, source)
+			}
+			entered := make(chan struct{}, 2)
+			release := make(chan struct{})
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			if mode == "canceled" {
+				cancel()
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if strings.HasPrefix(obj.GetName(), "target-") && mode == "partial error" {
+					return errors.New("target write rejected")
+				}
+				if strings.HasPrefix(obj.GetName(), "source-") && (mode == "shared target" || mode == "independent sources") {
+					records, err := sessionbinding.Decode(obj.(*agents.Sandbox).Annotations)
+					if err != nil {
+						return err
+					}
+					for _, record := range records {
+						if record.TargetSandboxUID == "" || mode == "independent sources" {
+							entered <- struct{}{}
+							select {
+							case <-release:
+							case <-ctx.Done():
+								return ctx.Err()
+							}
+							break
+						}
+					}
+				}
+				if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+					return err
+				}
+				// Model admission changing more than the RV in the successful response.
+				if strings.HasPrefix(mode, "same source") && strings.HasPrefix(obj.GetName(), "source-") {
+					obj.SetAnnotations(maps.Clone(obj.GetAnnotations()))
+					obj.GetAnnotations()["example.com/admitted"] = "retained"
+					return c.Update(ctx, obj)
+				}
+				return nil
+			}}).Build()
+			if mode == "shared target" || mode == "independent sources" {
+				go func() {
+					for range 2 {
+						select {
+						case <-entered:
+						case <-ctx.Done():
+							return
+						}
+					}
+					close(release)
+				}()
+			}
+			var list agents.SandboxList
+			if err := c.List(t.Context(), &list); err != nil {
+				t.Fatal(err)
+			}
+			changed, pending, err := NewReconciler(c).reconcileRebindings(ctx, parent, list.Items)
+			if !pending || changed != (mode != "canceled") || (err != nil) != (mode == "partial error" || mode == "canceled") {
+				t.Fatalf("changed=%v pending=%v err=%v", changed, pending, err)
+			}
+			if err := c.List(t.Context(), &list); err != nil {
+				t.Fatal(err)
+			}
+			active, moving := 0, 0
+			for _, box := range list.Items {
+				if strings.HasPrefix(mode, "same source") && strings.HasPrefix(box.Name, "source-") && box.Annotations["example.com/admitted"] != "retained" {
+					t.Fatal("lost complete patch response")
+				}
+				records, err := sessionbinding.Decode(box.Annotations)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, record := range records {
+					if record.Phase == sessionbinding.Moving {
+						moving++
+					} else {
+						active++
+					}
+				}
+			}
+			wantActive, wantMoving := 2, 0
+			if mode == "shared target" {
+				wantActive, wantMoving = 1, 1
+			}
+			if mode == "partial error" || mode == "canceled" {
+				wantActive, wantMoving = 0, 2
+			}
+			if active != wantActive || moving != wantMoving {
+				t.Fatalf("active=%d moving=%d, want %d/%d", active, moving, wantActive, wantMoving)
+			}
+		})
+	}
+}
+
+func TestRebindingConcurrencyBoundAndCancellation(t *testing.T) {
+	parent := serving(24)
+	var objects []client.Object
+	for i := range 12 {
+		source, target := member(parent, fmt.Sprintf("source-%d", i)), member(parent, fmt.Sprintf("target-%d", i))
+		id := fmt.Sprintf("%022d", i)
+		var err error
+		source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: {CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		target.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: {CreatedAt: "2026-11-18T10:00:00Z"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		objects = append(objects, source, target)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	var mu sync.Mutex
+	active, peak, calls := 0, 0, 0
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+		mu.Lock()
+		active++
+		calls++
+		if active > peak {
+			peak = active
+		}
+		if active == 10 {
+			cancel()
+		}
+		mu.Unlock()
+		<-ctx.Done()
+		mu.Lock()
+		active--
+		mu.Unlock()
+		return ctx.Err()
+	}}).Build()
+	var list agents.SandboxList
+	if err := c.List(t.Context(), &list); err != nil {
+		t.Fatal(err)
+	}
+	changed, pending, err := NewReconciler(c).reconcileRebindings(ctx, parent, list.Items)
+	if changed || !pending || !errors.Is(err, context.Canceled) || peak != 10 || calls != 10 || active != 0 {
+		t.Fatalf("changed=%v pending=%v err=%v peak=%d calls=%d active=%d", changed, pending, err, peak, calls, active)
+	}
+}
+
+func TestRebindingRepairsLateActiveWrite(t *testing.T) {
+	for _, mode := range []string{"late write", "reverse snapshot", "stale loser", "stale winner", "lost cleanup response", "deleting lower UID", "terminal lower UID", "unready lower UID", "winner deleting in response"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := serving(3)
+			const id = "000000000000000session"
+			winner, loser := member(parent, "a-winner"), member(parent, "z-loser")
+			for i, box := range []*agents.Sandbox{winner, loser} {
+				var err error
+				box.Annotations, err = sessionbinding.Encode(map[string]string{"example.com/keep": "yes"}, sessionbinding.Bindings{id: {CreatedAt: "2026-11-18T10:00:00Z"}, fmt.Sprintf("%022d", i+1): {CreatedAt: "2026-11-18T10:00:00Z"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if strings.HasSuffix(mode, "lower UID") {
+				loser.Status.Phase = agents.SandboxRunning
+				loser.Status.PodInfo.PodIP = "10.0.0.2"
+				loser.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
+				switch mode {
+				case "deleting lower UID":
+					now := metav1.Now()
+					winner.DeletionTimestamp = &now
+					winner.Finalizers = []string{"test/retain"}
+				case "terminal lower UID":
+					winner.Status.Phase = agents.SandboxFailed
+				}
+				winner, loser = loser, winner
+			}
+			if mode == "winner deleting in response" {
+				winner.Finalizers = []string{"test/retain"}
+			}
+			// The source has already been cleaned. A late old-target write now
+			// leaves two Active copies, so repair cannot depend on Moving records.
+			lost := false
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(winner, loser).WithInterceptorFuncs(interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+					return err
+				}
+				if mode == "winner deleting in response" && obj.GetName() == winner.Name {
+					if err := c.Delete(ctx, obj); err != nil {
+						return err
+					}
+					return c.Get(ctx, client.ObjectKeyFromObject(obj), obj)
+				}
+				if mode == "lost cleanup response" && obj.GetName() == loser.Name && !lost {
+					lost = true
+					return context.DeadlineExceeded
+				}
+				return nil
+			}}).Build()
+			var list agents.SandboxList
+			if err := c.List(t.Context(), &list); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "reverse snapshot" {
+				slices.Reverse(list.Items)
+			}
+			if mode == "stale loser" || mode == "stale winner" {
+				box := loser.DeepCopy()
+				if mode == "stale winner" {
+					box = winner.DeepCopy()
+				}
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(box), box); err != nil {
+					t.Fatal(err)
+				}
+				box.Annotations["example.com/concurrent"] = "keep"
+				if err := c.Update(t.Context(), box); err != nil {
+					t.Fatal(err)
+				}
+			}
+			changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items)
+			if !pending || (err != nil) != (mode == "lost cleanup response" || mode == "stale loser" || mode == "stale winner") {
+				t.Fatalf("changed=%v pending=%v err=%v", changed, pending, err)
+			}
+			if mode == "late write" || mode == "lost cleanup response" {
+				if !changed {
+					t.Fatal("repair lost progress")
+				}
+			}
+			var current agents.Sandbox
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(winner), &current); err != nil {
+				t.Fatal(err)
+			}
+			records, err := sessionbinding.Decode(current.Annotations)
+			if err != nil || len(records) != 2 {
+				t.Fatalf("winner changed: %v %v", records, err)
+			}
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(loser), &current); err != nil {
+				t.Fatal(err)
+			}
+			records, err = sessionbinding.Decode(current.Annotations)
+			if err != nil || current.Annotations["example.com/keep"] != "yes" {
+				t.Fatal("loser unrelated state lost")
+			}
+			_, exists := records[id]
+			if exists != (mode == "stale loser" || mode == "stale winner" || mode == "winner deleting in response") {
+				t.Fatalf("loser=%v", records)
+			}
+		})
+	}
+}
+
+func TestRebindingRetargetLateWriteAfterSourceCleanup(t *testing.T) {
+	parent := serving(3)
+	const id = "000000000000000session"
+	source, oldTarget, newTarget := member(parent, "source"), member(parent, "a-old"), member(parent, "z-new")
+	record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving, TargetSandboxUID: string(oldTarget.UID)}
+	var err error
+	source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newTarget.Status.Phase = agents.SandboxRunning
+	newTarget.Status.PodInfo.PodIP = "10.0.0.2"
+	newTarget.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(source, oldTarget, newTarget).Build()
+	var list agents.SandboxList
+	if err := c.List(t.Context(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items); err != nil || !changed || !pending {
+		t.Fatalf("migration=%v/%v %v", changed, pending, err)
+	}
+	var current agents.Sandbox
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(source), &current); err != nil {
+		t.Fatal(err)
+	}
+	records, err := sessionbinding.Decode(current.Annotations)
+	if err != nil || len(records) != 0 {
+		t.Fatalf("source not cleaned before late write: %v %v", records, err)
+	}
+	// A delayed write from an earlier decision appears only after source cleanup.
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(oldTarget), &current); err != nil {
+		t.Fatal(err)
+	}
+	current.Annotations, err = sessionbinding.Encode(current.Annotations, sessionbinding.Bindings{id: {CreatedAt: record.CreatedAt}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Update(t.Context(), &current); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.List(t.Context(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items); err != nil || !changed || !pending {
+		t.Fatalf("repair=%v/%v %v", changed, pending, err)
+	}
+	for _, box := range []*agents.Sandbox{source, oldTarget, newTarget} {
+		if err := c.Get(t.Context(), client.ObjectKeyFromObject(box), &current); err != nil {
+			t.Fatal(err)
+		}
+		records, err := sessionbinding.Decode(current.Annotations)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if box == newTarget {
+			want = 1
+		}
+		if len(records) != want {
+			t.Fatalf("%s bindings=%v", box.Name, records)
+		}
+	}
+}
+
+func TestRebindingIneffectiveDuplicatesKeepOneBinding(t *testing.T) {
+	for _, affinity := range []string{"BestEffort", "Strict"} {
+		t.Run(affinity, func(t *testing.T) {
+			parent := serving(2)
+			parent.Spec.SessionPolicy.Affinity = affinity
+			const id = "000000000000000session"
+			boxes := []*agents.Sandbox{member(parent, "a-old"), member(parent, "b-old")}
+			var objects []client.Object
+			for _, box := range boxes {
+				box.Status.Phase = agents.SandboxFailed
+				var err error
+				box.Annotations, err = sessionbinding.Encode(map[string]string{"example.com/keep": "yes"}, sessionbinding.Bindings{id: {CreatedAt: "2026-11-18T10:00:00Z"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				objects = append(objects, box)
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).Build()
+			for round := 0; round < 2; round++ {
+				var list agents.SandboxList
+				if err := c.List(t.Context(), &list); err != nil {
+					t.Fatal(err)
+				}
+				changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items)
+				if err != nil || changed != (round == 0) || pending != (round == 0) {
+					t.Fatalf("repair=%v/%v %v", changed, pending, err)
+				}
+			}
+			for i, box := range boxes {
+				var current agents.Sandbox
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(box), &current); err != nil {
+					t.Fatal(err)
+				}
+				records, err := sessionbinding.Decode(current.Annotations)
+				if err != nil || len(records) != 1-i || current.Annotations["example.com/keep"] != "yes" {
+					t.Fatalf("%s bindings=%v err=%v", box.Name, records, err)
+				}
+				if i == 0 && records[id].Phase != "" {
+					t.Fatal("duplicate repair must not initiate migration")
+				}
+			}
+		})
+	}
+}
+
+func TestRebindingDuplicateSessionsShareMembers(t *testing.T) {
+	parent := serving(2)
+	winner, loser := member(parent, "a-winner"), member(parent, "z-loser")
+	records := sessionbinding.Bindings{
+		"0000000000000000000001": {CreatedAt: "2026-11-18T10:00:00Z"},
+		"0000000000000000000002": {CreatedAt: "2026-11-18T10:00:00Z"},
+	}
+	var err error
+	winner.Annotations, err = sessionbinding.Encode(nil, records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records["0000000000000000000003"] = sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z"}
+	loser.Annotations, err = sessionbinding.Encode(map[string]string{"example.com/keep": "yes"}, records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(winner, loser).Build()
+	var list agents.SandboxList
+	if err := c.List(t.Context(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items); err != nil || !changed || !pending {
+		t.Fatalf("repair=%v/%v %v", changed, pending, err)
+	}
+	var current agents.Sandbox
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(loser), &current); err != nil {
+		t.Fatal(err)
+	}
+	records, err = sessionbinding.Decode(current.Annotations)
+	if err != nil || len(records) != 1 || records["0000000000000000000003"].CreatedAt == "" || current.Annotations["example.com/keep"] != "yes" {
+		t.Fatalf("loser=%v err=%v", records, err)
+	}
+}
+
+func TestRebindingMultipleMovingSourcesConverge(t *testing.T) {
+	for _, mode := range []string{"different hints", "missing hints", "no alternative", "late active"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := serving(4)
+			const id = "000000000000000session"
+			a, b, target := member(parent, "a-source"), member(parent, "b-source"), member(parent, "target")
+			for i, source := range []*agents.Sandbox{a, b} {
+				// Both journals are otherwise eligible members: neither may be
+				// selected as a destination or overwritten by the other source.
+				source.Status.Phase = agents.SandboxRunning
+				source.Status.PodInfo.PodIP = "10.0.0.3"
+				source.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
+				record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving}
+				if mode == "different hints" {
+					record.TargetSandboxUID = []string{string(b.UID), "missing-target"}[i]
+				}
+				var err error
+				source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: record})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			target.Status.Phase = agents.SandboxRunning
+			target.Status.PodInfo.PodIP = "10.0.0.2"
+			target.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
+			if mode == "no alternative" {
+				target.Status.Conditions = nil
+			}
+			if mode == "late active" {
+				var err error
+				target.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: {CreatedAt: "2026-11-18T10:00:00Z"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(a, b, target).Build()
+			for round := range 5 {
+				var snapshot agents.SandboxList
+				if err := c.List(t.Context(), &snapshot); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, snapshot.Items); err != nil {
+					t.Fatal(err)
+				}
+				if round == 0 && mode != "late active" {
+					var current agents.Sandbox
+					if err := c.Get(t.Context(), client.ObjectKeyFromObject(b), &current); err != nil {
+						t.Fatal(err)
+					}
+					records, err := sessionbinding.Decode(current.Annotations)
+					if err != nil || records[id].Phase != sessionbinding.Moving {
+						t.Fatalf("noncanonical journal overwritten: %v %v", records, err)
+					}
+				}
+			}
+			var snapshot agents.SandboxList
+			if err := c.List(t.Context(), &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			active, moving := 0, 0
+			for _, box := range snapshot.Items {
+				records, err := sessionbinding.Decode(box.Annotations)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if record, ok := records[id]; ok {
+					if record.Phase == "" {
+						active++
+					} else {
+						moving++
+					}
+				}
+			}
+			wantActive, wantMoving := 1, 0
+			if mode == "no alternative" {
+				wantActive, wantMoving = 0, 2
+			}
+			if active != wantActive || moving != wantMoving {
+				t.Fatalf("active=%d moving=%d, want %d/%d", active, moving, wantActive, wantMoving)
+			}
+		})
+	}
+}
+
+func TestRebindingCleanupResult(t *testing.T) {
+	for _, mode := range []string{"source gone", "cleanup conflict", "cleanup unknown", "target not found"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := serving(2)
+			source, target := member(parent, "source"), member(parent, "target")
+			const first = "0000000000000000000001"
+			const second = "0000000000000000000002"
+			record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving}
+			var err error
+			source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{first: record, second: record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target.Status.Phase = agents.SandboxRunning
+			target.Status.PodInfo.PodIP = "10.0.0.2"
+			target.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
+			targetWritten, targetCalls := false, 0
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(source, target).WithInterceptorFuncs(interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetName() == target.Name {
+					targetCalls++
+					if mode == "target not found" {
+						return apierrors.NewNotFound(agents.GroupVersion.WithResource("sandboxes").GroupResource(), target.Name)
+					}
+					if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+						return err
+					}
+					targetWritten = true
+					if mode == "source gone" {
+						return c.Delete(ctx, source)
+					}
+					return nil
+				}
+				if targetWritten {
+					if mode == "cleanup conflict" {
+						return apierrors.NewConflict(agents.GroupVersion.WithResource("sandboxes").GroupResource(), source.Name, errors.New("concurrent write"))
+					}
+					if mode == "cleanup unknown" {
+						return context.DeadlineExceeded
+					}
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			}}).Build()
+			var snapshot agents.SandboxList
+			if err := c.List(t.Context(), &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			bindings, sources := collectBindingMigrations(t.Context(), parent, snapshot.Items)
+			if len(sources) != 1 {
+				t.Fatalf("sources=%v", sources)
+			}
+			changed, err := NewReconciler(c).reconcileSourceBindings(t.Context(), parent, sources[0], bindings)
+			if !changed || targetCalls != 1 {
+				t.Fatalf("changed=%v target calls=%d err=%v", changed, targetCalls, err)
+			}
+			var current agents.Sandbox
+			if getErr := c.Get(t.Context(), client.ObjectKeyFromObject(target), &current); getErr != nil {
+				t.Fatal(getErr)
+			}
+			records, decodeErr := sessionbinding.Decode(current.Annotations)
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			if mode == "target not found" {
+				if len(records) != 0 {
+					t.Fatalf("failed target unexpectedly bound: %v", records)
+				}
+			} else if len(records) != 1 || records[first].CreatedAt != record.CreatedAt || records[first].Phase != "" {
+				t.Fatalf("confirmed target binding lost or extra session processed: %v", records)
+			}
+			switch mode {
+			case "source gone":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "cleanup conflict":
+				if !apierrors.IsConflict(err) {
+					t.Fatalf("lost conflict: %v", err)
+				}
+			case "cleanup unknown":
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("lost unknown outcome: %v", err)
+				}
+			case "target not found":
+				if !apierrors.IsNotFound(err) {
+					t.Fatalf("target failure hidden: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestBindingPatchProgress(t *testing.T) {
+	for _, mode := range []string{"success", "rejected", "invalid response"} {
+		t.Run(mode, func(t *testing.T) {
+			source := member(serving(1), "source")
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(source).WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if mode == "rejected" {
+						return apierrors.NewConflict(agents.Resource("sandboxes"), obj.GetName(), errors.New("stale snapshot"))
+					}
+					if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+						return err
+					}
+					if mode == "invalid response" {
+						obj.SetAnnotations(map[string]string{sessionbinding.BindingsAnnotation: "invalid"})
+					}
+					return nil
+				},
+			}).Build()
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(source), source); err != nil {
+				t.Fatal(err)
+			}
+			records := sessionbinding.Bindings{"000000000000000session": {CreatedAt: "2026-11-18T10:00:00Z"}}
+			migration := bindingMigration{reconciler: NewReconciler(c), source: source, bindings: map[*agents.Sandbox]sessionbinding.Bindings{source: {}}}
+			err := migration.patchAndObserve(t.Context(), source, records)
+			wantPatched := mode != "rejected"
+			if (err != nil) != (mode != "success") || migration.changed != wantPatched || migration.sourceConfirmed != wantPatched {
+				t.Fatalf("changed=%t confirmed=%t err=%v", migration.changed, migration.sourceConfirmed, err)
+			}
+			if mode == "success" && !reflect.DeepEqual(migration.bindings[source], records) {
+				t.Fatalf("view=%v", migration.bindings[source])
+			}
+		})
 	}
 }

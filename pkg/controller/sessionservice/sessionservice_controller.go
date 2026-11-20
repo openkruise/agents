@@ -21,11 +21,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -35,6 +37,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -115,7 +118,7 @@ func (r *Reconciler) parentExpectationCleanup() predicate.Funcs {
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sessionservices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sessionservices/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sessionservices/scale,verbs=get;update;patch
-// +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;delete;patch
 // +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch;create
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -158,6 +161,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	status.UpdateRevision = revision
 	setCondition(status, parent, "Supported", true, "Supported", "Fixed-replica template provisioning is supported")
+	// Expiry is independent of migration, including for Moving records.
+	expired, nextExpiry, bindingErr := r.expireBindings(ctx, parent, snapshot.Items, time.Now())
+	changed, moving := false, false
+	if !expired && bindingErr == nil {
+		// Expiry writes require a new binding observation, but do not block capacity.
+		changed, moving, bindingErr = r.reconcileRebindings(ctx, parent, snapshot.Items)
+	}
+	skipDelete, bindingErr := bindingWriteResults(bindingErr)
 	r.observeExpectations(ctx, parent, snapshot.Items)
 	if satisfied, elapsed, _ := r.Expectations.SatisfiedExpectations(expectationKey(parent)); !satisfied {
 		if elapsed >= expectations.ExpectationTimeout {
@@ -165,20 +176,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			// decides from its cached snapshot and the latest desired Revision.
 			r.Expectations.DeleteExpectations(expectationKey(parent))
 		}
-		return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
+		return ctrl.Result{RequeueAfter: observationDelay}, errors.Join(bindingErr, r.updateStatus(ctx, parent, status))
 	}
-	if err := r.reconcileMembers(ctx, parent, revision, snapshot.Items, active, status); err != nil {
+	if err := r.reconcileMembers(ctx, parent, revision, snapshot.Items, active, status, skipDelete); err != nil {
 		if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 			log.Info("member write requires fresh cached judgment", "error", err)
-			return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
+			return ctrl.Result{RequeueAfter: observationDelay}, errors.Join(bindingErr, r.updateStatus(ctx, parent, status))
 		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, errors.Join(bindingErr, err)
 	}
 
-	if err := r.updateStatus(ctx, parent, status); err != nil {
+	if err := errors.Join(bindingErr, r.updateStatus(ctx, parent, status)); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, nil
+	if (expired || changed || moving) && (nextExpiry == 0 || nextExpiry > observationDelay) {
+		nextExpiry = observationDelay
+	}
+	return ctrl.Result{RequeueAfter: nextExpiry}, nil
 }
 
 // calculateStatus observes one cached member snapshot without mutating it.
@@ -230,6 +244,11 @@ func unsupported(parent *agents.SessionService) string {
 	}
 	if parent.Spec.SessionPolicy.PauseAfterIdle != "" || parent.Spec.SessionPolicy.ExpireAfterIdle != "" {
 		return "Idle pause and expiry are not implemented"
+	}
+	if value := parent.Spec.SessionPolicy.ExpireAfterCreation; value != "" {
+		if duration, err := time.ParseDuration(value); err != nil || duration <= 0 {
+			return "Session creation lifetime must be a positive duration"
+		}
 	}
 	return ""
 }
@@ -450,7 +469,7 @@ func (r *Reconciler) deleteMember(ctx context.Context, parent *agents.SessionSer
 	return nil
 }
 
-func (r *Reconciler) reconcileMembers(ctx context.Context, parent *agents.SessionService, revision string, snapshot []agents.Sandbox, active []*agents.Sandbox, status *agents.SessionServiceStatus) error {
+func (r *Reconciler) reconcileMembers(ctx context.Context, parent *agents.SessionService, revision string, snapshot []agents.Sandbox, active []*agents.Sandbox, status *agents.SessionServiceStatus, skipDelete map[types.UID]struct{}) error {
 	desired := desiredReplicas(parent)
 	surge, err := utils.SessionServiceMaxSurge(parent)
 	if err != nil {
@@ -488,7 +507,7 @@ func (r *Reconciler) reconcileMembers(ctx context.Context, parent *agents.Sessio
 		return r.scaleUp(ctx, parent, revision, min(desired-updated, int32(min(space, 16))))
 	}
 
-	return r.scaleDown(ctx, parent, revision, members, desired, space, status)
+	return r.scaleDown(ctx, parent, revision, members, desired, space, status, skipDelete)
 }
 
 // memberRevisions summarizes the same observation used for capacity decisions.
@@ -524,7 +543,7 @@ func observeMemberRevisions(parent *agents.SessionService, revision string, snap
 // Bindings do not protect members. Unready members are preferred, then obsolete
 // revisions, with one shared budget preventing deletion below desired Ready capacity.
 // Reconcile reaches this function only when it cannot first create target members.
-func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionService, revision string, members memberRevisions, desired int32, space int64, status *agents.SessionServiceStatus) error {
+func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionService, revision string, members memberRevisions, desired int32, space int64, status *agents.SessionServiceStatus, skipDelete map[types.UID]struct{}) error {
 	remaining := int64(status.Replicas) - int64(desired)
 	if remaining <= 0 {
 		return nil
@@ -561,9 +580,13 @@ func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionServic
 		}
 		return a.Name < b.Name
 	})
+	var deleteErr error
 	for _, sbx := range candidates {
 		if remaining <= 0 {
 			break
+		}
+		if _, unknown := skipDelete[sbx.UID]; unknown {
+			continue
 		}
 		ready := readyMember(sbx)
 		isUpdated := sbx.Labels[sessionbinding.SessionServiceRevisionLabel] == revision
@@ -576,7 +599,14 @@ func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionServic
 			continue
 		}
 		if err := r.deleteMember(ctx, parent, sbx); err != nil {
-			return err
+			deleteErr = errors.Join(deleteErr, err)
+			if apierrors.IsConflict(err) {
+				// This member needs a fresh observation; independent candidates do not.
+				continue
+			}
+			if !apierrors.IsNotFound(err) {
+				return err
+			}
 		}
 		remaining--
 		if ready {
@@ -589,5 +619,500 @@ func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionServic
 			overCapacity--
 		}
 	}
-	return nil
+	return deleteErr
+}
+
+// expireBindings cleans each owned member from one decision snapshot. It does not
+// interpret migration phases: late migration writes retain an expired createdAt
+// and remain unroutable until a later cleanup observes them.
+func (r *Reconciler) expireBindings(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox, now time.Time) (changed bool, next time.Duration, err error) {
+	lifetime := parent.Spec.SessionPolicy.ExpireAfterCreation
+	if lifetime == "" {
+		return false, 0, nil
+	}
+	for i := range snapshot {
+		if ctx.Err() != nil {
+			return changed, next, errors.Join(err, ctx.Err())
+		}
+		box := &snapshot[i]
+		if !owned(parent, box) || !box.DeletionTimestamp.IsZero() {
+			continue
+		}
+		records, decodeErr := sessionbinding.Decode(box.Annotations)
+		if decodeErr != nil {
+			logf.FromContext(ctx).Info("Skipping member with invalid Session bindings", "sandbox", client.ObjectKeyFromObject(box), "error", decodeErr)
+			continue
+		}
+		remaining := maps.Clone(records)
+		for id, record := range records {
+			deadline, expiryErr := sessionbinding.ExpiresAt(record, lifetime)
+			if expiryErr != nil {
+				return changed, next, errors.Join(err, expiryErr)
+			}
+			if !now.Before(deadline) {
+				delete(remaining, id)
+				continue
+			}
+			if wait := deadline.Sub(now); next == 0 || wait < next {
+				next = wait
+			}
+		}
+		if len(remaining) == len(records) {
+			continue
+		}
+		// Success or conflict requires another observation, never an RV-only replay.
+		if next == 0 || next > observationDelay {
+			next = observationDelay
+		}
+		if _, patchErr := r.patchBindings(ctx, box, remaining); patchErr != nil {
+			if !apierrors.IsConflict(patchErr) && !apierrors.IsNotFound(patchErr) {
+				err = errors.Join(err, patchErr)
+			}
+			continue
+		}
+		changed = true
+	}
+	return changed, next, err
+}
+
+// reconcileRebindings makes the source Moving record a durable migration journal.
+// Gateway only requests a move. The elected controller persists its target before
+// writing that target, then removes the source only after confirming the target.
+// Each source advances its tasks as far as successful API responses allow;
+// leader handoff resumes from CRs, not local state. UID/RV patches make retries
+// conditional and idempotent, but are not a cross-object transaction or fencing
+// against arbitrary old-leader work.
+// Recorded targets are preferred recovery hints; duplicate Active copies from
+// late writes are repaired on subsequent observations.
+func (r *Reconciler) reconcileRebindings(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox) (changed, pending bool, err error) {
+	bindings, sources := collectBindingMigrations(ctx, parent, snapshot)
+	repaired, duplicates, repairErr := r.reconcileDuplicateBindings(ctx, parent, bindings)
+	if duplicates {
+		// Repair may have changed members, or hit an unresolved conditional write.
+		// Migration needs a fresh binding observation. Capacity management still
+		// uses snapshot UID/RV conditions and excludes unknown binding writes.
+		return repaired, true, repairErr
+	}
+	if len(sources) == 0 {
+		return false, false, nil
+	}
+	// Each source owns a private view. Successful API responses advance that view;
+	// concurrent workers sharing a target instead conflict on its captured RV.
+	const concurrency = 10
+	workers := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for _, original := range sources {
+		select {
+		case workers <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return changed, true, errors.Join(err, ctx.Err())
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-workers }()
+			taskChanged, taskErr := r.reconcileSourceBindings(ctx, parent, original, bindings)
+			mu.Lock()
+			changed = changed || taskChanged
+			if taskErr != nil && !apierrors.IsConflict(taskErr) {
+				err = errors.Join(err, taskErr)
+			}
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return changed, true, err
+}
+
+// reconcileDuplicateBindings also repairs late target writes after the Moving
+// source is gone. Prefer effective members, then Ready members, then the lowest
+// UID. Even when every copy is unavailable, retain one binding without migrating.
+func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, parent *agents.SessionService, observed map[*agents.Sandbox]sessionbinding.Bindings) (changed, pending bool, err error) {
+	active := make(map[string][]*agents.Sandbox)
+	view := make(map[*agents.Sandbox]sessionbinding.Bindings, len(observed))
+	for box, records := range observed {
+		copy := box.DeepCopy()
+		view[copy] = maps.Clone(records)
+		for id, record := range records {
+			if record.Phase == "" {
+				active[id] = append(active[id], copy)
+			}
+		}
+	}
+	var ids []string
+	for id, members := range active {
+		if len(members) > 1 {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return false, false, nil
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		members := active[id]
+		sort.Slice(members, func(i, j int) bool {
+			iEffective, jEffective := effectiveMember(parent, members[i]), effectiveMember(parent, members[j])
+			if iEffective != jEffective {
+				return iEffective
+			}
+			iReady, jReady := readyMember(members[i]), readyMember(members[j])
+			if iReady != jReady {
+				return iReady
+			}
+			return members[i].UID < members[j].UID
+		})
+		winner := members[0]
+		wasEffective, wasReady := effectiveMember(parent, winner), readyMember(winner)
+		pending = true
+		patched, patchErr := r.patchBindingView(ctx, view, winner, view[winner])
+		changed = changed || patched
+		if patchErr != nil {
+			return changed, true, patchErr
+		}
+		// If confirmation exposes a lower priority, reselect from a fresh snapshot.
+		if wasEffective && !effectiveMember(parent, winner) || wasReady && !readyMember(winner) {
+			continue
+		}
+		for _, loser := range members[1:] {
+			remaining := maps.Clone(view[loser])
+			delete(remaining, id)
+			patched, patchErr := r.patchBindingView(ctx, view, loser, remaining)
+			changed = changed || patched
+			if patchErr != nil {
+				return changed, true, patchErr
+			}
+		}
+	}
+	return changed, pending, nil
+}
+
+func collectBindingMigrations(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox) (map[*agents.Sandbox]sessionbinding.Bindings, []*agents.Sandbox) {
+	bindings := make(map[*agents.Sandbox]sessionbinding.Bindings)
+	var sources []*agents.Sandbox
+	for i := range snapshot {
+		box := &snapshot[i]
+		if !owned(parent, box) {
+			continue
+		}
+		records, e := sessionbinding.Decode(box.Annotations)
+		if e != nil {
+			logf.FromContext(ctx).Info("Skipping member with invalid Session bindings", "sandbox", client.ObjectKeyFromObject(box), "error", e)
+			continue
+		}
+		bindings[box] = records
+		for _, record := range records {
+			if record.Phase == sessionbinding.Moving {
+				sources = append(sources, box)
+				break
+			}
+		}
+	}
+	return bindings, sources
+}
+
+// reconcileSourceBindings advances sessions in order using a private member view.
+func (r *Reconciler) reconcileSourceBindings(ctx context.Context, parent *agents.SessionService, original *agents.Sandbox, bindings map[*agents.Sandbox]sessionbinding.Bindings) (changed bool, err error) {
+	view := make(map[*agents.Sandbox]sessionbinding.Bindings, len(bindings))
+	var source *agents.Sandbox
+	for box, records := range bindings {
+		copy := box.DeepCopy()
+		view[copy] = maps.Clone(records)
+		if box == original {
+			source = copy
+		}
+	}
+	ids := make([]string, 0, len(view[source]))
+	for id, record := range view[source] {
+		if record.Phase == sessionbinding.Moving {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		migration := bindingMigration{
+			reconciler: r, parent: parent, source: source,
+			id: id, record: view[source][id], bindings: view,
+		}
+		taskErr := migration.reconcile(ctx)
+		changed = changed || migration.changed
+		// A failed decision needs a new informer snapshot for this source.
+		// Independent source workers continue, including on RV conflicts.
+		if taskErr != nil {
+			return changed, taskErr
+		}
+		if migration.sourceGone {
+			// Remaining sessions cannot be recovered from a deleted source.
+			return changed, nil
+		}
+	}
+	return changed, nil
+}
+
+// bindingMigration owns one session's progress within its source worker's view.
+type bindingMigration struct {
+	reconciler      *Reconciler
+	parent          *agents.SessionService
+	source, target  *agents.Sandbox
+	id              string
+	record          sessionbinding.Record
+	bindings        map[*agents.Sandbox]sessionbinding.Bindings
+	changed         bool
+	sourceConfirmed bool
+	sourceGone      bool
+}
+
+func (m *bindingMigration) reconcile(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	deadline, err := sessionbinding.ExpiresAt(m.record, m.parent.Spec.SessionPolicy.ExpireAfterCreation)
+	if err != nil {
+		return err
+	}
+	if !deadline.IsZero() && !time.Now().Before(deadline) {
+		return nil
+	}
+	if err := m.ensureTargetRecorded(ctx); err != nil {
+		return err
+	}
+	// No eligible destination is visible; retain the current hint and wait.
+	if m.target == nil {
+		return nil
+	}
+	active, err := m.ensureTargetActive(ctx)
+	if err != nil || !active {
+		return err
+	}
+	return m.cleanupSource(ctx)
+}
+
+func (m *bindingMigration) ensureTargetRecorded(ctx context.Context) error {
+	var preferred, active *agents.Sandbox
+	canonical := m.source
+	for box, records := range m.bindings {
+		if box == m.source {
+			continue
+		}
+		if string(box.UID) == m.record.TargetSandboxUID {
+			preferred = box
+		}
+		if other, exists := records[m.id]; exists {
+			if other.Phase == sessionbinding.Moving {
+				// Duplicate Active copies can independently become Moving through
+				// partial Gateway observations. Only the lowest-UID source advances
+				// while no Active destination exists; retain the other journals.
+				if box.UID < canonical.UID {
+					canonical = box
+				}
+				continue
+			}
+			if !effectiveMember(m.parent, box) {
+				continue
+			}
+			if other.Phase != "" || active != nil {
+				return fmt.Errorf("SessionBindingConflict: session %s has conflicting bindings", m.id)
+			}
+			active = box
+		}
+	}
+	if active == nil && canonical != m.source {
+		return nil
+	}
+	if active != nil {
+		// Adopt an observed Active copy before creating another, even if a
+		// previous target hint points elsewhere or this member is no longer Ready.
+		m.target = active
+	} else if preferred != nil && m.canAcceptBinding(preferred) {
+		m.target = preferred
+	} else {
+		var candidates []*agents.Sandbox
+		for box := range m.bindings {
+			if box != m.source && m.canAcceptBinding(box) {
+				candidates = append(candidates, box)
+			}
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			if len(m.bindings[candidates[i]]) != len(m.bindings[candidates[j]]) {
+				return len(m.bindings[candidates[i]]) < len(m.bindings[candidates[j]])
+			}
+			return candidates[i].UID < candidates[j].UID
+		})
+		if len(candidates) == 0 {
+			return nil
+		}
+		m.target = candidates[0]
+	}
+	if string(m.target.UID) == m.record.TargetSandboxUID {
+		return nil
+	}
+	// This is a recovery preference, not an exclusive reservation. A late old
+	// target write can temporarily duplicate Active bindings; repair converges it.
+	m.record.TargetSandboxUID = string(m.target.UID)
+	next := maps.Clone(m.bindings[m.source])
+	next[m.id] = m.record
+	return m.patchAndObserve(ctx, m.source, next)
+}
+
+func (m *bindingMigration) canAcceptBinding(box *agents.Sandbox) bool {
+	// A Moving copy is another source journal, never a destination to overwrite.
+	if _, exists := m.bindings[box][m.id]; exists {
+		return false
+	}
+	if !bindingTargetReady(m.parent, box) {
+		return false
+	}
+	limit := sessionbinding.MaxRecords
+	if m.parent.Spec.SessionPolicy.MaxSessionsPerSandbox != nil {
+		limit = int(*m.parent.Spec.SessionPolicy.MaxSessionsPerSandbox)
+	}
+	// Capacity is checked locally, not by the API server. Rejection does not
+	// prove an earlier write failed; a later observation may reuse its binding.
+	if len(m.bindings[box]) >= limit {
+		return false
+	}
+	next := maps.Clone(m.bindings[box])
+	next[m.id] = sessionbinding.Record{CreatedAt: m.record.CreatedAt}
+	_, err := sessionbinding.Encode(box.Annotations, next)
+	return err == nil
+}
+
+func (m *bindingMigration) ensureTargetActive(ctx context.Context) (bool, error) {
+	if !effectiveMember(m.parent, m.target) {
+		return false, nil
+	}
+	if _, exists := m.bindings[m.target][m.id]; exists {
+		// Confirm the observed target against the API with the same UID/RV before
+		// removing its source, regardless of the target's current readiness.
+		// No APIReader or uncached business Get is used.
+		if err := m.patchAndObserve(ctx, m.target, m.bindings[m.target]); err != nil {
+			return false, err
+		}
+		return effectiveMember(m.parent, m.target), nil
+	}
+	if !m.canAcceptBinding(m.target) {
+		return false, nil
+	}
+	next := maps.Clone(m.bindings[m.target])
+	next[m.id] = sessionbinding.Record{CreatedAt: m.record.CreatedAt}
+	// Resume the persisted destination after restart or leader handoff.
+	// Success changes the target RV, rejecting older writes to that snapshot.
+	// Conflict may mean a previous write succeeded; observe again rather than
+	// selecting another target. Unknown outcomes likewise retain the intent.
+	if !m.sourceConfirmed {
+		if err := m.patchAndObserve(ctx, m.source, m.bindings[m.source]); err != nil {
+			return false, err
+		}
+	}
+	if err := m.patchAndObserve(ctx, m.target, next); err != nil {
+		return false, err
+	}
+	return effectiveMember(m.parent, m.target), nil
+}
+
+func (m *bindingMigration) cleanupSource(ctx context.Context) error {
+	remaining := maps.Clone(m.bindings[m.source])
+	delete(remaining, m.id)
+	err := m.patchAndObserve(ctx, m.source, remaining)
+	if apierrors.IsNotFound(err) {
+		// The target is already confirmed Active. A vanished source needs no
+		// further cleanup, and its worker must not process stale source records.
+		m.sourceGone = true
+		return nil
+	}
+	return err
+}
+
+// patchAndObserve advances only this worker's private view from the complete API
+// response. Partial success remains progress even if a later migration stage fails.
+func (m *bindingMigration) patchAndObserve(ctx context.Context, box *agents.Sandbox, records sessionbinding.Bindings) error {
+	patched, err := m.reconciler.patchBindingView(ctx, m.bindings, box, records)
+	m.changed = m.changed || patched
+	if patched && box == m.source {
+		m.sourceConfirmed = true
+	}
+	return err
+}
+
+// patchBindingView advances a private view from the API response. The boolean
+// preserves write progress even if decoding the returned annotation fails.
+func (r *Reconciler) patchBindingView(ctx context.Context, view map[*agents.Sandbox]sessionbinding.Bindings, box *agents.Sandbox, records sessionbinding.Bindings) (bool, error) {
+	updated, err := r.patchBindings(ctx, box, records)
+	if err != nil {
+		return false, err
+	}
+	*box = *updated
+	view[box], err = sessionbinding.Decode(box.Annotations)
+	return true, err
+}
+
+func bindingTargetReady(parent *agents.SessionService, box *agents.Sandbox) bool {
+	if !effectiveMember(parent, box) || !readyMember(box) || box.Status.PodInfo.PodIP == "" {
+		return false
+	}
+	state, _ := utils.GetSandboxState(box)
+	return state == agents.SandboxStateRunning
+}
+
+// patchBindings changes only the binding annotation and uses the decision's
+// captured UID/RV. The returned API response confirms this particular snapshot;
+// later reconciliation still rereads rather than replaying a captured patch.
+func (r *Reconciler) patchBindings(ctx context.Context, box *agents.Sandbox, records sessionbinding.Bindings) (*agents.Sandbox, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	raw, err := sessionbinding.MergePatch(box, records)
+	if err != nil {
+		return nil, fmt.Errorf("build member %s binding patch: %w", box.Name, err)
+	}
+	updated := box.DeepCopy()
+	if err := r.Patch(ctx, updated, client.RawPatch(types.MergePatchType, raw)); err != nil {
+		patchErr := fmt.Errorf("patch member %s bindings: %w", box.Name, err)
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) || apierrors.IsTooManyRequests(err) ||
+			apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
+			return nil, patchErr
+		}
+		return nil, &unknownBindingWrite{uid: box.UID, cause: patchErr}
+	}
+	return updated, nil
+}
+
+// unknownBindingWrite carries only the member whose PATCH outcome is uncertain.
+// It is returned through independent workers, never stored across reconciles.
+type unknownBindingWrite struct {
+	uid   types.UID
+	cause error
+}
+
+func (e *unknownBindingWrite) Error() string { return e.cause.Error() }
+func (e *unknownBindingWrite) Unwrap() error { return e.cause }
+
+// bindingWriteResults collects unknown member UIDs and retains independent
+// failures. A conflict in one worker must not hide another worker's error.
+func bindingWriteResults(err error) (map[types.UID]struct{}, error) {
+	members := make(map[types.UID]struct{})
+	var failures error
+	var collect func(error)
+	collect = func(err error) {
+		if err == nil {
+			return
+		}
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, nested := range joined.Unwrap() {
+				collect(nested)
+			}
+			return
+		}
+		var unknown *unknownBindingWrite
+		if errors.As(err, &unknown) {
+			members[unknown.uid] = struct{}{}
+		}
+		if !apierrors.IsConflict(err) && !apierrors.IsNotFound(err) {
+			failures = errors.Join(failures, err)
+		}
+	}
+	collect(err)
+	return members, failures
 }
