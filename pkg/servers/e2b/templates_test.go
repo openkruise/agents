@@ -48,15 +48,17 @@ import (
 
 type listSandboxSetsSpy struct {
 	infracache.Provider
-	result    []*v1alpha1.SandboxSet
-	err       error
-	called    bool
-	namespace string
+	result      []*v1alpha1.SandboxSet
+	err         error
+	called      bool
+	namespace   string
+	templateRef string
 }
 
 func (s *listSandboxSetsSpy) ListSandboxSets(_ context.Context, opts infracache.ListSandboxSetsOptions) ([]*v1alpha1.SandboxSet, error) {
 	s.called = true
 	s.namespace = opts.Namespace
+	s.templateRef = opts.TemplateRef
 	return s.result, s.err
 }
 

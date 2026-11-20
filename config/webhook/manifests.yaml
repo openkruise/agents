@@ -42,6 +42,7 @@ webhooks:
     - v1alpha1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - sandboxtemplates
   sideEffects: None
@@ -171,6 +172,7 @@ webhooks:
     - v1alpha1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - sandboxtemplates
   sideEffects: None

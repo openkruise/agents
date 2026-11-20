@@ -45,6 +45,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
+	"github.com/openkruise/agents/pkg/sandbox-manager/templatecr"
 	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 )
@@ -190,6 +191,12 @@ func (b *SandboxManagerBuilder) WithQuotaEnforcer(qe QuotaEnforcer) *SandboxMana
 	return b
 }
 
+// WithTemplateStore supplies the TemplateBuild coordination store.
+func (b *SandboxManagerBuilder) WithTemplateStore(store TemplateStore) *SandboxManagerBuilder {
+	b.instance.templateStore = store
+	return b
+}
+
 func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 	if err := sandboxid.ValidatePrefix(b.opts.ShortSandboxIDPrefix); err != nil {
 		return nil, errors.NewError(errors.ErrorInternal, "short sandbox id prefix: %v", err)
@@ -216,6 +223,11 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 		return nil, errors.NewError(errors.ErrorInternal, "failed to get infra builder: %v", err)
 	}
 	b.instance.infra = builder.Build()
+	if b.instance.templateStore == nil {
+		if cacheProvider := b.instance.infra.GetCache(); cacheProvider != nil {
+			b.instance.templateStore = templatecr.NewStore(cacheProvider.GetClient(), cacheProvider.GetAPIReader)
+		}
+	}
 	routeSource := b.instance.infra.GetSandboxRouteSource()
 	if routeSource == nil {
 		return nil, errors.NewError(errors.ErrorInternal, "sandbox route source is not configured")
@@ -293,6 +305,9 @@ type SandboxManager struct {
 	trafficTokenOptions      identity.TokenOptions
 	trafficTokenSingleflight *trafficTokenSingleflight
 	trafficTokenIssues       trafficTokenIssueLifecycle
+
+	// templateStore owns TemplateBuild coordination records.
+	templateStore TemplateStore
 }
 
 // ConfigureQuota assembles the quota subsystem once, before configuration starts.

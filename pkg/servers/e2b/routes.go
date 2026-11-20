@@ -67,6 +67,13 @@ func (sc *Controller) registerRoutes() {
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates", sc.ListTemplates, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates/{templateID}", sc.GetTemplate, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodDelete, "/templates/{templateID}", sc.DeleteTemplate, sc.CheckApiKey)
+	// E2B Template Build protocol: reserve binds the name, submit completes
+	// the reserved draft, status reports the converged phase, and aliases
+	// answers the existence probe of Template.exists.
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/v3/templates", sc.ReserveTemplateBuild, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/v2/templates/{templateID}/builds/{buildID}", sc.SubmitTemplateBuild, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates/{templateID}/builds/{buildID}/status", sc.GetTemplateBuildStatus, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates/aliases/{alias}", sc.GetTemplateAlias, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/browser/{sandboxID}/json/version", sc.BrowserUse, sc.CheckApiKey)
 
 	// Volume management endpoints

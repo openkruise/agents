@@ -58,9 +58,6 @@ func TestSandboxTemplateCRDSchema(t *testing.T) {
 	if agentsv1alpha1.SandboxTemplateBackendKubernetes != "k8s" {
 		t.Fatalf("kubernetes backend wire value = %q", agentsv1alpha1.SandboxTemplateBackendKubernetes)
 	}
-	if agentsv1alpha1.SandboxTemplateBackendSubstrate != "substrate" {
-		t.Fatalf("substrate backend wire value = %q", agentsv1alpha1.SandboxTemplateBackendSubstrate)
-	}
 	external, crd := loadSandboxTemplateCRD(t)
 	if errs := crdvalidation.ValidateCustomResourceDefinition(context.Background(), crd); len(errs) != 0 {
 		t.Fatalf("CRD admission: %v", errs)
@@ -165,7 +162,7 @@ func TestSandboxTemplateCRDCELRules(t *testing.T) {
 		{name: "startCommand passes", obj: buildOnly(map[string]interface{}{"startCommand": command})},
 		{
 			name:    "backend change on update is rejected",
-			obj:     resource(map[string]interface{}{"backend": "substrate"}),
+			obj:     resource(map[string]interface{}{"backend": "beta"}),
 			oldObj:  resource(map[string]interface{}{"backend": "k8s"}),
 			wantErr: "backend is immutable",
 		},
