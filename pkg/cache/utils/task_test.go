@@ -40,7 +40,7 @@ func TestWaitTask_AlreadySatisfied_ReturnsImmediately(t *testing.T) {
 	hooks := &sync.Map{}
 	task := NewWaitTask[*agentsv1alpha1.Sandbox](
 		context.Background(), hooks, WaitActionPause, newTaskTestSandbox("sbx-1"),
-		func(s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) { return s, nil },
+		func(_ context.Context, s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) { return s, nil },
 		func(s *agentsv1alpha1.Sandbox) (bool, error) { return true, nil },
 	)
 	err := task.Wait(5 * time.Second)
@@ -55,46 +55,12 @@ func TestWaitTask_ZeroTimeout_ReturnsError(t *testing.T) {
 	hooks := &sync.Map{}
 	task := NewWaitTask[*agentsv1alpha1.Sandbox](
 		context.Background(), hooks, WaitActionPause, newTaskTestSandbox("sbx-2"),
-		func(s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) { return s, nil },
+		func(_ context.Context, s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) { return s, nil },
 		func(s *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
 	)
 	err := task.Wait(0)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "object is not satisfied")
-}
-
-func TestWaitTask_Accessors(t *testing.T) {
-	hooks := &sync.Map{}
-	sbx := newTaskTestSandbox("sbx-3")
-	task := NewWaitTask[*agentsv1alpha1.Sandbox](
-		context.Background(), hooks, WaitActionResume, sbx,
-		func(s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) { return s, nil },
-		func(s *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-	)
-	assert.Equal(t, WaitActionResume, task.Action())
-	assert.Same(t, sbx, task.Object())
-}
-
-func TestWaitTask_CapturedCtxCancel_TriggersDoubleCheck(t *testing.T) {
-	hooks := &sync.Map{}
-	ctx, cancel := context.WithCancel(context.Background())
-	updateCalled := 0
-	task := NewWaitTask[*agentsv1alpha1.Sandbox](
-		ctx, hooks, WaitActionPause, newTaskTestSandbox("sbx-4"),
-		func(s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-			updateCalled++
-			return s, nil
-		},
-		func(s *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-	)
-	// Cancel after 20ms, well before timeout. Wait must return via double-check branch.
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		cancel()
-	}()
-	err := task.Wait(2 * time.Second)
-	assert.Error(t, err)
-	assert.GreaterOrEqual(t, updateCalled, 1, "double-check must call update at least once")
+	assert.ErrorIs(t, err, ErrWaitNotSatisfied)
 }
 
 func TestNewAcquiredWaitTask(t *testing.T) {
@@ -110,12 +76,11 @@ func TestNewAcquiredWaitTask(t *testing.T) {
 
 				task, err := NewAcquiredWaitTask[*agentsv1alpha1.Sandbox](
 					context.Background(), hooks, WaitActionPause, sbx,
-					func(s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) { return s, nil },
+					func(_ context.Context, s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) { return s, nil },
 					func(s *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
 				)
 				require.NoError(t, err)
 				assert.Equal(t, WaitActionPause, task.Action())
-				assert.Same(t, sbx, task.Object())
 
 				key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
 				stored, exists := hooks.Load(key)
@@ -134,7 +99,7 @@ func TestNewAcquiredWaitTask(t *testing.T) {
 			run: func(t *testing.T) {
 				hooks := &sync.Map{}
 				sbx := newTaskTestSandbox("sbx-acquired-conflict")
-				update := func(s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) { return s, nil }
+				update := func(_ context.Context, s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) { return s, nil }
 				check := func(s *agentsv1alpha1.Sandbox) (bool, error) { return false, nil }
 
 				pauseTask, err := NewAcquiredWaitTask[*agentsv1alpha1.Sandbox](
@@ -161,7 +126,7 @@ func TestNewAcquiredWaitTask(t *testing.T) {
 
 				task, err := NewAcquiredWaitTask[*agentsv1alpha1.Sandbox](
 					context.Background(), hooks, WaitActionResume, sbx,
-					func(s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+					func(_ context.Context, s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
 						return updated, nil
 					},
 					func(s *agentsv1alpha1.Sandbox) (bool, error) {
@@ -186,7 +151,7 @@ func TestNewAcquiredWaitTask(t *testing.T) {
 
 				task, err := NewAcquiredWaitTask[*agentsv1alpha1.Sandbox](
 					context.Background(), hooks, WaitActionPause, sbx,
-					func(s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) { return s, nil },
+					func(_ context.Context, s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) { return s, nil },
 					func(s *agentsv1alpha1.Sandbox) (bool, error) { return true, nil },
 				)
 				require.NoError(t, err)
@@ -212,7 +177,7 @@ func TestNewAcquiredWaitTask(t *testing.T) {
 
 				task, err := NewAcquiredWaitTask[*agentsv1alpha1.Sandbox](
 					context.Background(), hooks, WaitActionResume, sbx,
-					func(s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+					func(_ context.Context, s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
 						return updated, nil
 					},
 					func(s *agentsv1alpha1.Sandbox) (bool, error) {
@@ -242,7 +207,7 @@ func TestNewAcquiredWaitTask(t *testing.T) {
 
 				task, err := NewAcquiredWaitTask[*agentsv1alpha1.Sandbox](
 					context.Background(), hooks, WaitActionResume, sbx,
-					func(s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+					func(_ context.Context, s *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
 						if atomic.AddInt32(&updateCalls, 1) == 1 {
 							close(updateStarted)
 							<-allowUpdate

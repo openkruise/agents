@@ -22,11 +22,11 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -178,137 +178,19 @@ func TestWaitHookKeyFromRequest_DifferentTypes(t *testing.T) {
 
 // --- WaitEntry tests ---
 
-func TestNewWaitEntry(t *testing.T) {
-	ctx := context.Background()
-	checker := func(obj *agentsv1alpha1.Sandbox) (bool, error) { return true, nil }
-	entry := NewWaitEntry[*agentsv1alpha1.Sandbox](ctx, WaitActionResume, checker)
-
-	require.NotNil(t, entry)
-	assert.Equal(t, WaitActionResume, entry.Action)
-	assert.NotNil(t, entry.Done())
-	assert.Equal(t, ctx, entry.Context())
-}
-
-func TestWaitEntry_Close(t *testing.T) {
-	entry := NewWaitEntry[*agentsv1alpha1.Sandbox](
-		context.Background(),
-		WaitActionPause,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-	)
-
-	// Done channel should not be closed before Close
-	select {
-	case <-entry.Done():
-		t.Fatal("done channel should not be closed before Close()")
-	default:
-	}
-
-	entry.Close()
-
-	// Done channel should be closed after Close
-	select {
-	case <-entry.Done():
-		// expected
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("done channel was not closed after Close()")
-	}
-}
-
-func TestWaitEntry_CloseIdempotent(t *testing.T) {
-	entry := NewWaitEntry[*agentsv1alpha1.Sandbox](
-		context.Background(),
-		WaitActionPause,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-	)
-
-	// Multiple Close calls should not panic (closeOnce ensures this)
-	assert.NotPanics(t, func() {
-		entry.Close()
-		entry.Close()
-		entry.Close()
-	})
-}
-
-func TestWaitEntry_Check(t *testing.T) {
-	sbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
-		Status:     agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
-	}
-
-	t.Run("check returns true", func(t *testing.T) {
-		entry := NewWaitEntry[*agentsv1alpha1.Sandbox](
-			context.Background(),
-			WaitActionWaitReady,
-			func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-				return obj.Status.Phase == agentsv1alpha1.SandboxRunning, nil
-			},
-		)
-		ok, err := entry.Check(sbx)
-		require.NoError(t, err)
-		assert.True(t, ok)
-	})
-
-	t.Run("check returns false", func(t *testing.T) {
-		entry := NewWaitEntry[*agentsv1alpha1.Sandbox](
-			context.Background(),
-			WaitActionWaitReady,
-			func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-				return obj.Status.Phase == agentsv1alpha1.SandboxPending, nil
-			},
-		)
-		ok, err := entry.Check(sbx)
-		require.NoError(t, err)
-		assert.False(t, ok)
-	})
-
-	t.Run("check returns error", func(t *testing.T) {
-		entry := NewWaitEntry[*agentsv1alpha1.Sandbox](
-			context.Background(),
-			WaitActionWaitReady,
-			func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-				return false, assert.AnError
-			},
-		)
-		ok, err := entry.Check(sbx)
-		require.Error(t, err)
-		assert.False(t, ok)
-		assert.Equal(t, assert.AnError, err)
-	})
-}
-
-func TestWaitEntry_Context(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	entry := NewWaitEntry[*agentsv1alpha1.Sandbox](
-		ctx,
-		WaitActionCheckpoint,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-	)
-
-	assert.Equal(t, ctx, entry.Context())
-}
-
 func TestAcquireReleaseEntry_RefCountedLifecycle(t *testing.T) {
 	sbx := newTestSandbox("sbx-refcount", "default")
 	var hooks sync.Map
 	key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-	checker := func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil }
 
 	entry1, err := AcquireEntry[*agentsv1alpha1.Sandbox](
 		&hooks, key, WaitActionResume,
-		func() *WaitEntry[*agentsv1alpha1.Sandbox] {
-			return NewWaitEntry[*agentsv1alpha1.Sandbox](context.Background(), WaitActionResume, checker)
-		},
 	)
 	require.NoError(t, err)
 	require.NotNil(t, entry1)
 
 	entry2, err := AcquireEntry[*agentsv1alpha1.Sandbox](
 		&hooks, key, WaitActionResume,
-		func() *WaitEntry[*agentsv1alpha1.Sandbox] {
-			return NewWaitEntry[*agentsv1alpha1.Sandbox](context.Background(), WaitActionResume, checker)
-		},
 	)
 	require.NoError(t, err)
 	assert.Same(t, entry1, entry2)
@@ -327,21 +209,14 @@ func TestAcquireEntry_ActionConflictDoesNotAcquire(t *testing.T) {
 	sbx := newTestSandbox("sbx-action-conflict", "default")
 	var hooks sync.Map
 	key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-	checker := func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil }
 
 	entry, err := AcquireEntry[*agentsv1alpha1.Sandbox](
 		&hooks, key, WaitActionResume,
-		func() *WaitEntry[*agentsv1alpha1.Sandbox] {
-			return NewWaitEntry[*agentsv1alpha1.Sandbox](context.Background(), WaitActionResume, checker)
-		},
 	)
 	require.NoError(t, err)
 
 	conflict, err := AcquireEntry[*agentsv1alpha1.Sandbox](
 		&hooks, key, WaitActionPause,
-		func() *WaitEntry[*agentsv1alpha1.Sandbox] {
-			return NewWaitEntry[*agentsv1alpha1.Sandbox](context.Background(), WaitActionPause, checker)
-		},
 	)
 	require.Error(t, err)
 	assert.Nil(t, conflict)
@@ -352,7 +227,7 @@ func TestAcquireEntry_ActionConflictDoesNotAcquire(t *testing.T) {
 	assert.False(t, exists, "conflicting acquire must not increment refs")
 }
 
-// --- WaitForObjectSatisfied tests ---
+// --- lazy WaitTask path tests ---
 
 func newTestSandbox(name, namespace string) *agentsv1alpha1.Sandbox {
 	return &agentsv1alpha1.Sandbox{
@@ -363,170 +238,209 @@ func newTestSandbox(name, namespace string) *agentsv1alpha1.Sandbox {
 	}
 }
 
-func identityUpdate(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+func identityUpdate(_ context.Context, obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
 	return obj, nil
 }
 
-func TestWaitForObjectSatisfied_AlreadySatisfied(t *testing.T) {
-	sbx := newTestSandbox("sbx-satisfied", "default")
-	var hooks sync.Map
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionResume,
-		identityUpdate,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return true, nil },
-		time.Second,
-	)
-	require.NoError(t, err)
+// sandboxRunning is the checker shared by the read-outcome cases.
+func sandboxRunning(obj *agentsv1alpha1.Sandbox) (bool, error) {
+	return obj.Status.Phase == agentsv1alpha1.SandboxRunning, nil
 }
 
-func TestWaitForObjectSatisfied_CheckFuncErrorImmediately(t *testing.T) {
-	sbx := newTestSandbox("sbx-check-err", "default")
-	var hooks sync.Map
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionResume,
-		identityUpdate,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, assert.AnError },
-		time.Second,
-	)
-	require.Error(t, err)
-	assert.Equal(t, assert.AnError, err)
-}
-
-func TestWaitForObjectSatisfied_ZeroTimeout(t *testing.T) {
-	sbx := newTestSandbox("sbx-zero-timeout", "default")
-	var hooks sync.Map
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionResume,
-		identityUpdate,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		0,
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not satisfied")
-}
-
-func TestWaitForObjectSatisfied_NegativeTimeout(t *testing.T) {
-	sbx := newTestSandbox("sbx-neg-timeout", "default")
-	var hooks sync.Map
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionResume,
-		identityUpdate,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		-1*time.Second,
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not satisfied")
-}
-
-func TestWaitForObjectSatisfied_Timeout(t *testing.T) {
-	sbx := newTestSandbox("sbx-timeout", "default")
-	var hooks sync.Map
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionResume,
-		identityUpdate,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		50*time.Millisecond,
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not satisfied")
-}
-
-func TestWaitForObjectSatisfied_ContextAlreadyCanceled(t *testing.T) {
-	sbx := newTestSandbox("sbx-ctx-canceled", "default")
-	var hooks sync.Map
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel before calling
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		ctx, &hooks, sbx, WaitActionResume,
-		identityUpdate,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		time.Hour,
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not satisfied")
-}
-
-func TestWaitForObjectSatisfied_ContextTimeout(t *testing.T) {
-	sbx := newTestSandbox("sbx-ctx-timeout", "default")
-	var hooks sync.Map
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		ctx, &hooks, sbx, WaitActionResume,
-		identityUpdate,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		time.Hour,
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not satisfied")
-}
-
-func TestWaitForObjectSatisfied_NotSatisfiedErrorIsTyped(t *testing.T) {
+// TestWaitTask_ReadOutcomes covers every source that can complete a lazy wait:
+// the pre-check, a read, a read requested by RequestRead, and a polled read,
+// including the read and checker errors that must end the wait.
+func TestWaitTask_ReadOutcomes(t *testing.T) {
 	tests := []struct {
-		name                  string
-		timeout               time.Duration
-		ctx                   func(t *testing.T) context.Context
-		wantAction            WaitAction
-		wantDuringDoubleCheck bool
+		name  string
+		check func(*agentsv1alpha1.Sandbox) (bool, error) // defaults to sandboxRunning
+		// update returns the result of the n-th read (1-based). It defaults to
+		// returning the object unchanged, which keeps the wait pending.
+		update func(n int, obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error)
+		// poke requests a re-read once the waiter has parked after its first read.
+		poke    bool
+		wantErr error
 	}{
 		{
-			name:       "zero timeout",
-			timeout:    0,
-			wantAction: WaitActionResume,
-			ctx: func(t *testing.T) context.Context {
-				t.Helper()
-				return context.Background()
+			name: "pre-check error ends the wait before reading",
+			check: func(*agentsv1alpha1.Sandbox) (bool, error) {
+				return false, assert.AnError
+			},
+			wantErr: assert.AnError,
+		},
+		{
+			name: "first read satisfies",
+			update: func(_ int, obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+				obj = obj.DeepCopy()
+				obj.Status.Phase = agentsv1alpha1.SandboxRunning
+				return obj, nil
 			},
 		},
 		{
-			name:                  "wait timeout",
-			timeout:               30 * time.Millisecond,
-			wantDuringDoubleCheck: true,
-			ctx: func(t *testing.T) context.Context {
-				t.Helper()
-				return context.Background()
+			name: "requested re-read satisfies",
+			update: func(n int, obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+				if n == 1 {
+					return obj, nil
+				}
+				obj = obj.DeepCopy()
+				obj.Status.Phase = agentsv1alpha1.SandboxRunning
+				return obj, nil
+			},
+			poke: true,
+		},
+		{
+			name: "polled re-read satisfies",
+			update: func(n int, obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+				if n == 1 {
+					return obj, nil
+				}
+				obj = obj.DeepCopy()
+				obj.Status.Phase = agentsv1alpha1.SandboxRunning
+				return obj, nil
 			},
 		},
 		{
-			name:                  "context canceled",
-			timeout:               time.Hour,
-			wantDuringDoubleCheck: true,
-			ctx: func(t *testing.T) context.Context {
-				t.Helper()
-				ctx, cancel := context.WithCancel(context.Background())
-				cancel()
-				return ctx
+			name: "read error ends the wait",
+			update: func(n int, obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+				if n == 1 {
+					return obj, nil
+				}
+				return nil, assert.AnError
 			},
+			poke:    true,
+			wantErr: assert.AnError,
+		},
+		{
+			name: "checker error ends the wait",
+			check: func(obj *agentsv1alpha1.Sandbox) (bool, error) {
+				if obj.Status.Phase == agentsv1alpha1.SandboxRunning {
+					return false, assert.AnError
+				}
+				return false, nil
+			},
+			update: func(n int, obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+				if n == 1 {
+					return obj, nil
+				}
+				obj = obj.DeepCopy()
+				obj.Status.Phase = agentsv1alpha1.SandboxRunning
+				return obj, nil
+			},
+			poke:    true,
+			wantErr: assert.AnError,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sbx := newTestSandbox("sbx-typed-not-satisfied", "default")
-			var hooks sync.Map
+			synctest.Test(t, func(t *testing.T) {
+				var hooks sync.Map
+				target := newTestSandbox("sbx-read", "default")
+				target.Status.Phase = agentsv1alpha1.SandboxPending
+				check := tt.check
+				if check == nil {
+					check = sandboxRunning
+				}
+				reads := 0
+				task := NewWaitTask[*agentsv1alpha1.Sandbox](
+					t.Context(), &hooks, WaitActionResume, target,
+					func(_ context.Context, obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+						reads++
+						if tt.update == nil {
+							return obj, nil
+						}
+						return tt.update(reads, obj)
+					},
+					check,
+				)
+				done := make(chan error, 1)
+				go func() { done <- task.Wait(time.Minute) }()
+				if tt.poke {
+					synctest.Wait() // the waiter parked in select after its first read
+					value, ok := hooks.Load(WaitHookKey(target))
+					require.True(t, ok)
+					value.(*WaitEntry[*agentsv1alpha1.Sandbox]).RequestRead()
+				}
+				err := <-done
+				if tt.wantErr != nil {
+					require.ErrorIs(t, err, tt.wantErr)
+				} else {
+					require.NoError(t, err)
+				}
+				_, exists := hooks.Load(WaitHookKey(target))
+				assert.False(t, exists, "the wait hook must be released when the wait returns")
+			})
+		})
+	}
+}
 
-			err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-				tt.ctx(t), &hooks, sbx, WaitActionResume,
-				identityUpdate,
-				func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-				tt.timeout,
-			)
+// TestWaitTask_TimeoutClassification separates an internal wait-budget expiry
+// from the caller's own deadline, because callers retry on the former and stop
+// on the latter.
+func TestWaitTask_TimeoutClassification(t *testing.T) {
+	const budget = time.Second
+	tests := []struct {
+		name       string
+		timeout    time.Duration
+		ctx        func(t *testing.T) context.Context
+		canceled   bool
+		deadline   bool
+		notSat     bool
+		wantBudget time.Duration
+	}{
+		{
+			name:       "internal wait budget expires",
+			timeout:    budget,
+			ctx:        func(t *testing.T) context.Context { t.Helper(); return t.Context() },
+			notSat:     true,
+			wantBudget: budget,
+		},
+		{
+			name:    "caller deadline expires first",
+			timeout: 5 * time.Minute,
+			ctx: func(t *testing.T) context.Context {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(t.Context(), budget)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			deadline:   true,
+			notSat:     true,
+			wantBudget: budget,
+		},
+		{
+			name:    "caller cancels",
+			timeout: 5 * time.Minute,
+			ctx: func(t *testing.T) context.Context {
+				t.Helper()
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				return ctx
+			},
+			canceled: true,
+		},
+	}
 
-			require.Error(t, err)
-			assert.ErrorIs(t, err, ErrWaitNotSatisfied)
-			var waitErr *WaitNotSatisfiedError
-			assert.True(t, errors.As(err, &waitErr))
-			assert.Equal(t, tt.wantDuringDoubleCheck, waitErr.DuringDoubleCheck)
-			assert.Equal(t, tt.wantAction, waitErr.Action)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var hooks sync.Map
+				task := NewWaitTask[*agentsv1alpha1.Sandbox](
+					tt.ctx(t), &hooks, WaitActionResume, newTestSandbox("sbx-timeout", "default"),
+					identityUpdate,
+					func(*agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
+				)
+				err := task.Wait(tt.timeout)
+				require.Error(t, err)
+				assert.Equal(t, tt.canceled, errors.Is(err, context.Canceled), "context.Canceled match")
+				assert.Equal(t, tt.deadline, errors.Is(err, context.DeadlineExceeded), "context.DeadlineExceeded match")
+				assert.Equal(t, tt.notSat, errors.Is(err, ErrWaitNotSatisfied), "ErrWaitNotSatisfied match")
+				if tt.wantBudget != 0 {
+					var waitErr *WaitNotSatisfiedError
+					require.ErrorAs(t, err, &waitErr)
+					assert.Equal(t, tt.wantBudget, waitErr.Timeout, "reported wait budget")
+				}
+			})
 		})
 	}
 }
@@ -535,16 +449,17 @@ func TestWaitForObjectSatisfied_ActionConflict(t *testing.T) {
 	sbx := newTestSandbox("sbx-conflict", "default")
 	var hooks sync.Map
 	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
 	// Register a long-running wait with action "Resume"
 	go func() {
 		defer close(done)
-		_ = WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-			context.Background(), &hooks, sbx, WaitActionResume,
+		_ = NewWaitTask[*agentsv1alpha1.Sandbox](
+			ctx, &hooks, WaitActionResume, sbx,
 			identityUpdate,
 			func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-			time.Hour,
-		)
+		).Wait(time.Hour)
 	}()
 
 	// Wait until the hook is registered using Eventually instead of fixed Sleep
@@ -555,12 +470,11 @@ func TestWaitForObjectSatisfied_ActionConflict(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond, "hook should be registered before conflict check")
 
 	// Try with a different action on the same object - should conflict
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionPause,
+	err := NewWaitTask[*agentsv1alpha1.Sandbox](
+		context.Background(), &hooks, WaitActionPause, sbx,
 		identityUpdate,
 		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		time.Second,
-	)
+	).Wait(time.Second)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrWaitTaskConflict)
 	var conflictErr *WaitTaskConflictError
@@ -568,11 +482,7 @@ func TestWaitForObjectSatisfied_ActionConflict(t *testing.T) {
 	assert.Equal(t, WaitActionResume, conflictErr.ExistingAction)
 	assert.Equal(t, WaitActionPause, conflictErr.NewAction)
 
-	// Close the entry so the first goroutine can exit (its internal timeout is 1 hour)
-	key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-	if val, ok := hooks.Load(key); ok {
-		val.(*WaitEntry[*agentsv1alpha1.Sandbox]).Close()
-	}
+	cancel()
 
 	// Ensure goroutine completes before test returns
 	select {
@@ -580,168 +490,6 @@ func TestWaitForObjectSatisfied_ActionConflict(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("goroutine did not complete within timeout")
 	}
-}
-
-func TestWaitForObjectSatisfied_SatisfiedAfterSignal(t *testing.T) {
-	sbx := newTestSandbox("sbx-signal", "default")
-	sbx.Status.Phase = agentsv1alpha1.SandboxPending
-
-	var hooks sync.Map
-
-	// Simulate controller signaling "done" after a short delay
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-		if val, ok := hooks.Load(key); ok {
-			val.(*WaitEntry[*agentsv1alpha1.Sandbox]).Close()
-		}
-	}()
-
-	// updateFunc returns a "satisfied" sandbox
-	updatedSbx := sbx.DeepCopy()
-	updatedSbx.Status.Phase = agentsv1alpha1.SandboxRunning
-	updateCalls := 0
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionResume,
-		func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-			updateCalls++
-			if updateCalls == 1 {
-				return sbx, nil
-			}
-			return updatedSbx, nil
-		},
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-			return obj.Status.Phase == agentsv1alpha1.SandboxRunning, nil
-		},
-		2*time.Second,
-	)
-	require.NoError(t, err)
-}
-
-func TestWaitForObjectSatisfied_PostAcquireCheckUsesUpdatedObject(t *testing.T) {
-	sbx := newTestSandbox("sbx-post-acquire", "default")
-	sbx.Status.Phase = agentsv1alpha1.SandboxPending
-	var hooks sync.Map
-
-	updated := sbx.DeepCopy()
-	updated.Status.Phase = agentsv1alpha1.SandboxRunning
-	updateCalls := 0
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionResume,
-		func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-			updateCalls++
-			return updated, nil
-		},
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-			return obj.Status.Phase == agentsv1alpha1.SandboxRunning, nil
-		},
-		200*time.Millisecond,
-	)
-	require.NoError(t, err)
-	assert.Equal(t, 1, updateCalls)
-
-	key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-	_, exists := hooks.Load(key)
-	assert.False(t, exists)
-}
-
-func TestWaitForObjectSatisfied_PollingCheckSatisfiedWithoutSignal(t *testing.T) {
-	oldInterval := defaultWaitPollInterval
-	defaultWaitPollInterval = 10 * time.Millisecond
-	t.Cleanup(func() { defaultWaitPollInterval = oldInterval })
-
-	sbx := newTestSandbox("sbx-poll", "default")
-	sbx.Status.Phase = agentsv1alpha1.SandboxPending
-	var hooks sync.Map
-
-	var mu sync.Mutex
-	updateCalls := 0
-	updateFunc := func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		updateCalls++
-		updated := obj.DeepCopy()
-		if updateCalls >= 2 {
-			updated.Status.Phase = agentsv1alpha1.SandboxRunning
-		}
-		return updated, nil
-	}
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionResume,
-		updateFunc,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-			return obj.Status.Phase == agentsv1alpha1.SandboxRunning, nil
-		},
-		time.Second,
-	)
-	require.NoError(t, err)
-
-	mu.Lock()
-	defer mu.Unlock()
-	assert.GreaterOrEqual(t, updateCalls, 2)
-}
-
-func TestWaitForObjectSatisfied_DoubleCheckUpdateError(t *testing.T) {
-	sbx := newTestSandbox("sbx-update-err", "default")
-	var hooks sync.Map
-	updateCalls := 0
-
-	// Signal the hook closed after a short delay
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-		if val, ok := hooks.Load(key); ok {
-			val.(*WaitEntry[*agentsv1alpha1.Sandbox]).Close()
-		}
-	}()
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionResume,
-		func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-			updateCalls++
-			if updateCalls == 1 {
-				return sbx, nil
-			}
-			return nil, assert.AnError // update fails
-		},
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		2*time.Second,
-	)
-	require.Error(t, err)
-	assert.Equal(t, assert.AnError, err)
-}
-
-func TestWaitForObjectSatisfied_DoubleCheckSatisfiedError(t *testing.T) {
-	sbx := newTestSandbox("sbx-check-fail", "default")
-	var hooks sync.Map
-	checkCalls := 0
-
-	// Signal the hook closed after a short delay
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-		if val, ok := hooks.Load(key); ok {
-			val.(*WaitEntry[*agentsv1alpha1.Sandbox]).Close()
-		}
-	}()
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionResume,
-		identityUpdate,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-			checkCalls++
-			if checkCalls < 3 {
-				return false, nil
-			}
-			return false, assert.AnError // check fails
-		},
-		2*time.Second,
-	)
-	require.Error(t, err)
-	assert.Equal(t, assert.AnError, err)
 }
 
 func TestWaitForObjectSatisfied_ReuseExistingHook(t *testing.T) {
@@ -757,7 +505,7 @@ func TestWaitForObjectSatisfied_ReuseExistingHook(t *testing.T) {
 	satisfiedFunc := func(obj *agentsv1alpha1.Sandbox) (bool, error) {
 		return obj.Status.Phase == agentsv1alpha1.SandboxRunning, nil
 	}
-	updateFunc := func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+	updateFunc := func(_ context.Context, obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
 		updateMu.Lock()
 		defer updateMu.Unlock()
 		updateCalls++
@@ -776,10 +524,10 @@ func TestWaitForObjectSatisfied_ReuseExistingHook(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errCh <- WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-				context.Background(), &hooks, sbx, WaitActionResume,
-				updateFunc, satisfiedFunc, 2*time.Second,
-			)
+			errCh <- NewWaitTask[*agentsv1alpha1.Sandbox](
+				context.Background(), &hooks, WaitActionResume, sbx,
+				updateFunc, satisfiedFunc,
+			).Wait(2 * time.Second)
 		}()
 	}
 
@@ -791,7 +539,7 @@ func TestWaitForObjectSatisfied_ReuseExistingHook(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond, "both waiters should complete post-acquire checks before signal")
 	key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
 	if val, ok := hooks.Load(key); ok {
-		val.(*WaitEntry[*agentsv1alpha1.Sandbox]).Close()
+		val.(*WaitEntry[*agentsv1alpha1.Sandbox]).RequestRead()
 	}
 
 	wg.Wait()
@@ -800,283 +548,6 @@ func TestWaitForObjectSatisfied_ReuseExistingHook(t *testing.T) {
 	for err := range errCh {
 		assert.NoError(t, err)
 	}
-}
-
-func TestWaitForObjectSatisfied_ReusedWaiterExitDoesNotDeleteActiveHook(t *testing.T) {
-	sbx := newTestSandbox("sbx-reused-exit", "default")
-	var hooks sync.Map
-	key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-
-	ctx1, cancel1 := context.WithCancel(context.Background())
-	defer cancel1()
-
-	firstDone := make(chan error, 1)
-	go func() {
-		firstDone <- WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-			ctx1, &hooks, sbx, WaitActionResume,
-			identityUpdate,
-			func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-			time.Hour,
-		)
-	}()
-
-	require.Eventually(t, func() bool {
-		_, exists := hooks.Load(key)
-		return exists
-	}, 2*time.Second, 10*time.Millisecond)
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionResume,
-		identityUpdate,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		20*time.Millisecond,
-	)
-	require.Error(t, err)
-
-	_, exists := hooks.Load(key)
-	assert.True(t, exists, "active first waiter must keep the shared hook registered")
-
-	cancel1()
-	select {
-	case <-firstDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("first waiter did not exit")
-	}
-}
-
-func TestWaitForObjectSatisfied_HookCleanedUpAfterReturn(t *testing.T) {
-	sbx := newTestSandbox("sbx-cleanup", "default")
-	sbx.Status.Phase = agentsv1alpha1.SandboxPending
-	var hooks sync.Map
-
-	key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-	updateCalls := 0
-	go func() {
-		require.Eventually(t, func() bool {
-			_, exists := hooks.Load(key)
-			return exists
-		}, 2*time.Second, 10*time.Millisecond)
-		if val, ok := hooks.Load(key); ok {
-			val.(*WaitEntry[*agentsv1alpha1.Sandbox]).Close()
-		}
-	}()
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), &hooks, sbx, WaitActionResume,
-		func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-			updateCalls++
-			if updateCalls == 1 {
-				return obj, nil
-			}
-			updated := obj.DeepCopy()
-			updated.Status.Phase = agentsv1alpha1.SandboxRunning
-			return updated, nil
-		},
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-			return obj.Status.Phase == agentsv1alpha1.SandboxRunning, nil
-		},
-		time.Second,
-	)
-	require.NoError(t, err)
-	assert.Equal(t, 2, updateCalls)
-
-	// Hook should be cleaned up
-	_, exists := hooks.Load(key)
-	assert.False(t, exists, "wait hook should be deleted after WaitForObjectSatisfied returns")
-}
-
-func TestWaitForObjectSatisfied_WithCheckpointType(t *testing.T) {
-	// Verify the generic works with a different type (Checkpoint)
-	cp := &agentsv1alpha1.Checkpoint{
-		ObjectMeta: metav1.ObjectMeta{Name: "cp-1", Namespace: "default"},
-		Status:     agentsv1alpha1.CheckpointStatus{Phase: agentsv1alpha1.CheckpointSucceeded},
-	}
-	var hooks sync.Map
-
-	err := WaitForObjectSatisfied[*agentsv1alpha1.Checkpoint](
-		context.Background(), &hooks, cp, WaitActionCheckpoint,
-		func(obj *agentsv1alpha1.Checkpoint) (*agentsv1alpha1.Checkpoint, error) { return obj, nil },
-		func(obj *agentsv1alpha1.Checkpoint) (bool, error) {
-			return obj.Status.Phase == agentsv1alpha1.CheckpointSucceeded, nil
-		},
-		time.Second,
-	)
-	require.NoError(t, err)
-}
-
-func TestWaitForObjectSatisfied_WithCoreV1Pod(t *testing.T) {
-	// Verify the generic works with a standard k8s type (Pod)
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-pod", Namespace: "default"},
-		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
-	}
-	var hooks sync.Map
-
-	err := WaitForObjectSatisfied[*corev1.Pod](
-		context.Background(), &hooks, pod, WaitActionWaitReady,
-		func(obj *corev1.Pod) (*corev1.Pod, error) { return obj, nil },
-		func(obj *corev1.Pod) (bool, error) {
-			return obj.Status.Phase == corev1.PodRunning, nil
-		},
-		time.Second,
-	)
-	require.NoError(t, err)
-}
-
-func TestCheckObjectSatisfied(t *testing.T) {
-	tests := []struct {
-		name        string
-		update      UpdateFunc[*agentsv1alpha1.Sandbox]
-		check       CheckFunc[*agentsv1alpha1.Sandbox]
-		expectOK    bool
-		expectError string
-	}{
-		{
-			name: "updated object satisfied",
-			update: func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-				updated := obj.DeepCopy()
-				updated.Status.Phase = agentsv1alpha1.SandboxRunning
-				return updated, nil
-			},
-			check: func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-				return obj.Status.Phase == agentsv1alpha1.SandboxRunning, nil
-			},
-			expectOK: true,
-		},
-		{
-			name:   "updated object not satisfied",
-			update: identityUpdate,
-			check:  func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		},
-		{
-			name: "update error",
-			update: func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-				return nil, assert.AnError
-			},
-			check:       func(obj *agentsv1alpha1.Sandbox) (bool, error) { return true, nil },
-			expectError: assert.AnError.Error(),
-		},
-		{
-			name:   "check error",
-			update: identityUpdate,
-			check: func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-				return false, assert.AnError
-			},
-			expectError: assert.AnError.Error(),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sbx := newTestSandbox("sbx-check-object", "default")
-			ok, err := CheckObjectSatisfied[*agentsv1alpha1.Sandbox](context.Background(), sbx, tt.update, tt.check)
-			if tt.expectError != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-				assert.False(t, ok)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.expectOK, ok)
-		})
-	}
-}
-
-// --- DoubleCheckObjectSatisfied tests ---
-
-func TestDoubleCheckObjectSatisfied_UpdateError(t *testing.T) {
-	sbx := newTestSandbox("sbx-dbl-update-err", "default")
-
-	err := DoubleCheckObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), sbx,
-		func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-			return nil, assert.AnError
-		},
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return true, nil },
-	)
-	require.Error(t, err)
-	assert.Equal(t, assert.AnError, err)
-}
-
-func TestDoubleCheckObjectSatisfied_SatisfiedCheckError(t *testing.T) {
-	sbx := newTestSandbox("sbx-dbl-check-err", "default")
-
-	err := DoubleCheckObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), sbx,
-		identityUpdate,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-			return false, assert.AnError
-		},
-	)
-	require.Error(t, err)
-	assert.Equal(t, assert.AnError, err)
-}
-
-func TestDoubleCheckObjectSatisfied_NotSatisfied(t *testing.T) {
-	sbx := newTestSandbox("sbx-dbl-not-sat", "default")
-
-	err := DoubleCheckObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), sbx,
-		identityUpdate,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not satisfied")
-	assert.ErrorIs(t, err, ErrWaitNotSatisfied)
-	var waitErr *WaitNotSatisfiedError
-	assert.True(t, errors.As(err, &waitErr))
-	assert.True(t, waitErr.DuringDoubleCheck)
-}
-
-func TestDoubleCheckObjectSatisfied_Satisfied(t *testing.T) {
-	sbx := newTestSandbox("sbx-dbl-satisfied", "default")
-
-	err := DoubleCheckObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), sbx,
-		identityUpdate,
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) { return true, nil },
-	)
-	require.NoError(t, err)
-}
-
-func TestDoubleCheckObjectSatisfied_UpdatedObjectUsedForCheck(t *testing.T) {
-	// Ensure that the updated object returned by updateFunc is the one passed to satisfiedFunc
-	original := newTestSandbox("sbx-dbl-update-obj", "default")
-	original.Status.Phase = agentsv1alpha1.SandboxPending
-
-	updated := original.DeepCopy()
-	updated.Status.Phase = agentsv1alpha1.SandboxRunning
-
-	err := DoubleCheckObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), original,
-		func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-			return updated, nil // return updated (running) object
-		},
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-			return obj.Status.Phase == agentsv1alpha1.SandboxRunning, nil
-		},
-	)
-	require.NoError(t, err)
-}
-
-func TestDoubleCheckObjectSatisfied_OriginalObjectNotSatisfied_UpdatedSatisfied(t *testing.T) {
-	// Original is pending, updated is running -> should succeed
-	original := newTestSandbox("sbx-dbl-orig-pending", "default")
-	original.Status.Phase = agentsv1alpha1.SandboxPending
-
-	updated := original.DeepCopy()
-	updated.Status.Phase = agentsv1alpha1.SandboxRunning
-
-	err := DoubleCheckObjectSatisfied[*agentsv1alpha1.Sandbox](
-		context.Background(), original,
-		func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-			return updated, nil
-		},
-		func(obj *agentsv1alpha1.Sandbox) (bool, error) {
-			return obj.Status.Phase == agentsv1alpha1.SandboxRunning, nil
-		},
-	)
-	require.NoError(t, err)
 }
 
 func TestWaitForObjectSatisfied_FirstCreatorExitsSecondStillWaiting(t *testing.T) {
@@ -1096,7 +567,7 @@ func TestWaitForObjectSatisfied_FirstCreatorExitsSecondStillWaiting(t *testing.T
 	var satisfiedMu sync.Mutex
 	satisfied := false
 
-	sharedUpdateFunc := func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+	sharedUpdateFunc := func(_ context.Context, obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
 		satisfiedMu.Lock()
 		defer satisfiedMu.Unlock()
 		if satisfied {
@@ -1113,10 +584,10 @@ func TestWaitForObjectSatisfied_FirstCreatorExitsSecondStillWaiting(t *testing.T
 
 	// First waiter (creator) - will be canceled early
 	go func() {
-		firstDone <- WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-			ctx1, &hooks, sbx, WaitActionResume,
-			sharedUpdateFunc, sharedCheckFunc, time.Hour,
-		)
+		firstDone <- NewWaitTask[*agentsv1alpha1.Sandbox](
+			ctx1, &hooks, WaitActionResume, sbx,
+			sharedUpdateFunc, sharedCheckFunc,
+		).Wait(time.Hour)
 	}()
 
 	// Wait for first waiter to register the hook
@@ -1127,10 +598,10 @@ func TestWaitForObjectSatisfied_FirstCreatorExitsSecondStillWaiting(t *testing.T
 
 	// Second waiter joins the same entry
 	go func() {
-		secondDone <- WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
-			context.Background(), &hooks, sbx, WaitActionResume,
-			sharedUpdateFunc, sharedCheckFunc, time.Hour,
-		)
+		secondDone <- NewWaitTask[*agentsv1alpha1.Sandbox](
+			context.Background(), &hooks, WaitActionResume, sbx,
+			sharedUpdateFunc, sharedCheckFunc,
+		).Wait(time.Hour)
 	}()
 
 	// Wait for the second waiter to have acquired (refs == 2)
@@ -1149,8 +620,7 @@ func TestWaitForObjectSatisfied_FirstCreatorExitsSecondStillWaiting(t *testing.T
 	cancel1()
 	select {
 	case err := <-firstDone:
-		// First waiter should exit with an error (not satisfied during double check)
-		assert.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
 	case <-time.After(5 * time.Second):
 		t.Fatal("first waiter did not exit after context cancellation")
 	}
@@ -1165,7 +635,7 @@ func TestWaitForObjectSatisfied_FirstCreatorExitsSecondStillWaiting(t *testing.T
 	satisfiedMu.Unlock()
 
 	if val, ok := hooks.Load(key); ok {
-		val.(*WaitEntry[*agentsv1alpha1.Sandbox]).Close()
+		val.(*WaitEntry[*agentsv1alpha1.Sandbox]).RequestRead()
 	}
 
 	// Second waiter should succeed
@@ -1188,4 +658,56 @@ func TestWaitActionConstants(t *testing.T) {
 	assert.Equal(t, WaitAction("Pause"), WaitActionPause)
 	assert.Equal(t, WaitAction("WaitReady"), WaitActionWaitReady)
 	assert.Equal(t, WaitAction("Checkpoint"), WaitActionCheckpoint)
+}
+
+func TestWaitTask_ObservedSnapshotBelongsToEachWaiter(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var hooks sync.Map
+		target := newTestSandbox("shared", "default")
+		target.UID = "new"
+		target.ResourceVersion = "10"
+		start := func(obj *agentsv1alpha1.Sandbox, label string) <-chan error {
+			check := func(snapshot *agentsv1alpha1.Sandbox) (bool, error) { return snapshot.Labels[label] == "yes", nil }
+			task, err := NewAcquiredWaitTask(t.Context(), &hooks, WaitActionResume, obj, identityUpdate, check)
+			require.NoError(t, err)
+			done := make(chan error, 1)
+			go func() { done <- task.Wait(time.Minute) }()
+			synctest.Wait()
+			return done
+		}
+		old := target.DeepCopy()
+		old.UID = "old"
+		old.ResourceVersion = "1"
+		first := start(old, "done")
+		second := start(target, "done")
+		value, ok := hooks.Load(WaitHookKey(target))
+		require.True(t, ok)
+		entry := value.(*WaitEntry[*agentsv1alpha1.Sandbox])
+		snapshot := old.DeepCopy()
+		snapshot.Labels = map[string]string{"done": "yes"}
+		entry.Observe(snapshot)
+		require.NoError(t, <-first)
+		select {
+		case err := <-second:
+			t.Fatalf("stale observation completed second waiter: %v", err)
+		default:
+		}
+		late := start(target, "ready")
+		latest := target.DeepCopy()
+		latest.Labels = snapshot.Labels
+		entry.Observe(latest)
+		require.NoError(t, <-second)
+		synctest.Wait()
+		select {
+		case err := <-late:
+			t.Fatalf("another waiter's predicate completed the late waiter: %v", err)
+		default:
+		}
+		ready := latest.DeepCopy()
+		ready.Labels["ready"] = "yes"
+		entry.Observe(ready)
+		require.NoError(t, <-late)
+		_, ok = hooks.Load(WaitHookKey(target))
+		require.False(t, ok)
+	})
 }
