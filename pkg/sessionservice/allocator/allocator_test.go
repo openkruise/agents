@@ -875,7 +875,7 @@ func TestSessionServiceAllocationBackendLockCancellation(t *testing.T) {
 					if e != nil {
 						return e
 					}
-					_, e = m.store.ReplaceSessionServiceBindings(holderCtx, snap, snap.Members[0], snap.Members[0].Bindings)
+					e = m.store.ReplaceSessionServiceBindings(holderCtx, snap, snap.Members[0], snap.Members[0].Bindings)
 					return e
 				}()
 			}()

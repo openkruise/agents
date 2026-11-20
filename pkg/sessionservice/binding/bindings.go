@@ -24,6 +24,8 @@ import (
 	"io"
 	"regexp"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -208,4 +210,16 @@ func ExpiresAt(record Record, lifetime string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("invalid Session creation time: %w", err)
 	}
 	return created.Add(duration), nil
+}
+
+// MergePatch replaces only the binding annotation, conditioned on UID and resourceVersion.
+func MergePatch(obj metav1.Object, bindings Bindings) ([]byte, error) {
+	annotations, err := Encode(obj.GetAnnotations(), bindings)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"metadata": map[string]any{
+		"uid": obj.GetUID(), "resourceVersion": obj.GetResourceVersion(),
+		"annotations": map[string]string{BindingsAnnotation: annotations[BindingsAnnotation]},
+	}})
 }

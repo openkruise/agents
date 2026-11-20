@@ -78,7 +78,7 @@ func TestSessionServiceFailedBindingWriteDoesNotBlockSnapshot(t *testing.T) {
 			}
 			const first = "000000000000000000000c"
 			bindings[first] = sessionbinding.Record{CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-			if _, err := backend.ReplaceSessionServiceBindings(t.Context(), snapshot, target, bindings); !errors.Is(err, tc.want) {
+			if err := backend.ReplaceSessionServiceBindings(t.Context(), snapshot, target, bindings); !errors.Is(err, tc.want) {
 				t.Fatalf("write error=%v, want %v", err, tc.want)
 			}
 			fresh, err := backend.ReadSessionServiceSnapshot(t.Context(), snapshot.SessionService)
@@ -97,7 +97,7 @@ func TestSessionServiceFailedBindingWriteDoesNotBlockSnapshot(t *testing.T) {
 				otherBindings[id] = record
 			}
 			otherBindings["000000000000000000000d"] = sessionbinding.Record{CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-			if _, err := backend.ReplaceSessionServiceBindings(t.Context(), fresh, fresh.Members[0], otherBindings); err != nil {
+			if err := backend.ReplaceSessionServiceBindings(t.Context(), fresh, fresh.Members[0], otherBindings); err != nil {
 				t.Fatalf("failed write blocked another Session: %v", err)
 			}
 		})
@@ -146,7 +146,7 @@ func TestSessionServiceAllocationSnapshotCAS(t *testing.T) {
 				bindings[id] = record
 			}
 			delete(bindings, "000000000000000000000a")
-			_, err = backend.ReplaceSessionServiceBindings(t.Context(), snapshot, target, bindings)
+			err = backend.ReplaceSessionServiceBindings(t.Context(), snapshot, target, bindings)
 			if change != "no change" {
 				if !errors.Is(err, session.ErrSessionServiceConflict) {
 					t.Fatalf("stale snapshot wrote: %v", err)
@@ -199,7 +199,7 @@ func TestSessionServiceAllocationSnapshotRejectsCapturedListAfterObserve(t *test
 	}
 	target := snapshot.Members[0]
 	bindings := sessionbinding.Bindings{"000000000000000000000b": target.Bindings["000000000000000000000b"]}
-	if _, err := backend.ReplaceSessionServiceBindings(t.Context(), snapshot, target, bindings); err != nil {
+	if err := backend.ReplaceSessionServiceBindings(t.Context(), snapshot, target, bindings); err != nil {
 		t.Fatal(err)
 	}
 	lag = true
@@ -231,7 +231,7 @@ func TestSessionServiceAllocationSnapshotReadsParentOnce(t *testing.T) {
 			}
 			if operation == "replace bindings" {
 				parentReads = 0
-				_, err = backend.ReplaceSessionServiceBindings(t.Context(), snapshot, snapshot.Members[0], sessionbinding.Bindings{})
+				err = backend.ReplaceSessionServiceBindings(t.Context(), snapshot, snapshot.Members[0], sessionbinding.Bindings{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -293,7 +293,7 @@ func TestSessionServiceAllocationDeleteWinsBeforeBindingPatch(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			_, err = backend.ReplaceSessionServiceBindings(t.Context(), snapshot, target, bindings)
+			err = backend.ReplaceSessionServiceBindings(t.Context(), snapshot, target, bindings)
 			if !errors.Is(err, session.ErrSessionServiceConflict) && !errors.Is(err, session.ErrSessionServiceUnavailable) {
 				t.Fatalf("Delete-wins accepted binding: %v", err)
 			}
@@ -353,7 +353,7 @@ func TestSessionServiceAllocationBackendLockCancellation(t *testing.T) {
 				closeDone <- func() error {
 					bindings := target.Bindings
 					delete(bindings, "000000000000000000000a")
-					_, e := backend.ReplaceSessionServiceBindings(holderCtx, snapshot, target, bindings)
+					e := backend.ReplaceSessionServiceBindings(holderCtx, snapshot, target, bindings)
 					return e
 				}()
 			}()
@@ -373,7 +373,7 @@ func TestSessionServiceAllocationBackendLockCancellation(t *testing.T) {
 					_, e = backend.ReadSessionServiceSnapshot(ctx, serving)
 				case "snapshot write":
 					bindings := sessionbinding.Bindings{"0000000000000000000new": target.Bindings["000000000000000000000a"]}
-					_, e = backend.ReplaceSessionServiceBindings(ctx, snapshot, target, bindings)
+					e = backend.ReplaceSessionServiceBindings(ctx, snapshot, target, bindings)
 				}
 				done <- e
 			}()

@@ -767,15 +767,10 @@ func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, parent *age
 		winner := members[0]
 		wasEffective, wasReady := effectiveMember(parent, winner), readyMember(winner)
 		pending = true
-		confirmed, patchErr := r.patchBindings(ctx, winner, view[winner])
+		patched, patchErr := r.patchBindingView(ctx, view, winner, view[winner])
+		changed = changed || patched
 		if patchErr != nil {
 			return changed, true, patchErr
-		}
-		changed = true
-		*winner = *confirmed
-		view[winner], err = sessionbinding.Decode(winner.Annotations)
-		if err != nil {
-			return changed, true, err
 		}
 		// If confirmation exposes a lower priority, reselect from a fresh snapshot.
 		if wasEffective && !effectiveMember(parent, winner) || wasReady && !readyMember(winner) {
@@ -784,14 +779,10 @@ func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, parent *age
 		for _, loser := range members[1:] {
 			remaining := maps.Clone(view[loser])
 			delete(remaining, id)
-			updated, patchErr := r.patchBindings(ctx, loser, remaining)
+			patched, patchErr := r.patchBindingView(ctx, view, loser, remaining)
+			changed = changed || patched
 			if patchErr != nil {
 				return changed, true, patchErr
-			}
-			*loser = *updated
-			view[loser], err = sessionbinding.Decode(loser.Annotations)
-			if err != nil {
-				return changed, true, err
 			}
 		}
 	}
@@ -977,6 +968,8 @@ func (m *bindingMigration) canAcceptBinding(box *agents.Sandbox) bool {
 	if m.parent.Spec.SessionPolicy.MaxSessionsPerSandbox != nil {
 		limit = int(*m.parent.Spec.SessionPolicy.MaxSessionsPerSandbox)
 	}
+	// Capacity is checked locally, not by the API server. Rejection does not
+	// prove an earlier write failed; a later observation may reuse its binding.
 	if len(m.bindings[box]) >= limit {
 		return false
 	}
@@ -999,24 +992,11 @@ func (m *bindingMigration) ensureTargetActive(ctx context.Context) (bool, error)
 		}
 		return effectiveMember(m.parent, m.target), nil
 	}
-	if !bindingTargetReady(m.parent, m.target) {
+	if !m.canAcceptBinding(m.target) {
 		return false, nil
-	}
-	limit := sessionbinding.MaxRecords
-	if m.parent.Spec.SessionPolicy.MaxSessionsPerSandbox != nil {
-		limit = int(*m.parent.Spec.SessionPolicy.MaxSessionsPerSandbox)
 	}
 	next := maps.Clone(m.bindings[m.target])
 	next[m.id] = sessionbinding.Record{CreatedAt: m.record.CreatedAt}
-	if len(m.bindings[m.target]) >= limit {
-		// Capacity is checked locally, not by the API server. This does not
-		// prove that an earlier target write failed; the next observation may
-		// reuse it, reschedule, or repair a late duplicate.
-		return false, nil
-	}
-	if _, err := sessionbinding.Encode(m.target.Annotations, next); err != nil {
-		return false, nil
-	}
 	// Resume the persisted destination after restart or leader handoff.
 	// Success changes the target RV, rejecting older writes to that snapshot.
 	// Conflict may mean a previous write succeeded; observe again rather than
@@ -1048,17 +1028,24 @@ func (m *bindingMigration) cleanupSource(ctx context.Context) error {
 // patchAndObserve advances only this worker's private view from the complete API
 // response. Partial success remains progress even if a later migration stage fails.
 func (m *bindingMigration) patchAndObserve(ctx context.Context, box *agents.Sandbox, records sessionbinding.Bindings) error {
-	updated, err := m.reconciler.patchBindings(ctx, box, records)
-	if err != nil {
-		return err
-	}
-	m.changed = true
-	if box == m.source {
+	patched, err := m.reconciler.patchBindingView(ctx, m.bindings, box, records)
+	m.changed = m.changed || patched
+	if patched && box == m.source {
 		m.sourceConfirmed = true
 	}
-	*box = *updated
-	m.bindings[box], err = sessionbinding.Decode(box.Annotations)
 	return err
+}
+
+// patchBindingView advances a private view from the API response. The boolean
+// preserves write progress even if decoding the returned annotation fails.
+func (r *Reconciler) patchBindingView(ctx context.Context, view map[*agents.Sandbox]sessionbinding.Bindings, box *agents.Sandbox, records sessionbinding.Bindings) (bool, error) {
+	updated, err := r.patchBindings(ctx, box, records)
+	if err != nil {
+		return false, err
+	}
+	*box = *updated
+	view[box], err = sessionbinding.Decode(box.Annotations)
+	return true, err
 }
 
 func bindingTargetReady(parent *agents.SessionService, box *agents.Sandbox) bool {
@@ -1076,13 +1063,9 @@ func (r *Reconciler) patchBindings(ctx context.Context, box *agents.Sandbox, rec
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	annotations, err := sessionbinding.Encode(box.Annotations, records)
+	raw, err := sessionbinding.MergePatch(box, records)
 	if err != nil {
-		return nil, fmt.Errorf("encode member %s bindings: %w", box.Name, err)
-	}
-	raw, err := json.Marshal(map[string]any{"metadata": map[string]any{"uid": box.UID, "resourceVersion": box.ResourceVersion, "annotations": map[string]string{sessionbinding.BindingsAnnotation: annotations[sessionbinding.BindingsAnnotation]}}})
-	if err != nil {
-		return nil, fmt.Errorf("marshal binding patch: %w", err)
+		return nil, fmt.Errorf("build member %s binding patch: %w", box.Name, err)
 	}
 	updated := box.DeepCopy()
 	if err := r.Patch(ctx, updated, client.RawPatch(types.MergePatchType, raw)); err != nil {

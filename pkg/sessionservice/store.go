@@ -72,8 +72,8 @@ type Store interface {
 	ReadSessionServiceSnapshot(context.Context, SessionService) (SessionServiceSnapshot, error)
 	// ReplaceSessionServiceBindings rechecks the visible snapshot before a conditional
 	// write to one member. It is not a transaction over the parent/member set.
-	// Callers reread after a conflict; the returned version identifies the persisted write.
-	ReplaceSessionServiceBindings(context.Context, SessionServiceSnapshot, SessionServiceMember, sessionbinding.Bindings) (string, error)
+	// Callers reread after a conflict.
+	ReplaceSessionServiceBindings(context.Context, SessionServiceSnapshot, SessionServiceMember, sessionbinding.Bindings) error
 }
 
 // Error classifies domain failures without exposing a transport protocol.

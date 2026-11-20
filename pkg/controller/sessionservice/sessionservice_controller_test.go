@@ -3449,3 +3449,38 @@ func TestRebindingCleanupResult(t *testing.T) {
 		})
 	}
 }
+
+func TestBindingPatchProgress(t *testing.T) {
+	for _, mode := range []string{"success", "rejected", "invalid response"} {
+		t.Run(mode, func(t *testing.T) {
+			source := member(serving(1), "source")
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(source).WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if mode == "rejected" {
+						return apierrors.NewConflict(agents.Resource("sandboxes"), obj.GetName(), errors.New("stale snapshot"))
+					}
+					if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+						return err
+					}
+					if mode == "invalid response" {
+						obj.SetAnnotations(map[string]string{sessionbinding.BindingsAnnotation: "invalid"})
+					}
+					return nil
+				},
+			}).Build()
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(source), source); err != nil {
+				t.Fatal(err)
+			}
+			records := sessionbinding.Bindings{"000000000000000session": {CreatedAt: "2026-11-18T10:00:00Z"}}
+			migration := bindingMigration{reconciler: NewReconciler(c), source: source, bindings: map[*agents.Sandbox]sessionbinding.Bindings{source: {}}}
+			err := migration.patchAndObserve(t.Context(), source, records)
+			wantPatched := mode != "rejected"
+			if (err != nil) != (mode != "success") || migration.changed != wantPatched || migration.sourceConfirmed != wantPatched {
+				t.Fatalf("changed=%t confirmed=%t err=%v", migration.changed, migration.sourceConfirmed, err)
+			}
+			if mode == "success" && !reflect.DeepEqual(migration.bindings[source], records) {
+				t.Fatalf("view=%v", migration.bindings[source])
+			}
+		})
+	}
+}

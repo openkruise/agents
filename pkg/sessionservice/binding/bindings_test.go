@@ -17,10 +17,13 @@ limitations under the License.
 package binding
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestDecode(t *testing.T) {
@@ -171,6 +174,57 @@ func TestExpiresAt(t *testing.T) {
 			got, err := ExpiresAt(Record{CreatedAt: "2026-11-19T00:00:00Z", Phase: Moving, TargetSandboxUID: "target"}, tt.lifetime)
 			if (err != nil) != tt.invalid || !got.Equal(tt.want) {
 				t.Fatalf("deadline=%v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestMergePatch(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		records Bindings
+		invalid bool
+	}{
+		{name: "active", records: Bindings{"0000000000000000sess_1": {CreatedAt: "2026-11-03T10:00:00Z"}}},
+		{name: "empty"},
+		{name: "invalid", records: Bindings{"bad": {}}, invalid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			obj := &metav1.ObjectMeta{UID: "member-uid", ResourceVersion: "123", Annotations: map[string]string{"unrelated": "keep"}}
+			raw, err := MergePatch(obj, tt.records)
+			if tt.invalid {
+				if err == nil {
+					t.Fatal("expected validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var patch map[string]map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &patch); err != nil {
+				t.Fatal(err)
+			}
+			metadata := patch["metadata"]
+			if len(patch) != 1 || len(metadata) != 3 || string(metadata["uid"]) != `"member-uid"` || string(metadata["resourceVersion"]) != `"123"` {
+				t.Fatalf("unexpected patch: %s", raw)
+			}
+			var annotations map[string]string
+			if err := json.Unmarshal(metadata["annotations"], &annotations); err != nil {
+				t.Fatal(err)
+			}
+			if len(annotations) != 1 {
+				t.Fatalf("unexpected annotations: %v", annotations)
+			}
+			expected, err := Encode(obj.Annotations, tt.records)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if annotations[BindingsAnnotation] != expected[BindingsAnnotation] {
+				t.Fatalf("unexpected bindings: %v", annotations)
+			}
+			if len(obj.Annotations) != 1 || obj.Annotations["unrelated"] != "keep" {
+				t.Fatal("mutated input annotations")
 			}
 		})
 	}

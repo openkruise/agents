@@ -18,7 +18,6 @@ package kubernetes
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -86,17 +85,17 @@ func (s *Store) ReadSessionServiceSnapshot(ctx context.Context, serving session.
 	return snapshot, err
 }
 
-func (s *Store) ReplaceSessionServiceBindings(ctx context.Context, observed session.SessionServiceSnapshot, target session.SessionServiceMember, bindings sessionbinding.Bindings) (string, error) {
+func (s *Store) ReplaceSessionServiceBindings(ctx context.Context, observed session.SessionServiceSnapshot, target session.SessionServiceMember, bindings sessionbinding.Bindings) error {
 	if err := s.lockSessions(ctx); err != nil {
-		return "", err
+		return err
 	}
 	defer s.unlockSessions()
 	current, boxes, err := s.snapshot(ctx, observed.SessionService)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if current.SessionService.Version != observed.SessionService.Version || len(current.Members) != len(observed.Members) {
-		return "", session.ErrSessionServiceConflict
+		return session.ErrSessionServiceConflict
 	}
 	versions := make(map[string]string, len(observed.Members))
 	for _, m := range observed.Members {
@@ -105,55 +104,45 @@ func (s *Store) ReplaceSessionServiceBindings(ctx context.Context, observed sess
 	var box *agents.Sandbox
 	for i, m := range current.Members {
 		if versions[m.UID] != m.Version {
-			return "", session.ErrSessionServiceConflict
+			return session.ErrSessionServiceConflict
 		}
 		if m.UID == target.UID && m.Version == target.Version {
 			box = boxes[i]
 		}
 	}
 	if box == nil {
-		return "", session.ErrSessionServiceConflict
+		return session.ErrSessionServiceConflict
 	}
-	annotations, err := sessionbinding.Encode(box.Annotations, bindings)
+	raw, err := sessionbinding.MergePatch(box, bindings)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", session.ErrSessionServiceCapacity, err)
+		return fmt.Errorf("%w: %v", session.ErrSessionServiceCapacity, err)
 	}
-	version, err := s.patchMemberBindings(ctx, current.SessionService.UID, box, annotations[sessionbinding.BindingsAnnotation])
+	err = s.patchMemberBindings(ctx, current.SessionService.UID, box, raw)
 	if err == nil {
-		return version, nil
+		return nil
 	}
 	if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-		return "", fmt.Errorf("%w: %v", session.ErrSessionServiceConflict, err)
+		return fmt.Errorf("%w: %v", session.ErrSessionServiceConflict, err)
 	}
 	if apierrors.IsTooManyRequests(err) || apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
-		return "", fmt.Errorf("%w: binding write rejected: %v", session.ErrSessionServiceUnavailable, err)
+		return fmt.Errorf("%w: binding write rejected: %v", session.ErrSessionServiceUnavailable, err)
 	}
-	return "", fmt.Errorf("%w: %v", session.ErrSessionServiceWriteUnknown, err)
+	return fmt.Errorf("%w: %v", session.ErrSessionServiceWriteUnknown, err)
 }
 
 // patchMemberBindings changes only the binding annotation and records the returned version.
 // The caller holds sessionLock and owns validation and error classification.
-func (s *Store) patchMemberBindings(ctx context.Context, sessionServiceUID string, box *agents.Sandbox, bindings string) (string, error) {
-	raw, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{
-			"uid":             box.UID,
-			"resourceVersion": box.ResourceVersion,
-			"annotations":     map[string]string{sessionbinding.BindingsAnnotation: bindings},
-		},
-	})
-	if err != nil {
-		return "", err
-	}
+func (s *Store) patchMemberBindings(ctx context.Context, sessionServiceUID string, box *agents.Sandbox, raw []byte) error {
 	updated := box.DeepCopy()
 	if err := s.client.Patch(ctx, updated, client.RawPatch(types.MergePatchType, raw)); err != nil {
-		return "", err
+		return err
 	}
 	expectations.ResourceVersionExpectationExpect(updated)
 	if s.memberWrites == nil {
 		s.memberWrites = make(map[types.UID]servingMemberWrite)
 	}
 	s.memberWrites[updated.UID] = servingMemberWrite{sessionServiceUID: sessionServiceUID, version: updated.ResourceVersion}
-	return updated.ResourceVersion, nil
+	return nil
 }
 
 var _ session.Store = (*Store)(nil)

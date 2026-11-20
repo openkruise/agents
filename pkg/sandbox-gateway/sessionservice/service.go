@@ -155,8 +155,11 @@ type Result struct {
 // ResolveRoute resolves SessionService traffic before allocating a Session. A policy
 // change before any binding write restarts admission within the same budget.
 func (s *Service) ResolveRoute(ctx context.Context, uid, sessionID string, port int) (Result, error) {
-	if sessionID != "" && !sessionbinding.ValidSessionID(sessionID) || port < 1 || port > 65535 {
+	if sessionID != "" && !sessionbinding.ValidSessionID(sessionID) {
 		return Result{}, &Error{400, "InvalidSessionID"}
+	}
+	if port < 1 || port > 65535 {
+		return Result{}, &Error{400, "InvalidPort"}
 	}
 	resources := s.resources.Load()
 	if resources == nil {

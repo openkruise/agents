@@ -283,7 +283,7 @@ func (a *Allocator) requestSessionMove(ctx context.Context, snapshot session.Ses
 	record := bindings[id]
 	record.Phase = sessionbinding.Moving
 	bindings[id] = record
-	_, err := a.store.ReplaceSessionServiceBindings(ctx, snapshot, member, bindings)
+	err := a.store.ReplaceSessionServiceBindings(ctx, snapshot, member, bindings)
 	if err != nil && !retryableWriteError(err) {
 		return backendError(err)
 	}
@@ -296,7 +296,7 @@ func (a *Allocator) requestSessionMove(ctx context.Context, snapshot session.Ses
 func (a *Allocator) createSessionBinding(ctx context.Context, snapshot session.SessionServiceSnapshot, target session.SessionServiceMember, id string, storageFull map[string]string) (targetUID string, writeUnknown bool, err error) {
 	bindings := copySessionServiceBindings(target.Bindings)
 	bindings[id] = sessionbinding.Record{CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	_, err = a.store.ReplaceSessionServiceBindings(ctx, snapshot, target, bindings)
+	err = a.store.ReplaceSessionServiceBindings(ctx, snapshot, target, bindings)
 	switch {
 	case err == nil, errors.Is(err, session.ErrSessionServiceWriteUnknown):
 		return target.UID, errors.Is(err, session.ErrSessionServiceWriteUnknown), nil

@@ -62,6 +62,8 @@ func TestLocalSessionServiceAdmissionAndAllocation(t *testing.T) {
 		{name: "known", sessionID: "Ab_9012345678901234567", seed: true, port: 8080, wantBinding: true},
 		{name: "unknown", sessionID: "Ab_9012345678901234567", port: 8080, status: 404},
 		{name: "invalid ID", sessionID: "short", port: 8080, status: 400},
+		{name: "invalid zero port", port: 0, status: 400, wantReason: "InvalidPort"},
+		{name: "invalid high port", port: 65536, status: 400, wantReason: "InvalidPort"},
 		{name: "policy retry", changeLimit: true, port: 8080, wantBinding: true},
 		{name: "unknown write committed", unknownWrite: true, commitWrite: true, port: 8080, wantBinding: true},
 		{name: "unknown write uncommitted", unknownWrite: true, port: 8080, status: 503},
