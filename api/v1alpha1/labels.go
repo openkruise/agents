@@ -22,6 +22,7 @@ const (
 	LabelSandboxPool = InternalPrefix + "sandbox-pool"
 	// LabelSandboxTemplate identifies which template generated the sandbox
 	LabelSandboxTemplate = InternalPrefix + "sandbox-template"
+	LabelTemplateName    = InternalPrefix + "template-name"
 	// LabelSandboxIsClaimed indicates whether the sandbox has been claimed by user
 	LabelSandboxIsClaimed = InternalPrefix + "sandbox-claimed"
 	// LabelSandboxClaimMethod records the latest exposed claim method, not delivery success.

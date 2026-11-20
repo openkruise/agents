@@ -35,8 +35,6 @@ type SandboxSetExpansion interface{}
 
 type SandboxTemplateExpansion interface{}
 
-type SandboxTemplateClaimExpansion interface{}
-
 type SandboxUpdateOpsExpansion interface{}
 
 type SecurityProfileExpansion interface{}

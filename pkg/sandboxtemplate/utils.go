@@ -18,6 +18,10 @@ package sandboxtemplate
 
 import api "github.com/openkruise/agents/api/v1alpha1"
 
+func IsBuildVersion(v *api.SandboxTemplate) bool {
+	return v != nil && v.Labels[api.LabelTemplateName] != ""
+}
+
 func IsSubmitted(v *api.SandboxTemplate) bool {
 	if v.Spec.Template != nil {
 		for _, container := range v.Spec.Template.Spec.Containers {

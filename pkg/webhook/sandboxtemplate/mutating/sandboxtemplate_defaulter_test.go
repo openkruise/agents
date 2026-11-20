@@ -54,7 +54,7 @@ func TestManagedBuildCaptureDefaulting(t *testing.T) {
 			require.NoError(t, v1alpha1.AddToScheme(s))
 			version := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "build", Namespace: "default"}, Spec: v1alpha1.SandboxTemplateSpec{BuildOptions: &v1alpha1.SandboxTemplateBuildOptions{}}}
 			if tt.managed {
-				version.OwnerReferences = []metav1.OwnerReference{{APIVersion: v1alpha1.GroupVersion.String(), Kind: "SandboxTemplateClaim", Name: "template", UID: "claim-uid", Controller: ptr.To(true)}}
+				version.Labels = map[string]string{v1alpha1.LabelTemplateName: "template"}
 			}
 			if tt.step != nil {
 				version.Spec.BuildOptions.Steps = []v1alpha1.TemplateBuildStep{*tt.step}

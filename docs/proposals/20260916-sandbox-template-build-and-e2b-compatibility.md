@@ -6,7 +6,7 @@ reviewers:
   - "@zmberg"
   - "@furykerry"
 creation-date: 2026-09-16
-last-updated: 2026-11-19
+last-updated: 2026-11-20
 status: provisional
 see-also:
   - "/docs/proposals/20260123-sandbox-template.md"
@@ -30,20 +30,20 @@ see-also:
 
 ## Summary
 
-1. A metadata-only `SandboxTemplateClaim` owns the public template name. Its name is the namespace-scoped `templateID`, written as T.
-2. A Claim-owned `SandboxTemplate` stores one Build definition and result. Its generated name is the public `buildID`, written as B: `st-` followed by 20 lowercase alphanumeric characters. Kubernetes UIDs remain internal identities.
-3. E2B reservation creates or reuses Claim T and allocates a fresh Version B with one placeholder Build Sandbox. File uploads land in that Sandbox's `/blobs` emptyDir through the gateway. Submission completes the reserved Version in place.
+1. The public `templateID`, written as T, groups independent `SandboxTemplate` Versions by namespace and the immutable label `LabelTemplateName` (`agents.kruise.io/template-name`). T is not a Kubernetes resource name or a separate binding.
+2. Each Version stores one Build definition and result. Its random `metadata.name` is the public `buildID`, written as B: `st-` followed by 20 lowercase alphanumeric characters. Kubernetes UIDs remain internal identities.
+3. Each E2B reservation creates a fresh Version B labeled with T and one Version-owned placeholder Build Sandbox. Multiple requests for the same namespace and T succeed with independent Versions. File uploads land in that Sandbox's `/blobs` emptyDir through the gateway. Submission completes the reserved Version in place.
 4. The independent template controller changes only the business-container image in place, retaining the Pod and emptyDir, executes steps once, and captures a Checkpoint. A result-unknown interruption fails instead of replaying commands.
 5. Ready builds are consumed through existing delivery flows: Checkpoint restoration for captured builds and inline cold start for static definitions. Provisioning is never repeated during instance creation.
 
 ## Motivation and Scope
 
-SandboxTemplate also serves existing SandboxSet revision materialization and Checkpoint restoration. Those subordinate templates keep their existing owners and are not Build Versions. The build controller manages only Claim-owned Versions.
+SandboxTemplate also serves existing SandboxSet revision materialization and Checkpoint restoration. Those subordinate templates keep their existing owners and are not Build Versions. The build controller identifies managed Versions by the template-name label, not by ownership of a name-level resource.
 
 ### Goals
 
 1. Support the community E2B Template reserve, upload, submit, status, existence, list, details, delete, and instance-creation flow.
-2. Persist namespace-scoped names, immutable submitted definitions, original resource identities, and verified artifact references.
+2. Persist namespace-scoped template labels, immutable submitted definitions, original resource identities, and verified artifact references.
 3. Accept a single-container image with folded RUN, USER, WORKDIR, ENV, and COPY instructions, without building or publishing an OCI image.
 4. Keep upload payloads off the Manager data path and require no separate blob-storage service.
 5. Run accepted provisioning before Ready and restore its effects without re-execution.
@@ -52,7 +52,7 @@ SandboxTemplate also serves existing SandboxSet revision materialization and Che
 
 1. `from_template`, private image-registry credentials, `minFreeDiskMb`, start/ready commands, non-default tags, and team-qualified names are not supported.
 2. Build logs remain empty sequences; durable logs and pagination are deferred.
-3. Custom Template APIs, warm pools, companion SandboxSets, explicit rebuild APIs, tag management, and historical Build selection are deferred. Claim ownership does not impose a single-Version limit.
+3. Custom Template APIs, warm pools, companion SandboxSets, explicit rebuild APIs, tag management, and historical Build selection are deferred. A namespace-scoped template-name group may contain multiple independent Versions.
 4. Image-acceleration execution, its Builder resource, and provider integration are deferred. Existing acceleration input remains best-effort intent and is not a Ready prerequisite.
 5. The backend vocabulary for this build entry is `k8s`. Existing backend identifiers remain unchanged; other build backends and routing are not introduced.
 6. No upload sealing, upload-completion callback, or submit/upload mutual exclusion is added. Upload misuse within the caller's own Build does not introduce another coordination subsystem.
@@ -71,19 +71,22 @@ Community E2B SDK
  Manager: reservation / submission / catalog / delivery orchestration
        |
        v
- Infra: Claim and Version storage / Build Sandbox allocation / delivery
+ Infra: Version storage / Build Sandbox creation / delivery
        |
        v
- Claim T -> Version B -> Build Sandbox B -> Pod B + /blobs emptyDir
-                |
-                v
+ Namespace + template-name label T groups independent Versions
+       |
+       v
+ Version B -> Build Sandbox B -> Pod B + /blobs emptyDir
+       |
+       v
  Independent SandboxTemplate controller
    UID-bound worker -> image convergence -> serial provisioning
-                |
-                v
+       |
+       v
  Version-owned Checkpoint (accepted workload remains in Version)
-                |
-                v
+       |
+       v
  Version status: Ready + verified artifact
 ```
 
@@ -105,30 +108,28 @@ The build controller orchestrates Checkpoint resources; it does not implement th
 
 | Identity or resource | Meaning |
 | --- | --- |
-| Claim name T | Public templateID within the caller's namespace. |
-| Version name B | Public buildID, generated independently for each reservation, not derived from Claim UID. |
-| Claim UID / Version UID | Internal fences against deletion and same-name replacement. |
+| Template name T | Public templateID, grouped by caller namespace and immutable Version label; not `metadata.name`. |
+| Version name B | Public buildID, randomly generated independently for each reservation as `st-` plus 20 lowercase alphanumeric characters. |
+| Version UID | Internal fence against deletion and same-name replacement. |
 | Build Sandbox name B | One private execution Sandbox, controlled by Version UID. |
-| Build Sandbox UID | Persisted after allocation; never replaced on a cache miss. |
+| Build Sandbox UID | Persisted after creation on the Version; never replaced on a cache miss. |
 | Pod UID | Persisted when upload/runtime readiness is observed; changing it interrupts the Build. |
 | Execution container ID | Persisted before provisioning and checked through capture; a restarted container cannot supply a successful Build artifact. |
 | Checkpoint name | Kubernetes artifact resource anchor for validation and cleanup. |
 | Delivered Sandbox name | Template instances default to `sbx-{B without leading st-}-{5-character apiserver suffix}`. Explicit clone names or prefixes retain precedence. |
 | Checkpoint backend ID | The restore lookup key, resolved from successful Checkpoint status. |
 
-1. T cannot collide with a SandboxSet or Checkpoint name in the same namespace. Reservation and SandboxSet admission check both directions. Ambiguous names are rejected rather than resolved by implicit precedence.
+1. T cannot collide with a SandboxSet or Checkpoint name in the same namespace. Reservation and SandboxSet admission check both directions against namespace-scoped Version labels. Ambiguous names are rejected rather than resolved by implicit precedence.
 2. The name `tags` is reserved. Names may carry only the `:default` suffix. T and B are not Kubernetes UIDs.
-3. Each Version belongs to one Claim through its controller OwnerReference. A Claim can own multiple independently named Versions and stores no single Build allocation. Recreating T after complete deletion allocates new UIDs; an old Build handle cannot follow the new Claim.
-4. Subordinate SandboxSet and ordinary Snapshot templates do not acquire a Claim owner and are not reclaimed as Draft Builds. Template Builds no longer create a separate Checkpoint-owned recovery template.
-5. Existing Version names remain unchanged and usable for lookup and cleanup. New generation uses `st-` names without adding a second public-ID mapping.
+3. Each Version is independent and owns its Build Sandbox and Checkpoint through Version UID. Group membership comes only from the immutable template-name label; there is no group resource, allocation record, or historical name ledger.
+4. Subordinate SandboxSet and ordinary Snapshot templates retain their existing owners and are not reclaimed as Draft Builds. The template-name label is not copied to Checkpoints or ordinary recovery templates. Template Builds create no separate Checkpoint-owned recovery template.
+5. T exists only through its current namespace-scoped Version set. An empty set leaves no independent name binding; an old B never follows a later Version in the same group.
+6. Existing Version names remain unchanged and usable for lookup and cleanup. New generation uses `st-` names without adding a second public-ID mapping.
 
-### Claim and Version Types
+### Version Types
 
 ```go
-type SandboxTemplateClaim struct {
-    metav1.TypeMeta
-    metav1.ObjectMeta
-}
+const LabelTemplateName = "agents.kruise.io/template-name"
 
 type SandboxTemplateSpec struct {
     Backend              string
@@ -192,34 +193,35 @@ type SandboxTemplateArtifact struct {
 2. Exactly one of `command` or `copy` is set per step. Command `cwd` is empty or absolute; COPY `src` is context-relative and `dest` is absolute.
 3. `Mode` preserves absent permissions versus explicit zero. Wire COPY permissions are octal strings; the CR stores their integer value, so `"0755"` becomes 493 and `"0000"` becomes 0.
 4. Deferred fields remain represented in the existing model but do not authorize their execution. Build admission rejects unsupported fromTemplate/start/ready behavior.
-5. Backend defaults to `k8s` and is immutable. A submitted Version's definition, ownership, and request fingerprint cannot change. Published artifact references are immutable.
+5. Backend defaults to `k8s` and is immutable. The API constant `LabelTemplateName` identifies managed Versions; its nonempty template-name value is required at reservation and immutable from creation. A submitted Version's definition and request fingerprint cannot change. Published artifact references are immutable.
 
 ### Reservation Metadata
 
 | Metadata | Purpose |
 | --- | --- |
 | Version name and Spec | BuildID, reserved CPU/memory envelope, and runtime declarations. |
+| Version `LabelTemplateName` label | Immutable T used with namespace for grouping and managed-Version recognition. |
 | Build Sandbox Spec | Configured placeholder image reference, without tag resolution. |
-| Claim Version-identity annotation | Version UID, Sandbox UID, Pod UID, execution container ID, and deletion intent. |
+| Version execution-identity annotation | Version UID, Sandbox UID, Pod UID, and execution container ID. |
 | Version request-fingerprint annotation | Canonical submitted-input identity for idempotent retries. |
-| Claim cleanup annotations and finalizer | Block new work and retain identities until owned-resource cleanup converges. |
+| Version cleanup annotations and finalizer | Per-Version deletion intent and original identities retained until owned-resource cleanup converges. |
 
-For Claim-owned Versions, no container image denotes Draft; setting an image denotes submitted input, whose Pod template must pass normal Kubernetes validation. Neither submission detection nor admission imposes a single-container limit. Draft stores reserved resources and runtimes directly. Admission checks the owning Claim's name and UID, preserves each named container's resources and the runtime envelope during one-time completion, and then freezes Spec. Images are written with the accepted definition in one patch; no separate submission annotation is required. Status remains the controller's asynchronous execution result.
+For label-identified Versions, no container image denotes Draft; setting an image denotes submitted input, whose Pod template must pass normal Kubernetes validation. Neither submission detection nor admission imposes a single-container limit. Draft stores reserved resources and runtimes directly. Admission validates the immutable template-name label, preserves each named container's resources and the runtime envelope during one-time completion, and then freezes Spec. Images are written with the accepted definition in one patch; no separate submission annotation is required. Status remains the controller's asynchronous execution result.
 
-The annotations belong to the owning use cases and controller. They are not additional public protocol parameters. Conditional writes fence informer views before allocation, submission, execution, consumption, and deletion.
+The annotations belong to the owning use cases and controller. They are not additional public protocol parameters. Conditional writes fence informer views before resource creation, submission, execution, consumption, and deletion. Execution identities and cleanup intent reside on each Version, not in a shared name record.
 
 ### Draft and Build States
 
 | State | Behavior |
 | --- | --- |
-| Unsubmitted Draft | Contains equal positive CPU/memory requests and limits, reserved runtimes, no business image, and an owner Claim. Expires after one hour without deleting the Claim or sibling Versions. |
+| Unsubmitted Draft | Contains equal positive CPU/memory requests and limits, reserved runtimes, no business image, and immutable template-name label. Expires after one hour, cleaning only this Version and its owned resources. |
 | Pending | No execution has started. Draft and submitted definitions are distinguished by the business image, not by this phase. |
 | Building | Accepted work is executing or capture is pending. |
 | Ready | Every declared operation completed, and any required artifact and accepted Version definition were verified. |
 | Failed | Terminal failure, confirmed nonzero exit, timeout, identity loss, or an unknown in-flight execution result. Commands are not replayed. |
-| Cleanup marked | Not a new phase. New uploads, submissions, queries, and consumption are blocked while finalizer cleanup proceeds. |
+| Cleanup marked | Not a new phase. New uploads, submissions, queries, and consumption of this Version are blocked while its finalizer cleanup proceeds; the label does not gate the group. |
 
-1. Reservation failure returns an error without a successful Build response. A new reservation allocates a fresh B; requests are not deduplicated by Claim name, and a missing Version is not recovered.
+1. Reservation failure returns an error without a successful Build response. Each reservation creates a fresh B; requests are not deduplicated by namespace and T, and a missing Version is not recovered.
 2. Submission resolves the image to a digest, records a canonical recipe fingerprint, and finalizes the same Version. An identical retry succeeds; a different input returns 409.
 3. Nonempty provisioning steps force capture with `persistentContents: [filesystem]`. Files produced by provisioning are restored without rerunning steps; in-memory state and background processes started by RUN are not restored. A caller cannot publish provisioning effects as a static image-only definition.
 4. No-step Builds may become Ready as static definitions without a snapshot. Their instances cold-start from the submitted image.
@@ -236,10 +238,10 @@ Native and customized E2B entries use the same handlers and models. The customiz
 | Probe COPY input | GET `/templates/{T}/files/{hash}` | 201 with `present: false` and signed `url`. |
 | Submit | POST `/v2/templates/{T}/builds/{B}` | Empty 202. |
 | Build status | GET `/templates/{T}/builds/{B}/status` | 200 with status, T/B, empty logs, and a sanitized failure reason when applicable. |
-| Alias/existence | GET `/templates/aliases/{alias}` | 200 for a live Claim or 404 when absent/deleting; existence does not imply Ready. |
-| List | GET `/v2/templates` | Existing SandboxSet entries plus one projected entry per Claim. |
-| Details | GET `/templates/{T}` | Existing pool details or the Claim's Ready Version projection. |
-| Delete | DELETE `/templates/{T}` | Existing pool/checkpoint semantics or acceptance of Claim cleanup intent. |
+| Alias/existence | GET `/templates/aliases/{alias}` | 200 for a nonempty namespace-scoped Version group or 404 when empty; existence does not imply Ready. |
+| List | GET `/v2/templates` | Existing SandboxSet entries plus one projected entry per namespace-scoped template-name group. |
+| Details | GET `/templates/{T}` | Existing pool details or the group's default Ready Version projection. |
+| Delete | DELETE `/templates/{T}` | Existing pool/checkpoint semantics or acceptance of per-Version cleanup; concurrent group scope remains to be decided. |
 | Create instance | POST `/sandboxes` | 201 after existing delivery, runtime initialization, and request-level configuration. |
 
 ### Reserve
@@ -272,7 +274,7 @@ Content-Type: application/json
 | teamID | No caller-selected namespace or cross-team addressing. |
 | minFreeDiskMb | Unsupported. |
 
-1. Manager creates or reads Claim T, generates a fresh random B, creates Draft B with the requested resources and runtimes, then creates its Version-owned Build Sandbox. Claim reconciliation does not create or recreate Versions.
+1. Manager generates a fresh random B, creates independent Draft B in the caller's namespace with `LabelTemplateName: T`, requested resources, and runtimes, then creates its Version-owned Build Sandbox. Concurrent requests for the same namespace and T create distinct Versions without a shared reservation record. Reconciliation does not create or recreate Versions.
 2. Reservation returns 202 with T/B only after these creation steps succeed. A failure or lost response may leave a Draft for expiry cleanup; a new request does not resume that reservation.
 3. The Build Sandbox stores the configured placeholder image reference without resolving tags and uses `/blobs` emptyDir, declared runtime injection, and disabled service-account-token automount. It does not enter normal claim, user-delivery, CSI, quota-projection, or recycle flows. Build Sandboxes are not user Sandbox list entries.
 
@@ -328,16 +330,18 @@ Content-Type: application/json
 
 | Situation | Behavior |
 | --- | --- |
-| Missing or deleting T/B | Template query returns 404. A deleted Version is not recreated; an old B never resolves to a replacement Claim. |
+| Empty T group, missing/deleting B, or T/B label mismatch | Template query returns 404. Lookup checks B in the caller's namespace and its immutable label against T. A deleted Version is not recreated; an old B never resolves to another Version. |
 | Draft / Building | Build status reports waiting/building, not Ready. |
 | Ready | Status reports ready. Details use the existing required E2B fields and resource projection. |
 | Failed | Status reports error with a sanitized reason and confirmed failed-step index where available. |
 | No Ready Version during creation | Same create-path not-found response as a missing template. |
 | Ambiguous resource name / changed submitted input | 409. |
 | Bad protocol input or unsupported workload projection | 400. |
-| Temporary allocation, cache, runtime, or image-resolution failure | Classified unavailable response rather than fabricated success. |
+| Temporary resource-creation, cache, runtime, or image-resolution failure | Classified unavailable response rather than fabricated success. |
 
-`logs` and `logEntries` remain `[]`. BuildInfo carries T/B, name/alias, and default tags, not CR status, artifact identifiers, or runtime credentials. List/details retain existing pool projections; Claim details require the supported equal, single-container whole-CPU/whole-MiB envelope. Spawn counters are not introduced.
+Within a namespace-scoped template-name group, default selection uses the eligible Ready Version with the latest `metadata.creationTimestamp`, not the latest submission or completion time. Cleanup-marked or deleting Versions are ineligible. A newer Pending or Failed Build does not replace an older Ready Version.
+
+`logs` and `logEntries` remain `[]`. BuildInfo carries T/B, name/alias, and default tags, not CR status, artifact identifiers, or runtime credentials. List/details retain existing pool projections; grouped Version details require the supported equal, single-container whole-CPU/whole-MiB envelope. Spawn counters are not introduced.
 
 ## Build Execution
 
@@ -345,7 +349,7 @@ Content-Type: application/json
 
 1. The controller registers a leader-gated Runnable. Each active worker is keyed by Version UID and derives its cancellation context from the manager lifecycle; reconcile never waits for a RUN command to finish.
 2. The worker persists a Running execution condition before any workload side effect. Reconcile observing that marker without a live worker fails the Build as Interrupted instead of starting another worker.
-3. Claim cleanup, Version deletion/replacement, leadership loss, and shutdown cancel the worker. Cleanup waits for the local worker to stop before removing the execution Sandbox.
+3. Version cleanup or deletion/replacement, leadership loss, and shutdown cancel the worker. Cleanup waits for the local worker to stop before removing the execution Sandbox.
 4. The total execution-and-capture budget starts once and defaults to 30 minutes. It includes image readiness, runtime initialization, commands, and capture; restart or requeue does not refresh it.
 5. Only idempotent identity, resource, and status operations retry on optimistic conflicts. Process Start is invoked once per step. A missing terminal event or an uncertain transport result is Interrupted; a confirmed nonzero exit or terminal process error is ExecutionFailed, even when the process error is also returned through the RPC error value.
 
@@ -382,7 +386,7 @@ Version definition finalized
 
 ### Checkpoint Publication
 
-1. Capture creates a deterministic Version-owned Checkpoint named `{B}-checkpoint`, with Sandbox/Pod B, business container `runtime`, `keepRunning: true`, and the declared persistent contents.
+1. Capture creates a deterministic Version-owned Checkpoint named `{B}-checkpoint`, with Sandbox/Pod B, business container `runtime`, `keepRunning: true`, and the declared persistent contents. The Checkpoint does not inherit `LabelTemplateName`.
 2. The accepted Version is the restore-definition record. Template capture creates no additional SandboxTemplate, and template consumption reads the validated Version directly.
 3. The Version supplies business workload and runtime declarations. Build-only `/blobs` staging and `RestartPolicyNever` are not copied into delivered instances; Checkpoint initialization metadata and existing delta/resume records remain intact.
 4. Ready requires the original execution Pod/container, matching capture scope and initialization metadata, the accepted Version, current observed generation, Checkpoint Succeeded, and a nonempty backend ID. A failed or invalid capture is terminally Failed.
@@ -404,10 +408,10 @@ status:
 | Resolved input | Delivery |
 | --- | --- |
 | Existing SandboxSet | Existing pool claim or existing on-demand creation policy. |
-| Claim with Ready captured Version | Checkpoint clone using artifact value and the accepted Version workload; validate Version and artifact ownership before materialization. |
-| Claim with Ready static Version | Inline cold-start Sandbox from the Version workload, without requiring or creating a companion pool. |
-| Existing legacy checkpoint ID | Existing clone behavior using its Checkpoint-owned recovery template when no pool/Claim entry resolves the name. |
-| Claim without Ready Version or under cleanup | Reject; never fall back to the original image of a captured Build. |
+| Template-name group with default Ready captured Version | Checkpoint clone using artifact value and the accepted Version workload; validate the namespace/label, Version identity, and artifact ownership before materialization. |
+| Template-name group with default Ready static Version | Inline cold-start Sandbox from the Version workload, without requiring or creating a companion pool. |
+| Existing legacy checkpoint ID | Existing clone behavior using its Checkpoint-owned recovery template when no pool/template-name group resolves the name. |
+| Template-name group without an eligible Ready Version | Reject; never consume a cleanup-marked Version or fall back to the original image of a captured Build. |
 
 1. Request-level initialization, environment variables, identity, dynamic mounts, resource overrides, and quota/admission remain in their existing delivery flows.
 2. A restored Build receives request initialization and a fresh runtime access token when initialization is enabled. The frozen build recipe is not rerun.
@@ -417,13 +421,15 @@ status:
 
 ## Cleanup
 
-1. DELETE marks the Claim and retains its finalizer before destructive work. Acceptance does not imply all Kubernetes resources have already disappeared.
-2. The Claim marker blocks new reservations, submissions, and consumption. Draft expiry cleans only that Version and its owned resources, retaining the Claim and sibling Versions; successful submission cancels stale Draft expiry.
-3. Reference checks include external SandboxSets targeting Versions or existing Checkpoint-owned recovery templates, and Sandboxes whose restore identifiers still depend on the artifact. A blocked request clears its marker and returns a conflict without deleting referenced resources.
-4. Cleanup cancels UID-bound workers and waits for them to stop, then removes owned Build Sandboxes, owned Checkpoints and any existing owned recovery records, Versions, and the Claim binding. UID/resource-version preconditions protect replacements.
-5. Successful Builds release their temporary Build Sandbox while retaining the Ready Version, Claim, and Checkpoint. Failed Builds release the execution Sandbox and unreferenced partial captures while retaining their failure record.
-6. Original identities and deletion intent remain recorded through cleanup retries. A missing Version is never recreated, and a missing cached Sandbox is never replaced under the old Build handle. An empty Claim is retained until explicitly deleted.
+1. For each Version selected for deletion, record cleanup intent and retain its finalizer before destructive work. DELETE acceptance does not imply all Kubernetes resources have already disappeared.
+2. Cleanup intent blocks new uploads, submissions, queries, and consumption of that Version, not the entire template-name group. Draft expiry cleans only that Version and its owned resources, leaving sibling Versions unaffected; successful submission cancels stale Draft expiry.
+3. Reference checks include external SandboxSets targeting Versions or existing Checkpoint-owned recovery templates, and Sandboxes whose restore identifiers still depend on the artifact. A blocked request clears the affected Version's cleanup marker and returns a conflict without deleting referenced resources.
+4. Cleanup cancels UID-bound workers and waits for them to stop, then removes owned Build Sandboxes, owned Checkpoints and any existing owned recovery records, before releasing the Version finalizer. Conditional writes and UID/resource-version deletion preconditions protect each Version and its original resources against replacement.
+5. Successful Builds release their temporary Build Sandbox while retaining the Ready Version and Checkpoint. Failed Builds release the execution Sandbox and unreferenced partial captures while retaining their failure record.
+6. Original identities and deletion intent remain on the Version through cleanup retries. A missing Version is never recreated, and a missing cached Sandbox is never replaced under the old Build handle. When the group's Version set becomes empty, no independent name binding remains.
 7. Normal route discovery observes execution-Sandbox deletion; issued upload grants have bounded validity and cannot authorize a replacement Pod or Sandbox. No separate upload-revocation callback is required.
+
+The template-name label provides no global name-deletion lock. The API behavior of DELETE T racing with new Builds, including which Versions are covered and how concurrent requests respond, remains to be decided. No group-wide deletion gate is promised. Existing SandboxSet and ordinary Checkpoint deletion behavior is unchanged.
 
 ## Security and Deployment
 
@@ -447,13 +453,13 @@ status:
 | Runtime | Existing agent-runtime injection, envd initialization, process service, and multipart file upload. No envd fork is required. |
 | Checkpoint provider | A working filesystem capture/restore implementation for E2B Builds. Independent memory Checkpoints retain their existing backend requirements. Missing backend readiness cannot produce a Ready Build. |
 
-The controller needs informer-backed Template/Claim/Sandbox/Pod/Checkpoint reads, conditional Claim and Sandbox writes, Version status writes, and owned-resource create/delete permissions. Generated RBAC is checked alongside the source markers. No APIReader List or new unapproved APIReader Get path is added.
+The controller needs informer-backed Template/Sandbox/Pod/Checkpoint reads, conditional Version and Sandbox writes, Version status writes, and owned-resource create/delete permissions. Generated RBAC is checked alongside the source markers. No APIReader List or new unapproved APIReader Get path is added.
 
 ## Upgrade Strategy
 
-1. Install the Claim CRD and generated model/schema before enabling reservation. Claim-less legacy templates keep their existing ownership and behavior.
+1. Install the Version schema and immutable `LabelTemplateName` validation before enabling reservation. Existing SandboxSet and Checkpoint-owned templates keep their owners and behavior without this label.
 2. The previous draft Build contract was not exposed to users. Install the command/COPY union schema and required artifact backend value before exposing Build operations; no old Build-data migration or compatibility branch is introduced.
-3. Deploy Manager, gateway, runtime configuration, and controller as one compatible build flow. A protocol-only controller must not mark unexecuted provisioning Ready. Register the Claim defaulting webhook that adds the cleanup finalizer only together with its cleanup controller.
+3. Deploy Manager, gateway, runtime configuration, and controller as one compatible build flow. A protocol-only controller must not mark unexecuted provisioning Ready. Enable the Version cleanup finalizer only together with its cleanup controller.
 4. After a restart, a persisted in-flight execution marker fails rather than replaying. A known provisioned result may continue idempotent Checkpoint-resource reconciliation against its recorded identities.
 5. Rollback does not reinterpret public B as a UID or reuse a replaced Sandbox/Pod. Deferred capabilities do not require compatibility shims in the Build execution path.
 
@@ -461,14 +467,14 @@ The controller needs informer-backed Template/Claim/Sandbox/Pod/Checkpoint reads
 
 | Area | Required coverage |
 | --- | --- |
-| Identity and reservation | T/B shape, envelope defaults/bounds, namespace/name conflicts, independent Versions under one Claim, failed or ambiguous reservation without replay, owner UID checks, Draft-only expiry, no missing-Version recreation, and finalization. |
-| Protocol | Actual route registration, empty 202 submission, required response fields, native/customized entries, unsupported inputs, folded-size budget, default tags. |
+| Identity and reservation | T/B shape, envelope defaults/bounds, namespace/name conflicts, concurrent independent Versions under the same namespace/label, label immutability and managed-Version recognition, no label propagation to Checkpoints or ordinary recovery templates, failed or ambiguous reservation without replay, Version/owned-resource UID checks, Draft-only expiry, empty-group existence, no missing-Version recreation, and finalization. |
+| Protocol | Actual route registration, empty 202 submission, required response fields, native/customized entries, namespace/label grouping and T/B matching, existence without Ready, unsupported inputs, folded-size budget, default tags. |
 | Upload | Signed UID/Pod/path/expiry scope, runtime/TLS initialization, no credential leakage, headers/chunks/trailers, first-byte streaming, ordinary-request regression. |
 | Worker lifecycle | Reconcile remains nonblocking; one worker per Version UID; serial RUN; shutdown/leadership/cleanup cancellation; unknown-result failure and no replay. |
 | Image convergence | Same Pod and emptyDir, actual in-place completion, stale Ready/spec combinations, terminal containers, new container IDs, identity loss. |
 | COPY | File rename and directory merge, trailing slash, symlink ownership, explicit zero mode, quoting, glob prefixes, missing/invalid input, cleanup on failure. |
 | Capture | Business-container scope, no extra Template-build recovery object, Version integrity, initialization metadata, original execution container, failed capture, missing backend ID, stable total budget. |
-| Consumption and cleanup | Artifact-value clone, static cold start without a pool, Version-based restore definition, `st-` Build IDs and Build-derived `sbx-` instance names, fresh delivery environment/token, Ready/deletion gates, reference blocking including existing recovery records, retained artifacts and temporary-Sandbox cleanup. |
+| Consumption and cleanup | Artifact-value clone, static cold start without a pool, Version-based restore definition, latest-created Ready selection despite newer Pending/Failed Builds or different completion order, `st-` Build IDs and Build-derived `sbx-` instance names, fresh delivery environment/token, per-Version Ready/deletion gates and UID/resource-version/finalizer safety, reference blocking including existing recovery records, retained artifacts and temporary-Sandbox cleanup. |
 | Regression and deployment | Narrow unit/race runs; generated-file and dependency-closure checks; real gateway/runtime/backend SDK flow before declaring the build feature verified. |
 
-Local process/HTTP tests validate orchestration and transport behavior, not backend snapshot contents. Linux filesystem COPY tests and a real SDK build/upload/capture/restore run must demonstrate the guest behavior and retained provisioning effects. Component and workload images are approved before the actual-environment run.
+Local process/HTTP tests validate orchestration and transport behavior, not backend snapshot contents. Linux filesystem COPY tests and a real SDK build/upload/capture/restore run must demonstrate the guest behavior and retained provisioning effects. Component and workload images are approved before the actual-environment run. Tests defining the scope and responses of DELETE T racing with new Builds depend on the unresolved API decision in Cleanup.

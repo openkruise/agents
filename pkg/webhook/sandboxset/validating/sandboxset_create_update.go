@@ -69,25 +69,20 @@ func (h *SandboxSetValidatingHandler) Handle(ctx context.Context, req admission.
 	if len(errList) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())
 	}
-	claim := &agentsv1alpha1.SandboxTemplateClaim{}
-	if err := h.Client.Get(ctx, client.ObjectKeyFromObject(obj), claim); err == nil {
-		return admission.Errored(http.StatusConflict, fmt.Errorf("name %q is occupied by SandboxTemplateClaim", obj.Name))
-	} else if !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
-		return admission.Errored(http.StatusServiceUnavailable, fmt.Errorf("check pool name: %w", err))
+	versions := &agentsv1alpha1.SandboxTemplateList{}
+	if err := h.Client.List(ctx, versions, client.InNamespace(obj.Namespace), client.MatchingLabels{agentsv1alpha1.LabelTemplateName: obj.Name}); err != nil {
+		if !meta.IsNoMatchError(err) {
+			return admission.Errored(http.StatusServiceUnavailable, fmt.Errorf("check pool name: %w", err))
+		}
+	} else if len(versions.Items) > 0 {
+		return admission.Errored(http.StatusConflict, fmt.Errorf("name %q is occupied by template Builds", obj.Name))
 	}
 	if obj.Spec.TemplateRef != nil {
 		template := &agentsv1alpha1.SandboxTemplate{}
 		err := h.Client.Get(ctx, client.ObjectKey{Namespace: obj.Namespace, Name: obj.Spec.TemplateRef.Name}, template)
-		if owner := sandboxtemplate.ClaimOwnerReference(template); err == nil && owner != nil {
+		if err == nil && sandboxtemplate.IsBuildVersion(template) {
 			if template.DeletionTimestamp != nil || !sandboxtemplate.IsStaticReady(template) {
 				return admission.Errored(http.StatusUnprocessableEntity, field.Forbidden(field.NewPath("spec", "templateRef"), "only Ready static Versions can be referenced"))
-			}
-			claim := &agentsv1alpha1.SandboxTemplateClaim{}
-			if err := h.Client.Get(ctx, client.ObjectKey{Namespace: obj.Namespace, Name: owner.Name}, claim); err != nil {
-				return admission.Errored(http.StatusServiceUnavailable, fmt.Errorf("read template Claim: %w", err))
-			}
-			if claim.UID != owner.UID || claim.DeletionTimestamp != nil {
-				return admission.Errored(http.StatusConflict, fmt.Errorf("template Claim is unavailable or being deleted"))
 			}
 		}
 		if err != nil && !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {

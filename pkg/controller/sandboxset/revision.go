@@ -83,19 +83,11 @@ func (r *Reconciler) buildSandboxTemplateSpec(ctx context.Context, sbs *agentsv1
 }
 
 func (r *Reconciler) validateTemplateRef(ctx context.Context, tpl *agentsv1alpha1.SandboxTemplate) error {
-	owner := sandboxtemplate.ClaimOwnerReference(tpl)
-	if owner == nil {
+	if !sandboxtemplate.IsBuildVersion(tpl) {
 		return nil
 	}
 	if tpl.DeletionTimestamp != nil || !sandboxtemplate.IsStaticReady(tpl) {
 		return fmt.Errorf("sandbox template %s/%s is not a Ready static Version", tpl.Namespace, tpl.Name)
-	}
-	claim := &agentsv1alpha1.SandboxTemplateClaim{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: tpl.Namespace, Name: owner.Name}, claim); err != nil {
-		return fmt.Errorf("read template Claim: %w", err)
-	}
-	if claim.UID != owner.UID || claim.DeletionTimestamp != nil {
-		return fmt.Errorf("template Claim is unavailable or being deleted")
 	}
 	return nil
 }

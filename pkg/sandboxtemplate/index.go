@@ -18,23 +18,9 @@ package sandboxtemplate
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	api "github.com/openkruise/agents/api/v1alpha1"
 )
-
-const ClaimOwner = "templateClaimOwnerUID"
-
-func ClaimOwnerReference(template *api.SandboxTemplate) *metav1.OwnerReference {
-	if template == nil {
-		return nil
-	}
-	owner := metav1.GetControllerOfNoCopy(template)
-	if owner == nil || owner.APIVersion != api.GroupVersion.String() || owner.Kind != "SandboxTemplateClaim" || owner.Name == "" || owner.UID == "" {
-		return nil
-	}
-	return owner
-}
 
 func VersionOwnerReference(obj metav1.Object) *metav1.OwnerReference {
 	owner := metav1.GetControllerOfNoCopy(obj)
@@ -42,16 +28,4 @@ func VersionOwnerReference(obj metav1.Object) *metav1.OwnerReference {
 		return nil
 	}
 	return owner
-}
-
-func ClaimOwnerUID(obj client.Object) []string {
-	template, ok := obj.(*api.SandboxTemplate)
-	if !ok {
-		return nil
-	}
-	owner := ClaimOwnerReference(template)
-	if owner == nil {
-		return nil
-	}
-	return []string{string(owner.UID)}
 }

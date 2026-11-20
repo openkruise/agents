@@ -41,7 +41,6 @@ func TestGeneratedTemplateAdmissionConfiguration(t *testing.T) {
 	require.NoError(t, err)
 	decoder := yamlutil.NewYAMLOrJSONDecoder(bytes.NewReader(data), 4096)
 	statusRegistered := false
-	claimRegistered := false
 	for {
 		var configuration admissionv1.ValidatingWebhookConfiguration
 		err := decoder.Decode(&configuration)
@@ -58,9 +57,7 @@ func TestGeneratedTemplateAdmissionConfiguration(t *testing.T) {
 			if configuration.Kind != "ValidatingWebhookConfiguration" {
 				continue
 			}
-			if path == "/validate-sandboxtemplateclaim" {
-				claimRegistered = true
-			}
+			require.NotEqual(t, "/validate-sandboxtemplateclaim", path)
 			if path == "/validate-sandboxtemplate" {
 				for _, rule := range webhook.Rules {
 					if slices.Contains(rule.Resources, "sandboxtemplates/status") && slices.Contains(rule.Operations, admissionv1.Update) {
@@ -70,30 +67,26 @@ func TestGeneratedTemplateAdmissionConfiguration(t *testing.T) {
 			}
 		}
 	}
-	require.True(t, claimRegistered)
 	require.True(t, statusRegistered)
-	require.Len(t, GetHandlerGetters(), 3)
+	require.Len(t, GetHandlerGetters(), 2)
 
 	data, err = os.ReadFile("../../../config/rbac/role.yaml")
 	require.NoError(t, err)
 	var role rbacv1.ClusterRole
 	require.NoError(t, yaml.Unmarshal(data, &role))
-	for _, verb := range []string{"get", "list", "watch"} {
-		allowed := false
-		for _, rule := range role.Rules {
-			if slices.Contains(rule.APIGroups, "agents.kruise.io") && slices.Contains(rule.Resources, "sandboxtemplateclaims") && slices.Contains(rule.Verbs, verb) {
-				allowed = true
-			}
-		}
-		require.True(t, allowed, "Claim %s permission is missing", verb)
+	for _, rule := range role.Rules {
+		require.NotContains(t, rule.Resources, "sandboxtemplateclaims")
+		require.NotContains(t, rule.Resources, "sandboxtemplateclaims/finalizers")
 	}
+	_, err = os.Stat("../../../config/crd/bases/agents.kruise.io_sandboxtemplateclaims.yaml")
+	require.True(t, os.IsNotExist(err), "%v", err)
 }
 
 func TestTemplateHandlerGetters(t *testing.T) {
 	builder, err := controllers.NewMockManagerBuilder(t)
 	require.NoError(t, err)
 	mgr := builder.Build()
-	paths := []string{"/validate-sandboxtemplateclaim", "/default-sandboxtemplate", "/validate-sandboxtemplate"}
+	paths := []string{"/default-sandboxtemplate", "/validate-sandboxtemplate"}
 	getters := GetHandlerGetters()
 	require.Len(t, getters, len(paths))
 	for i, getter := range getters {

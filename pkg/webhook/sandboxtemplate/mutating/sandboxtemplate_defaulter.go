@@ -62,7 +62,7 @@ func (h *Defaulter) Handle(ctx context.Context, req admission.Request) admission
 
 	// Apply defaulting logic to volume claim templates
 	setDefaultVolumeClaimTemplates(obj.Spec.VolumeClaimTemplates)
-	if sandboxtemplate.ClaimOwnerReference(obj) != nil && obj.Spec.BuildOptions != nil && len(obj.Spec.BuildOptions.Steps) > 0 {
+	if sandboxtemplate.IsBuildVersion(obj) && obj.Spec.BuildOptions != nil && len(obj.Spec.BuildOptions.Steps) > 0 {
 		obj.Spec.BuildOptions.Checkpoint = true
 	}
 

@@ -26,8 +26,11 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kubernetes/pkg/apis/core"
 	corev1 "k8s.io/kubernetes/pkg/apis/core/v1"
@@ -71,49 +74,46 @@ func (h *ValidatingHandler) Handle(ctx context.Context, req admission.Request) a
 		if len(errs) > 0 {
 			return admission.Errored(http.StatusUnprocessableEntity, errs.ToAggregate())
 		}
-		if sandboxtemplate.ClaimOwnerReference(old) == nil || req.SubResource == "status" || sandboxtemplate.IsSubmitted(old) {
+		if !sandboxtemplate.IsBuildVersion(old) || req.SubResource == "status" || sandboxtemplate.IsSubmitted(old) || equality.Semantic.DeepEqual(old.Spec, obj.Spec) {
 			return admission.Allowed("")
 		}
 	}
 	errs = append(errs, validateSandboxTemplateMetadata(obj.ObjectMeta, field.NewPath("metadata"))...)
-	owner := sandboxtemplate.ClaimOwnerReference(obj)
-	if owner == nil {
-		if ref := metav1.GetControllerOfNoCopy(obj); ref != nil && ref.Kind == "SandboxTemplateClaim" {
-			errs = append(errs, field.Invalid(field.NewPath("metadata", "ownerReferences"), ref, "invalid Claim controller reference"))
-		}
-		errs = append(errs, validateSandboxTemplateSpec(obj.Spec, field.NewPath("spec"))...)
+	if sandboxtemplate.IsBuildVersion(obj) && !sandboxtemplate.IsSubmitted(obj) {
+		errs = append(errs, validateDraftSpec(obj.Spec)...)
 	} else {
-		claim := &agentsv1alpha1.SandboxTemplateClaim{}
-		if err := h.Client.Get(ctx, client.ObjectKey{Namespace: obj.Namespace, Name: owner.Name}, claim); err != nil {
-			return admission.Errored(http.StatusConflict, fmt.Errorf("read owning Claim: %w", err))
-		}
-		if claim.UID != owner.UID {
-			return admission.Errored(http.StatusConflict, fmt.Errorf("owning Claim identity changed"))
-		}
-		if claim.DeletionTimestamp != nil {
-			return admission.Errored(http.StatusConflict, fmt.Errorf("owning Claim is being deleted"))
-		}
-		if !sandboxtemplate.IsSubmitted(obj) {
-			errs = append(errs, validateDraftSpec(obj.Spec)...)
-		} else {
-			errs = append(errs, validateSandboxTemplateSpec(obj.Spec, field.NewPath("spec"))...)
+		errs = append(errs, validateSandboxTemplateSpec(obj.Spec, field.NewPath("spec"))...)
+		if sandboxtemplate.IsBuildVersion(obj) {
 			errs = append(errs, validateBuildOptions(obj.Spec)...)
 		}
 	}
 	if len(errs) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errs.ToAggregate())
 	}
+	if req.Operation == admissionv1.Create && sandboxtemplate.IsBuildVersion(obj) {
+		key := client.ObjectKey{Namespace: obj.Namespace, Name: obj.Labels[agentsv1alpha1.LabelTemplateName]}
+		for _, resource := range []struct {
+			kind   string
+			object client.Object
+		}{{"SandboxSet", &agentsv1alpha1.SandboxSet{}}, {"Checkpoint", &agentsv1alpha1.Checkpoint{}}} {
+			if err := h.Client.Get(ctx, key, resource.object); err == nil {
+				return admission.Errored(http.StatusConflict, fmt.Errorf("template name %q is occupied by %s", key.Name, resource.kind))
+			} else if !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
+				return admission.Errored(http.StatusServiceUnavailable, fmt.Errorf("check template name: %w", err))
+			}
+		}
+	}
 	return admission.Allowed("")
 }
 
 func validateManagedUpdate(old, obj *agentsv1alpha1.SandboxTemplate) field.ErrorList {
-	oldOwner := sandboxtemplate.ClaimOwnerReference(old)
-	newOwner := sandboxtemplate.ClaimOwnerReference(obj)
-	if oldOwner == nil && newOwner == nil {
+	oldName, oldBuild := old.Labels[agentsv1alpha1.LabelTemplateName]
+	newName, newBuild := obj.Labels[agentsv1alpha1.LabelTemplateName]
+	if !oldBuild && !newBuild {
 		return nil
 	}
-	if oldOwner == nil || !equality.Semantic.DeepEqual(oldOwner, newOwner) {
-		return field.ErrorList{field.Forbidden(field.NewPath("metadata", "ownerReferences"), "Claim controller ownership is immutable; existing templates cannot be adopted")}
+	if !oldBuild || !newBuild || oldName != newName {
+		return field.ErrorList{field.Forbidden(field.NewPath("metadata", "labels").Key(agentsv1alpha1.LabelTemplateName), "template name is immutable; existing templates cannot be adopted")}
 	}
 	var errs field.ErrorList
 	complete := sandboxtemplate.IsSubmitted(old)
@@ -234,6 +234,15 @@ func validateBuildOptions(spec agentsv1alpha1.SandboxTemplateSpec) field.ErrorLi
 func validateSandboxTemplateMetadata(metadata metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
 	var errList field.ErrorList
 	errList = append(errList, validation.ValidateObjectMeta(&metadata, true, validation.NameIsDNSSubdomain, fldPath)...)
+	if name, build := metadata.Labels[agentsv1alpha1.LabelTemplateName]; build {
+		namePath := fldPath.Child("labels").Key(agentsv1alpha1.LabelTemplateName)
+		for _, message := range utilvalidation.IsDNS1123Label(name) {
+			errList = append(errList, field.Invalid(namePath, name, message))
+		}
+		if name == "tags" {
+			errList = append(errList, field.Invalid(namePath, name, "name is reserved"))
+		}
+	}
 	return errList
 }
 

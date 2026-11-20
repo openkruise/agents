@@ -12,7 +12,6 @@ resources:
 - bases/agents.kruise.io_sessionservices.yaml
 - bases/agents.kruise.io_sandboxsets.yaml
 - bases/agents.kruise.io_sandboxtemplates.yaml
-- bases/agents.kruise.io_sandboxtemplateclaims.yaml
 - bases/agents.kruise.io_sandboxupdateops.yaml
 - bases/agents.kruise.io_securityprofiles.yaml
 - bases/agents.kruise.io_trafficpolicies.yaml
