@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"k8s.io/klog/v2"
 
@@ -37,10 +38,15 @@ import (
 )
 
 type ListSandboxesRequest struct {
-	Metadata  map[string]string `json:"metadata,omitempty"`
-	States    []string          `json:"state,omitempty"`
-	NextToken string            `json:"nextToken,omitempty"` // not implemented
-	Limit     int               `json:"limit,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	States       []string          `json:"state,omitempty"`
+	NextToken    string            `json:"nextToken,omitempty"` // not implemented
+	Limit        int               `json:"limit,omitempty"`
+	Template     string            `json:"template,omitempty"`
+	StartedAfter time.Time         `json:"startedAfter,omitempty"`
+	// Descending sorts newest-first. Defaults to true per the E2B spec's
+	// order="desc" default; set to false by an explicit order=asc.
+	Descending bool `json:"-"`
 }
 
 // ListSandboxes returns a list of all created sandboxes (allocated pods) This API is not ready now.
@@ -68,9 +74,10 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 		Namespace: sc.getNamespaceOfUser(user),
 		User:      user.ID.String(),
 	}, &pagination.Paginator[infra.Sandbox]{
-		Limit:     request.Limit,
-		NextToken: request.NextToken,
-		Filter:    getListFilter(request),
+		Limit:      request.Limit,
+		NextToken:  request.NextToken,
+		Filter:     getListFilter(request),
+		Descending: request.Descending,
 		GetKey: func(sbx infra.Sandbox) string {
 			return sbx.GetAnnotations()[agentsv1alpha1.AnnotationClaimTime]
 		},
@@ -103,8 +110,9 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 
 func parseListSandboxesRequest(r *http.Request) (ListSandboxesRequest, *web.ApiError) {
 	request := ListSandboxesRequest{
-		Metadata: make(map[string]string),
-		Limit:    models.MaxListLimit,
+		Metadata:   make(map[string]string),
+		Limit:      models.MaxListLimit,
+		Descending: true,
 	}
 	for key, values := range r.URL.Query() {
 		if len(values) == 0 {
@@ -134,6 +142,29 @@ func parseListSandboxesRequest(r *http.Request) (ListSandboxesRequest, *web.ApiE
 				}
 			}
 			request.Limit = limit
+		case "order":
+			switch values[0] {
+			case "asc":
+				request.Descending = false
+			case "desc":
+				request.Descending = true
+			default:
+				return request, &web.ApiError{
+					Code:    http.StatusBadRequest,
+					Message: fmt.Sprintf("Invalid order: %v, must be 'asc' or 'desc'", values[0]),
+				}
+			}
+		case "template":
+			request.Template = values[0]
+		case "startedAfter":
+			parsed, err := time.Parse(time.RFC3339, values[0])
+			if err != nil {
+				return request, &web.ApiError{
+					Code:    http.StatusBadRequest,
+					Message: fmt.Sprintf("Invalid startedAfter: %v, must be RFC3339", values[0]),
+				}
+			}
+			request.StartedAfter = parsed
 		case "metadata":
 			if len(values) > 0 && values[0] != "" {
 				decodedStr, err := url.QueryUnescape(values[0])
@@ -201,6 +232,15 @@ func getListFilter(request ListSandboxesRequest) func(sbx infra.Sandbox) bool {
 		if len(request.States) > 0 {
 			state, _ := sbx.GetState()
 			if !slices.Contains(request.States, state) {
+				return false
+			}
+		}
+		if request.Template != "" && sbx.GetTemplate() != request.Template {
+			return false
+		}
+		if !request.StartedAfter.IsZero() {
+			startedAt, err := time.Parse(time.RFC3339, sbx.GetAnnotations()[agentsv1alpha1.AnnotationClaimTime])
+			if err != nil || startedAt.Before(request.StartedAfter) {
 				return false
 			}
 		}
