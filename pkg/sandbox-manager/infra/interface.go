@@ -308,7 +308,7 @@ type Sandbox interface {
 	// GetRoute projects this sandbox into its gateway route; it is a pure
 	// delegate to sandboxroute.RouteFromSandbox.
 	GetRoute() (sandboxroute.Route, error)
-	GetTemplate() string          // Get the template name of the Sandbox
+	GetTemplate() string          // Get the template (SandboxSet) name of the Sandbox
 	GetResource() SandboxResource // Get the CPU / Memory requirements of the Sandbox
 	// GetTrafficAccessToken returns the access token minted for accessing this
 	// sandbox through the sandbox gateway. It is a transient, per-operation value

@@ -764,10 +764,45 @@ func TestSandbox_GetTemplate(t *testing.T) {
 		want string
 	}{
 		{
-			name: "returns sandbox pool label",
+			name: "returns sandbox template label without pool label",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
+						v1alpha1.LabelSandboxTemplate: "test-template",
+					},
+				},
+			},
+			want: "test-template",
+		},
+		{
+			name: "returns sandbox pool label without template label",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxPool: "test-pool",
+					},
+				},
+			},
+			want: "test-pool",
+		},
+		{
+			name: "pool label takes precedence over referenced template label",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxPool:     "test-pool",
+						v1alpha1.LabelSandboxTemplate: "shared-template",
+					},
+				},
+			},
+			want: "test-pool",
+		},
+		{
+			name: "empty pool label falls back to template label",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxPool:     "",
 						v1alpha1.LabelSandboxTemplate: "test-template",
 					},
 				},
