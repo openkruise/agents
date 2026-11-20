@@ -76,6 +76,27 @@ func addSessionServiceRuntime(ctx context.Context, cfg *rest.Config, mgr manager
 		// without imposing a cooldown after transient watch errors.
 		return active.Load() && ctx.Err() == nil && opts.Registry.Ready() && informer.HasSynced()
 	})
+	forgetParent := func(obj any) {
+		if tombstone, ok := obj.(toolscache.DeletedFinalStateUnknown); ok {
+			obj = tombstone.Obj
+		}
+		if parent, ok := obj.(*agents.SessionService); ok {
+			if err := store.ForgetSessionService(ctx, string(parent.UID)); err != nil {
+				log.FromContext(ctx).Error(err, "Failed to release SessionService write watermarks", "sessionServiceUID", parent.UID)
+			}
+		}
+	}
+	if _, err := informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
+		DeleteFunc: forgetParent,
+		UpdateFunc: func(oldObj, newObj any) {
+			// A relist can report same-name recreation as an update, not a delete.
+			if oldObj.(*agents.SessionService).UID != newObj.(*agents.SessionService).UID {
+				forgetParent(oldObj)
+			}
+		},
+	}); err != nil {
+		return fmt.Errorf("register SessionService cleanup handler: %w", err)
+	}
 	if err := opts.SessionServiceService.Configure(store); err != nil {
 		return err
 	}

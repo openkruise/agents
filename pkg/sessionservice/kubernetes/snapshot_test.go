@@ -28,6 +28,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -409,5 +410,91 @@ func TestSessionServiceAllocationBackendLockCancellation(t *testing.T) {
 				t.Fatalf("canceled operation changed surviving records: %+v", records)
 			}
 		})
+	}
+}
+
+func TestForgetSessionService(t *testing.T) {
+	for _, uid := range []string{"deleted-parent", "missing-parent"} {
+		t.Run(uid, func(t *testing.T) {
+			backend := NewStore(nil, nil)
+			backend.memberWrites = map[types.UID]servingMemberWrite{
+				"deleted-member":     {sessionServiceUID: "deleted-parent", version: "2"},
+				"replacement-member": {sessionServiceUID: "replacement-parent", version: "3"},
+			}
+			for range 2 {
+				if err := backend.ForgetSessionService(t.Context(), uid); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, found := backend.memberWrites["deleted-member"]
+			if found != (uid != "deleted-parent") {
+				t.Fatalf("deleted member retained=%t", found)
+			}
+			if backend.memberWrites["replacement-member"].version != "3" {
+				t.Fatal("cleanup removed another parent's watermark")
+			}
+		})
+	}
+}
+
+func TestForgetSessionServiceWaitsForBindingWrite(t *testing.T) {
+	parent, _, base := servingSessionFixture(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	committed, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	c := interceptor.NewClient(base, interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+		if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+			return err
+		}
+		close(committed)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}})
+	backend := NewStore(c, func() bool { return true })
+	snapshot, err := backend.ReadSessionServiceSnapshot(ctx, servingValue(parent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := make(chan error, 1)
+	go func() {
+		written <- backend.ReplaceSessionServiceBindings(ctx, snapshot, snapshot.Members[0], sessionbinding.Bindings{})
+	}()
+	select {
+	case <-committed:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if err := base.Delete(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+	// Cleanup cannot pass the write's critical section while its response is pending.
+	canceled, stop := context.WithCancel(ctx)
+	stop()
+	if err := backend.ForgetSessionService(canceled, string(parent.UID)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cleanup ignored cancellation: %v", err)
+	}
+	cleaned := make(chan error, 1)
+	go func() { cleaned <- backend.ForgetSessionService(ctx, string(parent.UID)) }()
+	once.Do(func() { close(release) })
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-cleaned; err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.memberWrites) != 0 {
+		t.Fatalf("late response restored watermark: %+v", backend.memberWrites)
+	}
+	if err := backend.ReplaceSessionServiceBindings(ctx, snapshot, snapshot.Members[0], sessionbinding.Bindings{}); !errors.Is(err, session.ErrSessionServiceNotFound) {
+		t.Fatalf("deleted parent accepted another write: %v", err)
+	}
+	if len(backend.memberWrites) != 0 {
+		t.Fatal("rejected write restored watermark")
 	}
 }

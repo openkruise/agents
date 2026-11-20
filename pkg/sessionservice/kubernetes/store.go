@@ -75,6 +75,22 @@ func (s *Store) lockSessions(ctx context.Context) error {
 
 func (s *Store) unlockSessions() { <-s.sessionLock }
 
+// ForgetSessionService releases local write watermarks after a parent leaves
+// the informer. Sharing the write lock lets any in-flight PATCH finish before
+// cleanup, so its response cannot recreate a watermark after cleanup returns.
+func (s *Store) ForgetSessionService(ctx context.Context, uid string) error {
+	if err := s.lockSessions(ctx); err != nil {
+		return err
+	}
+	defer s.unlockSessions()
+	for memberUID, write := range s.memberWrites {
+		if write.sessionServiceUID == uid {
+			delete(s.memberWrites, memberUID)
+		}
+	}
+	return nil
+}
+
 func (s *Store) ready(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
