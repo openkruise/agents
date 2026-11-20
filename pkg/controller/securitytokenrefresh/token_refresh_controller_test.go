@@ -164,11 +164,11 @@ func TestReconcile(t *testing.T) {
 
 	cases := []tc{
 		{
-			name:                      "not yet due, requeue near refreshAt",
-			status:                    `{"accessTokenExpiration":"` + expireFar + `"}`,
-			claimed:                   true,
-			refresher:                 &fakeRefresher{},
-			expectErr:                 "",
+			name:      "not yet due, requeue near refreshAt",
+			status:    `{"accessTokenExpiration":"` + expireFar + `"}`,
+			claimed:   true,
+			refresher: &fakeRefresher{},
+			expectErr: "",
 			// expire=now+1h, leadTime=30m → refreshAt=now+30m, requeue ≈ 30m.
 			expectRequeueMin:          29 * time.Minute,
 			expectRequeueMax:          31 * time.Minute,
@@ -328,6 +328,29 @@ func TestReconcile(t *testing.T) {
 			expectRequeueMax: 5*time.Minute + time.Second,
 			expectCalls:      1,
 			expectEvent:      "TokenRefreshed",
+		},
+		{
+			// The provider answered with a token that is already expired.
+			// Scheduling from it computes a negative delay, which clamps to
+			// minRequeueAfter and spins the controller at roughly one issuance
+			// call per second for as long as the provider keeps answering this
+			// way. The short-TTL guard above does not cover it, because that
+			// branch requires remaining > 0. Back off at the failed-refresh
+			// cadence instead and say so with an event.
+			name:    "already-expired new token backs off instead of spinning",
+			status:  `{"accessTokenExpiration":"` + expireNow + `"}`,
+			claimed: true,
+			refresher: &fakeRefresher{
+				resp: &identity.TokenResponse{
+					AccessToken:           "already-expired",
+					AccessTokenExpiration: now.Add(-time.Minute).Format(time.RFC3339),
+				},
+			},
+			expectErr:        "",
+			expectRequeueMin: refreshRetryAfter,
+			expectRequeueMax: refreshRetryAfter,
+			expectCalls:      1,
+			expectEvent:      "TokenExpiredOnIssue",
 		},
 		{
 			// A sandbox with no serving runtime (e.g. paused/resuming) has no pod
@@ -500,10 +523,10 @@ func TestJitteredRefreshLeadTime(t *testing.T) {
 		wantMax time.Duration
 	}{
 		{
-			name: "ratio == 0 returns raw lead time",
-			rand: func() float64 { return 0.5 },
+			name:  "ratio == 0 returns raw lead time",
+			rand:  func() float64 { return 0.5 },
 			ratio: 0,
-			want: 10 * time.Minute,
+			want:  10 * time.Minute,
 		},
 		{
 			name:  "rand == 0.5 cancels delta",
@@ -889,4 +912,3 @@ func TestAdd_FeatureGateDisabled(t *testing.T) {
 	assert.NoError(t, err, "Add must return nil when the feature gate is disabled")
 	assert.False(t, called, "setup hooks must not run when the feature gate is disabled")
 }
-
