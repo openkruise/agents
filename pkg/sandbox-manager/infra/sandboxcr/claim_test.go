@@ -5611,7 +5611,7 @@ func (m *mockIdentityProvider) IssueToken(ctx context.Context, sbx *v1alpha1.San
 	if m.issueTokenFunc != nil {
 		return m.issueTokenFunc(ctx, sbx)
 	}
-	return &identity.TokenResponse{AccessToken: uuid.NewString()}, nil
+	return &identity.TokenResponse{AccessToken: uuid.NewString(), AccessTokenExpiration: "2099-01-01T00:00:00Z"}, nil
 }
 
 func (m *mockIdentityProvider) PropagateSecurityToken(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse,
@@ -5654,7 +5654,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			},
 			mockProvider: &mockIdentityProvider{
 				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
-					return &identity.TokenResponse{AccessToken: "secure-token-123"}, nil
+					return &identity.TokenResponse{AccessToken: "secure-token-123", AccessTokenExpiration: "2099-01-01T00:00:00Z"}, nil
 				},
 				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
 					return nil
@@ -5704,7 +5704,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			},
 			mockProvider: &mockIdentityProvider{
 				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
-					return &identity.TokenResponse{AccessToken: "secure-token-456"}, nil
+					return &identity.TokenResponse{AccessToken: "secure-token-456", AccessTokenExpiration: "2099-01-01T00:00:00Z"}, nil
 				},
 				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
 					return fmt.Errorf("propagation failed")
@@ -5723,7 +5723,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			},
 			mockProvider: &mockIdentityProvider{
 				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
-					return &identity.TokenResponse{AccessToken: "issued-token"}, nil
+					return &identity.TokenResponse{AccessToken: "issued-token", AccessTokenExpiration: "2099-01-01T00:00:00Z"}, nil
 				},
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
@@ -5742,7 +5742,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			},
 			mockProvider: &mockIdentityProvider{
 				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
-					return &identity.TokenResponse{AccessToken: "issued-token"}, nil
+					return &identity.TokenResponse{AccessToken: "issued-token", AccessTokenExpiration: "2099-01-01T00:00:00Z"}, nil
 				},
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
