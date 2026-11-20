@@ -428,10 +428,24 @@ func TestSessionServiceFactoryWaitsForControllerRebinding(t *testing.T) {
 	target.Name, target.UID, target.Annotations = "target", "target-uid", nil
 	target.Status.PodInfo.PodIP = "10.0.0.2"
 	target.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&agents.SessionService{}, kubernetes.SessionServiceUIDIndex, func(obj client.Object) []string { return []string{string(obj.GetUID())} }).WithStatusSubresource(parent).WithObjects(parent, source, target).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&agents.SessionService{}, kubernetes.SessionServiceUIDIndex, func(obj client.Object) []string { return []string{string(obj.GetUID())} }).WithStatusSubresource(parent).WithObjects(parent).
 		WithIndex(&appsv1.ControllerRevision{}, "sessionServiceUID", func(obj client.Object) []string {
 			return []string{obj.GetLabels()[sessionbinding.SessionServiceUIDLabel]}
 		}).Build()
+	// Bootstrap the real Revision so migration does not also start a rollout
+	// of unlabeled test members when capacity reconciliation continues.
+	replicas = 0
+	require.NoError(t, c.Update(t.Context(), parent))
+	_, err = controller.NewReconciler(c).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
+	require.NoError(t, err)
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(parent), parent))
+	replicas = 2
+	parent.Spec.Replicas = &replicas
+	require.NoError(t, c.Update(t.Context(), parent))
+	source.Labels[sessionbinding.SessionServiceRevisionLabel] = parent.Status.UpdateRevision
+	target.Labels[sessionbinding.SessionServiceRevisionLabel] = parent.Status.UpdateRevision
+	require.NoError(t, c.Create(t.Context(), source))
+	require.NoError(t, c.Create(t.Context(), target))
 	t.Cleanup(func() {
 		expectations.ResourceVersionExpectationDelete(source)
 		expectations.ResourceVersionExpectationDelete(target)
@@ -457,8 +471,7 @@ func TestSessionServiceFactoryWaitsForControllerRebinding(t *testing.T) {
 		t.Fatal("HTTP filter completed before the controller advanced the migration")
 	case <-timer.C:
 	}
-	// One reconcile completes the migration; further calls would also roll out
-	// these deliberately minimal members, which have no provision Revision label.
+	// One reconcile completes the migration using the matching Revision members.
 	_, err = controller.NewReconciler(c).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
 	require.NoError(t, err)
 	select {

@@ -76,7 +76,8 @@ type Store interface {
 	ReplaceSessionServiceBindings(context.Context, SessionServiceSnapshot, SessionServiceMember, sessionbinding.Bindings) error
 }
 
-// Error classifies domain failures without exposing a transport protocol.
+// Error reports a completed allocation failure without exposing a transport protocol.
+// Reason describes the failure; Cause retains its underlying error category.
 type Error struct {
 	Reason string
 	Cause  error
@@ -85,5 +86,3 @@ type Error struct {
 func (e *Error) Error() string { return e.Reason }
 
 func (e *Error) Unwrap() error { return e.Cause }
-
-func (e *Error) Is(target error) bool { return target == ErrSessionServiceUnavailable }

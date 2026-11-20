@@ -38,6 +38,7 @@ import (
 
 	agents "github.com/openkruise/agents/api/v1alpha1"
 	controller "github.com/openkruise/agents/pkg/controller/sessionservice"
+	session "github.com/openkruise/agents/pkg/sessionservice"
 	sessionbinding "github.com/openkruise/agents/pkg/sessionservice/binding"
 	"github.com/openkruise/agents/pkg/sessionservice/kubernetes"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -62,8 +63,8 @@ func TestLocalSessionServiceAdmissionAndAllocation(t *testing.T) {
 		{name: "known", sessionID: "Ab_9012345678901234567", seed: true, port: 8080, wantBinding: true},
 		{name: "unknown", sessionID: "Ab_9012345678901234567", port: 8080, status: 404},
 		{name: "invalid ID", sessionID: "short", port: 8080, status: 400},
-		{name: "invalid zero port", port: 0, status: 400, wantReason: "InvalidPort"},
-		{name: "invalid high port", port: 65536, status: 400, wantReason: "InvalidPort"},
+		{name: "invalid zero port", port: 0, status: 400, wantReason: "InvalidRequest"},
+		{name: "invalid high port", port: 65536, status: 400, wantReason: "InvalidRequest"},
 		{name: "policy retry", changeLimit: true, port: 8080, wantBinding: true},
 		{name: "unknown write committed", unknownWrite: true, commitWrite: true, port: 8080, wantBinding: true},
 		{name: "unknown write uncommitted", unknownWrite: true, port: 8080, status: 503},
@@ -468,4 +469,30 @@ func TestControllerDrivenRebinding(t *testing.T) {
 		require.NotContains(t, bindings, retargetID)
 	})
 
+}
+
+func TestAllocationErrorMapping(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+		reason string
+	}{
+		{name: "missing service", err: session.ErrSessionServiceNotFound, status: 404, reason: "SessionServiceNotFound"},
+		{name: "missing session", err: session.ErrSessionNotFound, status: 404, reason: "SessionNotFound"},
+		{name: "invalid session", err: session.ErrInvalidSession, status: 400, reason: "InvalidSessionID"},
+		{name: "capacity", err: &session.Error{Reason: "SessionCapacityExhausted"}, status: 503, reason: "SessionCapacityExhausted"},
+		{name: "binding conflict", err: &session.Error{Reason: "SessionBindingConflict", Cause: session.ErrSessionServiceDataAmbiguous}, status: 503, reason: "SessionBindingConflict"},
+		{name: "bound unavailable", err: &session.Error{Reason: "BoundSandboxUnavailable"}, status: 503, reason: "BoundSandboxUnavailable"},
+		{name: "migration timeout", err: &session.Error{Reason: "SessionRebinding", Cause: context.DeadlineExceeded}, status: 503, reason: "SessionRebinding"},
+		{name: "allocation timeout", err: &session.Error{Reason: "SessionAllocationUnavailable", Cause: context.DeadlineExceeded}, status: 503, reason: "SessionManagerUnavailable"},
+		{name: "canceled", err: &session.Error{Reason: "SessionAllocationUnavailable", Cause: context.Canceled}, status: 503, reason: "SessionManagerUnavailable"},
+		{name: "policy changed after write", err: &session.Error{Reason: "SessionAllocationUnavailable", Cause: session.ErrPolicyChanged}, status: 503, reason: "SessionManagerUnavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rejection := mapAllocationError(tc.err)
+			require.Equal(t, tc.status, rejection.Status)
+			require.Equal(t, tc.reason, rejection.Reason)
+		})
+	}
 }

@@ -22,7 +22,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -60,7 +59,7 @@ func ParseAuthority(authority string) (uid string, port int, matched bool, err e
 		return "", 0, false, nil
 	}
 	invalid := func() (string, int, bool, error) {
-		return "", 0, true, fmt.Errorf("invalid SessionService authority")
+		return "", 0, true, errInvalidAuthority
 	}
 	if strings.Contains(host, ":") {
 		parsed, transportPort, splitErr := net.SplitHostPort(host)
@@ -97,17 +96,6 @@ func ParseAuthority(authority string) (uid string, port int, matched bool, err e
 	return uid, port, true, nil
 }
 
-// Error contains only locally selected, safe status and reason values. Tokens,
-// request bodies and internal storage errors are never echoed.
-type Error struct {
-	Status int
-	Reason string
-}
-
-func (e *Error) Error() string { return e.Reason }
-
-func unavailable() *Error { return &Error{Status: 503, Reason: "SessionManagerUnavailable"} }
-
 type servingResources struct {
 	servingStore session.Store
 	allocator    *allocator.Allocator
@@ -135,10 +123,10 @@ func randomSessionID() (string, error) {
 // Configure installs the Store once at the Gateway composition boundary.
 func (s *Service) Configure(store session.Store) error {
 	if store == nil {
-		return errors.New("SessionService Store is nil")
+		return errNilStore
 	}
 	if !s.resources.CompareAndSwap(nil, &servingResources{servingStore: store, allocator: allocator.New(store)}) {
-		return errors.New("SessionService Service is already configured")
+		return errAlreadyConfigured
 	}
 	return nil
 }
@@ -156,21 +144,21 @@ type Result struct {
 // change before any binding write restarts admission within the same budget.
 func (s *Service) ResolveRoute(ctx context.Context, uid, sessionID string, port int) (Result, error) {
 	if sessionID != "" && !sessionbinding.ValidSessionID(sessionID) {
-		return Result{}, &Error{400, "InvalidSessionID"}
+		return Result{}, ErrInvalidSessionID
 	}
 	if port < 1 || port > 65535 {
-		return Result{}, &Error{400, "InvalidPort"}
+		return Result{}, ErrInvalidRequest
 	}
 	resources := s.resources.Load()
 	if resources == nil {
-		return Result{}, unavailable()
+		return Result{}, ErrSessionManagerUnavailable
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	creating := sessionID == ""
 	for {
 		if err := ctx.Err(); err != nil {
-			return Result{}, unavailable()
+			return Result{}, ErrSessionManagerUnavailable
 		}
 		parent, err := s.resolveSessionService(ctx, resources.servingStore, uid, port)
 		if err != nil {
@@ -180,7 +168,7 @@ func (s *Service) ResolveRoute(ctx context.Context, uid, sessionID string, port 
 			var generationErr error
 			sessionID, generationErr = s.newSessionID()
 			if generationErr != nil {
-				return Result{}, unavailable()
+				return Result{}, ErrSessionManagerUnavailable
 			}
 		}
 		route, err := allocateSession(ctx, resources.allocator, parent, sessionID, creating)
@@ -189,7 +177,7 @@ func (s *Service) ResolveRoute(ctx context.Context, uid, sessionID string, port 
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return Result{}, unavailable()
+				return Result{}, ErrSessionManagerUnavailable
 			case <-timer.C:
 			}
 			continue
@@ -208,14 +196,14 @@ func (s *Service) resolveSessionService(ctx context.Context, store session.Store
 		return session.SessionService{}, mapAllocationError(err)
 	}
 	if parent.Deleting {
-		return session.SessionService{}, unavailable()
+		return session.SessionService{}, ErrSessionManagerUnavailable
 	}
 	for _, p := range parent.Ports {
 		if int(p) == port {
 			return parent, nil
 		}
 	}
-	return session.SessionService{}, &Error{403, "PortNotAllowed"}
+	return session.SessionService{}, ErrPortNotAllowed
 }
 
 // allocateSession receives the current SessionService policy.
@@ -228,8 +216,9 @@ func allocateSession(ctx context.Context, sessionAllocator *allocator.Allocator,
 		route, err = sessionAllocator.Resolve(ctx, parent, sessionID)
 	}
 	// Only a policy change before mutation may restart admission. After a write,
-	// the allocator wraps the same cause as unavailable to retain target pinning.
-	if errors.Is(err, session.ErrPolicyChanged) && !errors.Is(err, session.ErrSessionServiceUnavailable) {
+	// the allocator wraps the cause in a completed failure to retain target pinning.
+	var failure *session.Error
+	if ctx.Err() == nil && errors.Is(err, session.ErrPolicyChanged) && !errors.As(err, &failure) {
 		return sandboxroute.Route{}, session.ErrPolicyChanged
 	}
 	if err != nil {
@@ -237,24 +226,33 @@ func allocateSession(ctx context.Context, sessionAllocator *allocator.Allocator,
 		return sandboxroute.Route{}, mapAllocationError(err)
 	}
 	if ctx.Err() != nil || net.ParseIP(route.IP) == nil {
-		return sandboxroute.Route{}, unavailable()
+		return sandboxroute.Route{}, ErrSessionManagerUnavailable
 	}
 	return route, nil
 }
 
 func mapAllocationError(err error) *Error {
 	if errors.Is(err, session.ErrSessionServiceNotFound) {
-		return &Error{404, "SessionServiceNotFound"}
+		return ErrSessionServiceNotFound
 	}
 	if errors.Is(err, session.ErrSessionNotFound) {
-		return &Error{404, "SessionNotFound"}
+		return ErrSessionNotFound
 	}
 	if errors.Is(err, session.ErrInvalidSession) {
-		return &Error{400, "InvalidSessionID"}
+		return ErrInvalidSessionID
 	}
 	var domain *session.Error
-	if errors.As(err, &domain) && (domain.Reason == "SessionCapacityExhausted" || domain.Reason == "BoundSandboxUnavailable" || domain.Reason == "SessionBindingConflict" || domain.Reason == "SessionRebinding") {
-		return &Error{503, domain.Reason}
+	if errors.As(err, &domain) {
+		switch domain.Reason {
+		case ErrSessionCapacityExhausted.Reason:
+			return ErrSessionCapacityExhausted
+		case ErrBoundSandboxUnavailable.Reason:
+			return ErrBoundSandboxUnavailable
+		case ErrSessionBindingConflict.Reason:
+			return ErrSessionBindingConflict
+		case ErrSessionRebinding.Reason:
+			return ErrSessionRebinding
+		}
 	}
-	return unavailable()
+	return ErrSessionManagerUnavailable
 }

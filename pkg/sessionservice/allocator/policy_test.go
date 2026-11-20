@@ -19,6 +19,7 @@ package allocator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -107,7 +108,8 @@ func TestPolicyChangeDoesNotForgetUnknownWriteTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = m.Create(t.Context(), parent, "000000000000000session")
-	if err == session.ErrPolicyChanged || !errors.Is(err, session.ErrSessionServiceUnavailable) {
+	var failure *session.Error
+	if !errors.As(err, &failure) || failure.Reason != "SessionAllocationUnavailable" || !errors.Is(err, session.ErrPolicyChanged) {
 		t.Fatalf("uncertain write allowed admission restart: %v", err)
 	}
 	if patches != 1 {
@@ -118,5 +120,33 @@ func TestPolicyChangeDoesNotForgetUnknownWriteTarget(t *testing.T) {
 	}
 	if _, ok := readAllocationBindings(t, c, "second")["000000000000000session"]; ok {
 		t.Fatal("admission retry bound a second target")
+	}
+}
+
+func TestAllocationErrorClassification(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		cause  error
+	}{
+		{reason: "SessionCapacityExhausted"},
+		{reason: "SessionBindingConflict", cause: session.ErrSessionServiceDataAmbiguous},
+		{reason: "SessionRebinding", cause: context.DeadlineExceeded},
+		{reason: "SessionAllocationUnavailable", cause: context.Canceled},
+		{reason: "SessionAllocationUnavailable", cause: session.ErrPolicyChanged},
+		{reason: "SessionManagerUnavailable", cause: session.ErrSessionServiceUnavailable},
+	} {
+		t.Run(tc.reason+"/"+fmt.Sprint(tc.cause), func(t *testing.T) {
+			err := allocationUnavailable(tc.reason, tc.cause)
+			var failure *session.Error
+			if !errors.As(err, &failure) || failure.Reason != tc.reason {
+				t.Fatalf("missing allocation failure: %v", err)
+			}
+			if errors.Is(err, session.ErrSessionServiceUnavailable) != errors.Is(tc.cause, session.ErrSessionServiceUnavailable) {
+				t.Fatalf("allocation reason changed backend category: %v", err)
+			}
+			if tc.cause != nil && !errors.Is(err, tc.cause) {
+				t.Fatalf("lost cause: %v", err)
+			}
+		})
 	}
 }

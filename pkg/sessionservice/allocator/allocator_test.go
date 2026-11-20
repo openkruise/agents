@@ -215,7 +215,7 @@ func TestSessionServiceAllocationLeastSessionsAndAffinity(t *testing.T) {
 				t.Fatal("allocation lost unrelated member metadata or record fields")
 			}
 			if tt.reason != "" {
-				requireSessionError(t, err, session.ErrSessionServiceUnavailable, tt.reason)
+				requireSessionError(t, err, nil, tt.reason)
 				_, bound := remaining["000000000000000session"]
 				if bound != tt.bound {
 					t.Fatal("failed allocation changed the existing binding")
@@ -264,7 +264,7 @@ func TestSessionServiceAllocationTieAndCapacity(t *testing.T) {
 
 			r, e := createForTest(t.Context(), m, "0000000000000000000new", tt.uid)
 			if tt.reason != "" {
-				requireSessionError(t, e, session.ErrSessionServiceUnavailable, tt.reason)
+				requireSessionError(t, e, nil, tt.reason)
 				return
 			}
 			if e != nil || r.Name != "first" {
@@ -298,8 +298,8 @@ func TestSessionServiceAllocationConcurrentLastSlot(t *testing.T) {
 	for e := range results {
 		if e == nil {
 			success++
-		} else if !errors.Is(e, session.ErrSessionServiceUnavailable) {
-			t.Fatal(e)
+		} else {
+			requireSessionError(t, e, nil, "SessionCapacityExhausted")
 		}
 	}
 	if success != 1 || len(readAllocationBindings(t, c, "first")) != 1 {
@@ -313,7 +313,7 @@ func TestSessionServiceAllocationCanceledWait(t *testing.T) {
 	cancel()
 	start := time.Now()
 	_, err := createForTest(ctx, m, "000000000000000session", "serving-uid")
-	if !errors.Is(err, session.ErrSessionServiceUnavailable) || time.Since(start) > time.Second {
+	if !errors.Is(err, context.Canceled) || time.Since(start) > time.Second {
 		t.Fatalf("canceled allocation=%v", err)
 	}
 }
@@ -358,7 +358,7 @@ func TestSessionServiceBestEffortMarksMoving(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
 			defer cancel()
 			route, err := resolveForTest(ctx, a, sid, "serving-uid")
-			require.ErrorIs(t, err, session.ErrSessionServiceUnavailable)
+			requireSessionError(t, err, context.DeadlineExceeded, "SessionRebinding")
 			require.Empty(t, route)
 			require.NotEmpty(t, patches)
 			for _, name := range patches {
@@ -457,7 +457,7 @@ func TestSessionServiceAllocationUnknownNewPinsTarget(t *testing.T) {
 				require.Equal(t, "first", result.Name)
 				require.Greater(t, readsAfterWrite, tt.staleReads)
 			} else {
-				require.ErrorIs(t, err, session.ErrSessionServiceUnavailable)
+				requireSessionError(t, err, nil, "SessionAllocationUnavailable")
 				if tt.change == "" {
 					require.ErrorIs(t, err, context.DeadlineExceeded)
 					require.Greater(t, readsAfterWrite, 1)
@@ -547,7 +547,7 @@ func TestSessionServiceAllocationBudgetsAndLoweredLimit(t *testing.T) {
 					t.Fatalf("allocation=%+v %v", r, e)
 				}
 			} else {
-				requireSessionError(t, e, session.ErrSessionServiceUnavailable, "SessionCapacityExhausted")
+				requireSessionError(t, e, nil, "SessionCapacityExhausted")
 			}
 			count := tt.records
 			if tt.success && !tt.reuse {
@@ -609,7 +609,7 @@ func TestSessionServiceAllocationUIDAndDeletingParent(t *testing.T) {
 		code           error
 	}{
 		{name: "admitted parent UID mismatch", expected: "old-parent", code: session.ErrSessionServiceNotFound},
-		{name: "deleting parent", expected: "serving-uid", deleting: true, code: session.ErrSessionServiceUnavailable},
+		{name: "deleting parent", expected: "serving-uid", deleting: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			m, c, p := allocationFixture(t, "", nil, interceptor.Funcs{}, allocationBox("first", "a"))
@@ -623,7 +623,9 @@ func TestSessionServiceAllocationUIDAndDeletingParent(t *testing.T) {
 				}
 			}
 			_, err := createForTest(t.Context(), m, "000000000000000session", tt.expected)
-			if !errors.Is(err, tt.code) {
+			if tt.deleting {
+				requireSessionError(t, err, nil, "SessionServiceDeleting")
+			} else if !errors.Is(err, tt.code) {
 				t.Fatalf("admission=%v", err)
 			}
 			if len(readAllocationBindings(t, c, "first")) != 0 {
@@ -660,7 +662,7 @@ func TestSessionServiceAllocationWaitingCallerCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 	defer cancel()
 	_, err := createForTest(ctx, m, "000000000000000session", "serving-uid")
-	if !errors.Is(err, session.ErrSessionServiceUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("waiting cancellation=%v", err)
 	}
 	close(release)
@@ -693,7 +695,7 @@ func TestSessionServiceStrictBindingEndsWithSandbox(t *testing.T) {
 			}
 			result, err := resolveForTest(t.Context(), m, "000000000000000session", "serving-uid")
 			if held {
-				requireSessionError(t, err, session.ErrSessionServiceUnavailable, "BoundSandboxUnavailable")
+				requireSessionError(t, err, nil, "BoundSandboxUnavailable")
 				if _, ok := readAllocationBindings(t, c, "first")["000000000000000session"]; !ok {
 					t.Fatal("Strict erased an existing binding")
 				}
@@ -915,7 +917,7 @@ func TestSessionServiceAllocationBackendLockCancellation(t *testing.T) {
 			if !returnedWhileHeld {
 				t.Fatalf("Allocate ignored its deadline while unrelated binding write held the backend lock: %v", allocationErr)
 			}
-			if !errors.Is(allocationErr, session.ErrSessionServiceUnavailable) || !errors.Is(allocationErr, context.DeadlineExceeded) {
+			if !errors.Is(allocationErr, context.DeadlineExceeded) {
 				t.Fatalf("canceled allocation=%v", allocationErr)
 			}
 			if patches.Load() != 1 {
@@ -949,7 +951,7 @@ func resolveForTest(ctx context.Context, a *Allocator, sid, uid string) (sandbox
 func requireSessionError(t *testing.T, err error, kind error, reason string) {
 	t.Helper()
 	var domain *session.Error
-	if !errors.Is(err, kind) || !errors.As(err, &domain) || domain.Reason != reason {
+	if (kind != nil && !errors.Is(err, kind)) || !errors.As(err, &domain) || domain.Reason != reason {
 		t.Fatalf("error=%v want kind=%v reason=%s", err, kind, reason)
 	}
 }
@@ -1018,7 +1020,7 @@ func TestSessionServiceBestEffortRebindAcrossAllocators(t *testing.T) {
 		go func() { _, err := resolveForTest(ctx, a, sid, "serving-uid"); results <- err }()
 	}
 	for range 2 {
-		require.ErrorIs(t, <-results, session.ErrSessionServiceUnavailable)
+		requireSessionError(t, <-results, context.DeadlineExceeded, "SessionRebinding")
 	}
 	for _, name := range patches {
 		require.Equal(t, "old", name)
@@ -1113,7 +1115,7 @@ func TestSessionServiceMovingIntermediateState(t *testing.T) {
 				require.Equal(t, "target", route.Name)
 				require.GreaterOrEqual(t, reads, 3)
 			} else {
-				requireSessionError(t, err, session.ErrSessionServiceUnavailable, "SessionRebinding")
+				requireSessionError(t, err, nil, "SessionRebinding")
 				require.Empty(t, route)
 				if tc.cancel {
 					require.ErrorIs(t, err, context.Canceled)

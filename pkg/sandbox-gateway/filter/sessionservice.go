@@ -77,11 +77,11 @@ func (f *sessionServiceFilter) DecodeHeaders(header api.RequestHeaderMap, endStr
 	})
 	uid, port, _, err := serving.ParseAuthority(f.authority)
 	if err != nil {
-		f.sendLocalReplyOnce(400, "invalid SessionService request", "InvalidRequest")
+		f.sendError(serving.ErrInvalidRequest)
 		return api.LocalReply
 	}
 	if sessionCount > 1 || sessionID != "" && !sessionbinding.ValidSessionID(sessionID) {
-		f.sendLocalReplyOnce(400, "invalid SessionService request", "InvalidSessionID")
+		f.sendError(serving.ErrInvalidSessionID)
 		return api.LocalReply
 	}
 	// An explicit header, including an empty one requesting a new session,
@@ -98,7 +98,7 @@ func (f *sessionServiceFilter) DecodeHeaders(header api.RequestHeaderMap, endStr
 
 func (f *sessionServiceFilter) decodeSessionService(header api.RequestHeaderMap, uid, sessionID string, port int) api.StatusType {
 	if !registry.GetRegistry().Ready() || f.servingService == nil {
-		f.sendLocalReplyOnce(503, "SessionManagerUnavailable", "SessionManagerUnavailable")
+		f.sendError(serving.ErrSessionManagerUnavailable)
 		return api.LocalReply
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -122,7 +122,7 @@ func (f *sessionServiceFilter) servingAndContinue(ctx context.Context, header ap
 		if recovered := recover(); recovered != nil && !isEnvoyStreamGonePanic(recovered) {
 			klog.FromContext(ctx).Error(fmt.Errorf("panic of type %T", recovered), "SessionService allocation panicked",
 				"sessionServiceUID", uid, "sessionID", sessionID)
-			f.sendLocalReplyOnce(503, "SessionManagerUnavailable", "SessionManagerUnavailable")
+			f.sendError(serving.ErrSessionManagerUnavailable)
 		}
 	}()
 	result, err := f.servingService.ResolveRoute(ctx, uid, sessionID, port)
@@ -132,9 +132,9 @@ func (f *sessionServiceFilter) servingAndContinue(ctx context.Context, header ap
 	if err != nil {
 		var rejection *serving.Error
 		if errors.As(err, &rejection) {
-			f.sendLocalReplyOnce(rejection.Status, rejection.Reason, rejection.Reason)
+			f.sendError(rejection)
 		} else {
-			f.sendLocalReplyOnce(503, "SessionManagerUnavailable", "SessionManagerUnavailable")
+			f.sendError(serving.ErrSessionManagerUnavailable)
 		}
 		return
 	}
@@ -142,7 +142,7 @@ func (f *sessionServiceFilter) servingAndContinue(ctx context.Context, header ap
 	// The member runtime credential remains separate from domain authentication.
 	prepare, ok := f.prepareSessionServiceRuntime(header, result.Route, port)
 	if !ok {
-		f.sendLocalReplyOnce(503, "SessionManagerUnavailable", "SessionManagerUnavailable")
+		f.sendError(serving.ErrSessionManagerUnavailable)
 		return
 	}
 	f.completeWithContinue(result.Route, port, func() {
@@ -211,6 +211,16 @@ func (f *sessionServiceFilter) applyUpstreamOverrides(route sandboxroute.Route, 
 	logger.Debug("Upstream override set successfully", zap.String("upstreamHost", upstreamHost))
 }
 
+// sendError preserves the generic validation body and otherwise exposes only
+// the safe reason selected by the SessionService HTTP error catalog.
+func (f *sessionServiceFilter) sendError(rejection *serving.Error) {
+	body := rejection.Reason
+	if rejection == serving.ErrInvalidRequest || rejection == serving.ErrInvalidSessionID {
+		body = "invalid SessionService request"
+	}
+	f.sendLocalReplyOnce(rejection.Status, body, rejection.Reason)
+}
+
 // sendLocalReplyOnce sends a LocalReply, but only if no other completion
 // action has been taken. This prevents double-reply when the async goroutine
 // and Destroy race.
@@ -221,7 +231,7 @@ func (f *sessionServiceFilter) sendLocalReplyOnce(code int, body string, details
 	headers := map[string][]string{"cache-control": {"no-store"}}
 	// Clear only a stale browser session. Explicit headers and transient failures
 	// must not discard browser affinity; this request still returns 404.
-	if f.sessionFromCookie && code == http.StatusNotFound && details == "SessionNotFound" {
+	if f.sessionFromCookie && code == http.StatusNotFound && details == serving.ErrSessionNotFound.Reason {
 		// #nosec G124 -- Match the non-Secure session cookie so plain HTTP endpoints can clear it.
 		cookie := http.Cookie{Name: sessionCookieName, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode}
 		headers["set-cookie"] = []string{cookie.String()}
@@ -261,7 +271,7 @@ func (f *sessionServiceFilter) setUpstreamMetadata(route sandboxroute.Route, san
 			logger.Error("panic before SessionService allocation continue",
 				zap.String("sandboxID", route.ID), zap.Any("recover", r))
 			if f.abortCompletion(false) {
-				f.sendLocalReplyOnce(503, "SessionManagerUnavailable", "SessionManagerUnavailable")
+				f.sendError(serving.ErrSessionManagerUnavailable)
 			}
 			ok = false
 		}
