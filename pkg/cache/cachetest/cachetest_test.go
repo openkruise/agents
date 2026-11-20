@@ -24,8 +24,11 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestSandboxSetLookupDoesNotWait(t *testing.T) {
@@ -51,4 +54,26 @@ func TestSandboxSetLookupDoesNotWait(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 		require.Zero(t, time.Since(start), "fake reads must not wait for informer propagation")
 	})
+}
+
+func TestNewTestCacheRejectsStaleUpdates(t *testing.T) {
+	_, client, err := NewTestCache(t)
+	require.NoError(t, err)
+	ctx := t.Context()
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "concurrent-timeout"},
+	}
+	require.NoError(t, client.Create(ctx, sandbox))
+	stale := sandbox.DeepCopy()
+	now := time.Now().UTC().Truncate(time.Second)
+	sandbox.Spec.ShutdownTime = &metav1.Time{Time: now.Add(900 * time.Second)}
+	require.NoError(t, client.Update(ctx, sandbox))
+
+	stale.Spec.ShutdownTime = &metav1.Time{Time: now.Add(300 * time.Second)}
+	err = client.Update(ctx, stale)
+	assert.True(t, apierrors.IsConflict(err), "stale update must conflict, got %v", err)
+
+	stored := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, client.Get(ctx, types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}, stored))
+	assert.Equal(t, sandbox.Spec.ShutdownTime, stored.Spec.ShutdownTime)
 }

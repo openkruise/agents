@@ -193,8 +193,27 @@ type SetTimeoutRequest struct {
 	TimeoutSeconds int `json:"timeout"`
 }
 
+// PauseSandboxRequest is the optional body of POST /sandboxes/{sandboxID}/pause.
+// memory defaults to true, meaning the sandbox pauses with its persisted pause
+// policy. known-limit: memory=false asks for a filesystem-only pause, which is
+// not supported yet, so the API layer rejects it instead of silently pausing
+// with memory.
+type PauseSandboxRequest struct {
+	Memory *bool `json:"memory,omitempty"`
+}
+
+// NewSnapshotRequest is the body of POST /sandboxes/{sandboxID}/snapshots.
 type NewSnapshotRequest struct {
-	Name       string                      `json:"name"` // name is not used by the E2B SDK yet, just reserved for future use
+	// Name is the optional E2B-compatible snapshot alias: scoped to the owner,
+	// and a new snapshot with the same name supersedes the existing Succeeded one.
+	// nil and "" behave as an unnamed snapshot. The accepted name format is a
+	// sandbox-backend storage constraint (label-value rules) enforced by the
+	// backend, not at the API layer.
+	Name *string `json:"name,omitempty"`
+	// Memory selects the snapshot contents when no persistent-contents header
+	// is present: true maps to memory and filesystem, false maps to filesystem,
+	// and nil keeps the sandbox default.
+	Memory     *bool                       `json:"memory,omitempty"`
 	Extensions NewSnapshotRequestExtension `json:"-"`
 }
 
