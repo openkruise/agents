@@ -539,3 +539,56 @@ func TestNewSandboxFromSandboxSetCopiesLifecycle(t *testing.T) {
 	sandbox.Spec.Lifecycle.PrePause.Exec.Command[0] = "changed"
 	assert.Equal(t, []string{"flush"}, sbs.Spec.Lifecycle.PrePause.Exec.Command, "materialization must not mutate the SandboxSet cache object")
 }
+
+func TestNewSandboxFromSandboxSetOwnsSpec(t *testing.T) {
+	sbs := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSetSpec{
+			Replicas:           1,
+			PersistentContents: []string{"memory"},
+			Runtimes:           []agentsv1alpha1.RuntimeConfig{{Name: "agent-runtime"}},
+			PauseStrategy: &agentsv1alpha1.PauseStrategy{
+				Type:              agentsv1alpha1.PauseStrategyHibernate,
+				HibernateStrategy: &agentsv1alpha1.HibernateStrategy{},
+			},
+			Probes: []agentsv1alpha1.Probe{{
+				Name: "activity",
+				Probe: corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"check"}},
+				}},
+			}},
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx"}}},
+				},
+				VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "pool"}},
+				}},
+			},
+			AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
+				Pause: &agentsv1alpha1.PausePolicy{
+					WhenProbedIdleState: &agentsv1alpha1.ProbedIdleStateRule{
+						ThresholdDuration: &metav1.Duration{Duration: time.Minute},
+					},
+				},
+				Resume: &agentsv1alpha1.ResumePolicy{},
+			},
+		},
+	}
+	originalSpec := sbs.Spec.DeepCopy()
+
+	sbx := NewSandboxFromSandboxSet(sbs, nil)
+	// Claim-time policy adjustments must only change the new Sandbox.
+	sbx.Spec.AutoPausePolicy.Resume.OnIngressTraffic = &agentsv1alpha1.IngressTrafficRule{
+		PauseTimeout: &metav1.Duration{Duration: 5 * time.Minute},
+	}
+	sbx.Spec.AutoPausePolicy.Pause = nil
+
+	// A shallow copy of the slices would still share nested pointers and maps.
+	sbx.Spec.PersistentContents[0] = "filesystem"
+	sbx.Spec.Runtimes[0].Name = "traffic-proxy"
+	sbx.Spec.PauseStrategy.HibernateStrategy.Type = agentsv1alpha1.HibernateStrategySnapshot
+	sbx.Spec.Probes[0].Exec.Command[0] = "updated"
+	sbx.Spec.VolumeClaimTemplates[0].Labels["app"] = "sandbox"
+	assert.Equal(t, *originalSpec, sbs.Spec, "modifying the Sandbox spec must not mutate the cached SandboxSet")
+}
