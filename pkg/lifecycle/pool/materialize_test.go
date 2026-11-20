@@ -540,19 +540,30 @@ func TestNewSandboxFromSandboxSetCopiesLifecycle(t *testing.T) {
 	assert.Equal(t, []string{"flush"}, sbs.Spec.Lifecycle.PrePause.Exec.Command, "materialization must not mutate the SandboxSet cache object")
 }
 
-// TestNewSandboxFromSandboxSetAutoPausePolicyCloned pins that the built Sandbox
-// owns a private AutoPausePolicy: claim-time wake-rule adjustments (e.g.
-// EnableWakeOnIngressTraffic/ClearWakeOnIngressTraffic) write into the sandbox
-// copy, never into the informer-cached SandboxSet the pointer came from.
-func TestNewSandboxFromSandboxSetAutoPausePolicyCloned(t *testing.T) {
+func TestNewSandboxFromSandboxSetOwnsSpec(t *testing.T) {
 	sbs := &agentsv1alpha1.SandboxSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default"},
 		Spec: agentsv1alpha1.SandboxSetSpec{
-			Replicas: 1,
+			Replicas:           1,
+			PersistentContents: []string{"memory"},
+			Runtimes:           []agentsv1alpha1.RuntimeConfig{{Name: "agent-runtime"}},
+			PauseStrategy: &agentsv1alpha1.PauseStrategy{
+				Type:              agentsv1alpha1.PauseStrategyHibernate,
+				HibernateStrategy: &agentsv1alpha1.HibernateStrategy{},
+			},
+			Probes: []agentsv1alpha1.Probe{{
+				Name: "activity",
+				Probe: corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"check"}},
+				}},
+			}},
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx"}}},
 				},
+				VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "pool"}},
+				}},
 			},
 			AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
 				Pause: &agentsv1alpha1.PausePolicy{
@@ -564,15 +575,20 @@ func TestNewSandboxFromSandboxSetAutoPausePolicyCloned(t *testing.T) {
 			},
 		},
 	}
+	originalSpec := sbs.Spec.DeepCopy()
 
 	sbx := NewSandboxFromSandboxSet(sbs, nil)
+	// Claim-time policy adjustments must only change the new Sandbox.
 	sbx.Spec.AutoPausePolicy.Resume.OnIngressTraffic = &agentsv1alpha1.IngressTrafficRule{
 		PauseTimeout: &metav1.Duration{Duration: 5 * time.Minute},
 	}
 	sbx.Spec.AutoPausePolicy.Pause = nil
 
-	assert.Nil(t, sbs.Spec.AutoPausePolicy.Resume.OnIngressTraffic,
-		"wake-rule write leaked into the cached SandboxSet")
-	assert.NotNil(t, sbs.Spec.AutoPausePolicy.Pause,
-		"policy clear leaked into the cached SandboxSet")
+	// A shallow copy of the slices would still share nested pointers and maps.
+	sbx.Spec.PersistentContents[0] = "filesystem"
+	sbx.Spec.Runtimes[0].Name = "traffic-proxy"
+	sbx.Spec.PauseStrategy.HibernateStrategy.Type = agentsv1alpha1.HibernateStrategySnapshot
+	sbx.Spec.Probes[0].Exec.Command[0] = "updated"
+	sbx.Spec.VolumeClaimTemplates[0].Labels["app"] = "sandbox"
+	assert.Equal(t, *originalSpec, sbs.Spec, "modifying the Sandbox spec must not mutate the cached SandboxSet")
 }

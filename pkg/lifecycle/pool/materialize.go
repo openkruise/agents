@@ -31,24 +31,25 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-// NewSandboxFromSandboxSet builds a Sandbox object from the SandboxSet. When
+// NewSandboxFromSandboxSet builds a privately owned Sandbox from the SandboxSet. When
 // spec.templateRef is used, refTemplate must be the resolved SandboxTemplate.
 // Its PodTemplateSpec is copied into the new Sandbox; callers pass nil for the
 // inline template case.
 func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agentsv1alpha1.SandboxTemplate) *agentsv1alpha1.Sandbox {
+	// Callers may mutate the new Sandbox before writing it to the API server.
+	// None of its spec can share mutable state with the cached SandboxSet.
+	spec := sbs.Spec.DeepCopy()
 	generateName := utils.GenerateSandboxName(sbs.Name)
 	templateName := sbs.Name
 	var template *corev1.PodTemplateSpec
 	var inheritedLabels, inheritedAnnotations map[string]string
-	// spec.template takes precedence over spec.templateRef. Deep copy the source
-	// pod template before reading labels/annotations so subsequent mutations
-	// (clearAndInitInnerKeys, internal label writes) never leak back into the
-	// SandboxSet spec or the cached SandboxTemplate.
+	// spec.template takes precedence over spec.templateRef. The inline pod
+	// template comes from the copy above; copy a referenced template as well.
 	// The metadata maps are cloned (not shared) so metadata-only internal labels
 	// do not leak into the Pod template. Pool and template identity labels are
 	// added to the materialized Pod template explicitly below.
-	if sbs.Spec.Template != nil {
-		template = sbs.Spec.Template.DeepCopy()
+	if spec.Template != nil {
+		template = spec.Template
 		inheritedLabels = maps.Clone(template.Labels)
 		inheritedAnnotations = maps.Clone(template.Annotations)
 	} else if refTemplate != nil && refTemplate.Spec.Template != nil {
@@ -66,17 +67,15 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 			Annotations:  inheritedAnnotations,
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
-			PersistentContents: sbs.Spec.PersistentContents,
-			Runtimes:           sbs.Spec.Runtimes,
-			PauseStrategy:      sbs.Spec.PauseStrategy,
-			Probes:             sbs.Spec.Probes,
-			// Deep copy as well: claim-time wake-rule adjustments write into the
-			// sandbox's policy and must not reach the cached SandboxSet.
-			AutoPausePolicy: sbs.Spec.AutoPausePolicy.DeepCopy(),
-			Lifecycle:       sbs.Spec.Lifecycle.DeepCopy(),
+			PersistentContents: spec.PersistentContents,
+			Runtimes:           spec.Runtimes,
+			PauseStrategy:      spec.PauseStrategy,
+			Probes:             spec.Probes,
+			AutoPausePolicy:    spec.AutoPausePolicy,
+			Lifecycle:          spec.Lifecycle,
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template:             template,
-				VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
+				VolumeClaimTemplates: spec.VolumeClaimTemplates,
 			},
 		},
 	}
