@@ -158,7 +158,7 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 		return sandboxroute.Route{}, allocationUnavailable("SessionAllocationUnavailable", err)
 	}
 	defer unlock()
-	newTarget := ""
+	newTarget, newTargetVersion := "", ""
 	unknownNew := false
 	storageFull := map[string]string{}
 	mutationStarted := false
@@ -181,11 +181,22 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 		if err := validateBindingExpiry(candidates, sessionID, parent.ExpireAfterCreation); err != nil {
 			return sandboxroute.Route{}, err
 		}
-		// An uncertain new write must be observed on its original target first.
+		// An uncertain write stays pinned to the original UID and pre-write RV.
+		// An unchanged cached RV cannot establish whether the PATCH committed.
 		if unknownNew {
-			// The original target may have vanished or been replaced by a newer version.
-			if !slices.ContainsFunc(candidates, func(member session.SessionServiceMember) bool { return member.UID == newTarget }) {
+			index := slices.IndexFunc(snapshot.Members, func(member session.SessionServiceMember) bool { return member.UID == newTarget })
+			if index < 0 {
 				return sandboxroute.Route{}, allocationUnavailable("SessionAllocationUnavailable", nil)
+			}
+			target := snapshot.Members[index]
+			if _, found := target.Bindings[sessionID]; !found {
+				if target.Version != newTargetVersion {
+					return sandboxroute.Route{}, allocationUnavailable("SessionAllocationUnavailable", nil)
+				}
+				if err := allocationBackoff(ctx); err != nil {
+					return sandboxroute.Route{}, allocationUnavailable("SessionAllocationUnavailable", err)
+				}
+				continue
 			}
 			unknownNew = false
 		}
@@ -206,6 +217,7 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 			}
 			mutationStarted = true
 			newTarget, unknownNew, err = a.createSessionBinding(ctx, snapshot, target, sessionID, storageFull)
+			newTargetVersion = target.Version
 			if err != nil {
 				return sandboxroute.Route{}, err
 			}

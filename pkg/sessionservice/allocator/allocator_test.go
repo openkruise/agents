@@ -362,35 +362,89 @@ func allocatorForClient(t *testing.T, c client.WithWatch, hooks interceptor.Func
 }
 
 func TestSessionServiceAllocationUnknownNewPinsTarget(t *testing.T) {
-	for _, commit := range []bool{false, true} {
-		t.Run(fmt.Sprint(commit), func(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		commit     bool
+		staleReads int
+		change     string
+	}{
+		{name: "committed and visible", commit: true},
+		{name: "committed with delayed cache visibility", commit: true, staleReads: 3},
+		{name: "unchanged cache waits for deadline"},
+		{name: "advanced version without binding fails", change: "advance"},
+		{name: "disappeared target fails", change: "delete"},
+		{name: "same name with new UID fails", change: "replace"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			patches := []string{}
-			hooks := interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-				patches = append(patches, obj.GetName())
-				if commit {
-					if e := c.Patch(ctx, obj, patch, opts...); e != nil {
-						return e
+			var cached agents.SandboxList
+			readsAfterWrite := 0
+			hooks := interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if err := c.List(ctx, list, opts...); err != nil {
+						return err
 					}
-				}
-				return context.DeadlineExceeded
-			}}
+					if boxes, ok := list.(*agents.SandboxList); ok && len(patches) > 0 {
+						readsAfterWrite++
+						if readsAfterWrite <= tt.staleReads {
+							cached.DeepCopyInto(boxes)
+						}
+					}
+					return nil
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					patches = append(patches, obj.GetName())
+					if err := c.List(ctx, &cached, client.InNamespace("team")); err != nil {
+						return err
+					}
+					if tt.commit {
+						if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+							return err
+						}
+					}
+					switch tt.change {
+					case "advance":
+						updated := obj.DeepCopyObject().(client.Object)
+						updated.SetAnnotations(map[string]string{"unrelated": "update"})
+						if err := c.Update(ctx, updated); err != nil {
+							return err
+						}
+					case "delete", "replace":
+						if err := c.Delete(ctx, obj); err != nil {
+							return err
+						}
+						if tt.change == "replace" {
+							replacement := obj.DeepCopyObject().(client.Object)
+							replacement.SetUID("replacement-uid")
+							replacement.SetResourceVersion("")
+							if err := c.Create(ctx, replacement); err != nil {
+								return err
+							}
+						}
+					}
+					return context.DeadlineExceeded // The caller cannot tell whether the PATCH committed.
+				},
+			}
 			m, c, _ := allocationFixture(t, "", nil, hooks, allocationBox("first", "a"), allocationBox("second", "b"), allocationBox("third", "c"))
-			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 			defer cancel()
 			result, err := createForTest(ctx, m, "000000000000000session", "serving-uid")
-			if commit {
-				if err != nil || result.Name != "first" {
-					t.Fatalf("unknown persisted=%+v %v", result, err)
+			if tt.commit {
+				require.NoError(t, err)
+				require.Equal(t, "first", result.Name)
+				require.Greater(t, readsAfterWrite, tt.staleReads)
+			} else {
+				require.ErrorIs(t, err, session.ErrSessionServiceUnavailable)
+				if tt.change == "" {
+					require.ErrorIs(t, err, context.DeadlineExceeded)
+					require.Greater(t, readsAfterWrite, 1)
+				} else {
+					require.NoError(t, ctx.Err(), "definitive observations should fail before the request deadline")
 				}
-			} else if !errors.Is(err, session.ErrSessionServiceUnavailable) {
-				t.Fatalf("unknown not persisted=%v", err)
 			}
-			if !reflect.DeepEqual(patches, []string{"first"}) {
-				t.Fatalf("unknown write moved to another target: %v", patches)
-			}
-			if len(readAllocationBindings(t, c, "second")) != 0 || len(readAllocationBindings(t, c, "third")) != 0 {
-				t.Fatal("unknown outcome bound a third target")
-			}
+			require.Equal(t, []string{"first"}, patches, "an uncertain write must never select another target or be replayed")
+			require.Empty(t, readAllocationBindings(t, c, "second"))
+			require.Empty(t, readAllocationBindings(t, c, "third"))
 		})
 	}
 }
