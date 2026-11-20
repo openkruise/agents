@@ -2846,7 +2846,12 @@ func TestCreateCheckpoint_WaitFailureCleanup(t *testing.T) {
 			}
 			require.Error(t, err)
 			assert.Empty(t, id)
-			assert.Contains(t, err.Error(), "failed to wait checkpoint ready")
+			if tt.cancel {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.ErrorContains(t, err, "timed out after 10ms")
+				require.ErrorContains(t, err, "Check the sandbox status")
+			}
 			wantDeletes := 1
 			if tt.retryDelete {
 				wantDeletes++

@@ -19,6 +19,7 @@ package utils
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -35,16 +36,24 @@ var (
 // WaitNotSatisfiedError reports that a wait task finished while the object was
 // still not in the requested state.
 type WaitNotSatisfiedError struct {
-	Object            client.ObjectKey
-	Action            WaitAction
-	DuringDoubleCheck bool
+	Object  client.ObjectKey
+	Action  WaitAction
+	Timeout time.Duration
+	cause   error // A parent deadline interrupts caller retries; an internal wait timeout does not.
 }
 
 func (e *WaitNotSatisfiedError) Error() string {
-	if e != nil && e.DuringDoubleCheck {
-		return "object is not satisfied during double check"
+	if e == nil || (e.Object.Name == "" && e.Action == "" && e.Timeout == 0) {
+		return "wait ended before completion"
 	}
-	return "object is not satisfied"
+	if e.Timeout <= 0 && e.cause == nil {
+		return fmt.Sprintf("%s for %s has not completed (waiting disabled)", e.Action, e.Object)
+	}
+	return fmt.Sprintf("timed out after %s waiting for %s on %s", e.Timeout, e.Action, e.Object)
+}
+
+func (e *WaitNotSatisfiedError) Unwrap() error {
+	return e.cause
 }
 
 func (e *WaitNotSatisfiedError) Is(target error) bool {

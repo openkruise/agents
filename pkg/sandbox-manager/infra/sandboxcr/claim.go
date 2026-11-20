@@ -1321,11 +1321,12 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 	}
 	if err != nil {
 		log.Error(err, "failed to wait for sandbox ready")
-		if errors.Is(err, cacheutils.ErrWaitNotSatisfied) {
+		var waitErr *cacheutils.WaitNotSatisfiedError
+		if errors.As(err, &waitErr) {
 			if refreshErr := sbx.InplaceRefresh(ctx, true); refreshErr != nil {
 				log.Error(refreshErr, "failed to refresh sandbox for ready failure diagnosis")
 			}
-			err = errors.New(sandboxReadyFailureMessage(sbx.Sandbox))
+			err = managererrors.WrapError(managererrors.ErrorInternal, err, "%s (wait %s). Check the sandbox status before retrying", sandboxReadyFailureMessage(sbx.Sandbox), waitErr.Timeout)
 		}
 		return
 	}

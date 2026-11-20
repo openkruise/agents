@@ -30,39 +30,31 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-// --- Sandbox: shared Update closure -----------------------------------------
-
-func (c *Cache) SandboxUpdateFunc(ctx context.Context) cacheutils.UpdateFunc[*agentsv1alpha1.Sandbox] {
-	return func(sbx *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-		key := types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}
-		got := &agentsv1alpha1.Sandbox{}
-		if err := utils.GetFromInformerOrApiServer(ctx, got, key, c.client, c.reader); err != nil {
-			return nil, err
-		}
-		return got, nil
+func (c *Cache) SandboxUpdateFunc(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+	key := types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}
+	got := &agentsv1alpha1.Sandbox{}
+	if err := utils.GetFromInformerOrApiServer(ctx, got, key, c.client, c.reader); err != nil {
+		return nil, err
 	}
+	return got, nil
 }
 
-func (c *Cache) CheckpointUpdateFunc(ctx context.Context) cacheutils.UpdateFunc[*agentsv1alpha1.Checkpoint] {
-	return func(cp *agentsv1alpha1.Checkpoint) (*agentsv1alpha1.Checkpoint, error) {
-		key := types.NamespacedName{Namespace: cp.Namespace, Name: cp.Name}
-		got := &agentsv1alpha1.Checkpoint{}
-		if err := utils.GetFromInformerOrApiServer(ctx, got, key, c.client, c.reader); err != nil {
-			return nil, err
-		}
-		return got, nil
+func (c *Cache) CheckpointUpdateFunc(ctx context.Context, cp *agentsv1alpha1.Checkpoint) (*agentsv1alpha1.Checkpoint, error) {
+	key := types.NamespacedName{Namespace: cp.Namespace, Name: cp.Name}
+	got := &agentsv1alpha1.Checkpoint{}
+	if err := utils.GetFromInformerOrApiServer(ctx, got, key, c.client, c.reader); err != nil {
+		return nil, err
 	}
+	return got, nil
 }
 
-func (c *Cache) PVCUpdateFunc(ctx context.Context) cacheutils.UpdateFunc[*corev1.PersistentVolumeClaim] {
-	return func(pvc *corev1.PersistentVolumeClaim) (*corev1.PersistentVolumeClaim, error) {
-		key := types.NamespacedName{Namespace: pvc.Namespace, Name: pvc.Name}
-		got := &corev1.PersistentVolumeClaim{}
-		if err := utils.GetFromInformerOrApiServer(ctx, got, key, c.client, c.reader); err != nil {
-			return nil, err
-		}
-		return got, nil
+func (c *Cache) PVCUpdateFunc(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (*corev1.PersistentVolumeClaim, error) {
+	key := types.NamespacedName{Namespace: pvc.Namespace, Name: pvc.Name}
+	got := &corev1.PersistentVolumeClaim{}
+	if err := utils.GetFromInformerOrApiServer(ctx, got, key, c.client, c.reader); err != nil {
+		return nil, err
 	}
+	return got, nil
 }
 
 // --- Factories --------------------------------------------------------------
@@ -88,7 +80,7 @@ func (c *Cache) NewSandboxPauseTask(ctx context.Context, sbx *agentsv1alpha1.San
 		return cond.Status == metav1.ConditionTrue, nil
 	}
 	return cacheutils.NewAcquiredWaitTask[*agentsv1alpha1.Sandbox](
-		ctx, c.waitHooks, cacheutils.WaitActionPause, sbx, c.SandboxUpdateFunc(ctx), check,
+		ctx, c.waitHooks, cacheutils.WaitActionPause, sbx, c.SandboxUpdateFunc, check,
 	)
 }
 
@@ -110,18 +102,13 @@ func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sa
 		return cond.Status == metav1.ConditionTrue, nil
 	}
 	return cacheutils.NewAcquiredWaitTask[*agentsv1alpha1.Sandbox](
-		ctx, c.waitHooks, cacheutils.WaitActionResume, sbx, c.SandboxUpdateFunc(ctx), check,
+		ctx, c.waitHooks, cacheutils.WaitActionResume, sbx, c.SandboxUpdateFunc, check,
 	)
 }
 
 // NewSandboxWaitReadyTask builds a WaitTask that encapsulates the readiness check.
 func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
-	expectedUID := sbx.UID
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
-		// A same-name successor CR cannot satisfy the original instance's readiness wait.
-		if expectedUID != "" && s.UID != expectedUID {
-			return false, fmt.Errorf("sandbox %s/%s UID changed while waiting for readiness: expected %s, got %s", s.Namespace, s.Name, expectedUID, s.UID)
-		}
 		if s.Status.ObservedGeneration != s.Generation {
 			return false, nil
 		}
@@ -137,7 +124,7 @@ func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1
 		return state == sandboxstate.Running && s.Status.PodInfo.PodIP != "", nil
 	}
 	return cacheutils.NewWaitTask[*agentsv1alpha1.Sandbox](
-		ctx, c.waitHooks, cacheutils.WaitActionWaitReady, sbx, c.SandboxUpdateFunc(ctx), check,
+		ctx, c.waitHooks, cacheutils.WaitActionWaitReady, sbx, c.SandboxUpdateFunc, check,
 	)
 }
 
@@ -158,7 +145,7 @@ func (c *Cache) NewCheckpointTask(ctx context.Context, cp *agentsv1alpha1.Checkp
 		}
 	}
 	return cacheutils.NewWaitTask[*agentsv1alpha1.Checkpoint](
-		ctx, c.waitHooks, cacheutils.WaitActionCheckpoint, cp, c.CheckpointUpdateFunc(ctx), check,
+		ctx, c.waitHooks, cacheutils.WaitActionCheckpoint, cp, c.CheckpointUpdateFunc, check,
 	)
 }
 
@@ -179,6 +166,6 @@ func (c *Cache) NewPVCTask(ctx context.Context, pvc *corev1.PersistentVolumeClai
 		return false, nil
 	}
 	return cacheutils.NewWaitTask[*corev1.PersistentVolumeClaim](
-		ctx, c.waitHooks, cacheutils.WaitActionPVCBind, pvc, c.PVCUpdateFunc(ctx), check,
+		ctx, c.waitHooks, cacheutils.WaitActionPVCBind, pvc, c.PVCUpdateFunc, check,
 	)
 }
