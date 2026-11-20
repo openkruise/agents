@@ -28,6 +28,7 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/openkruise/agents/pkg/identity/jwtissuer"
@@ -97,7 +98,7 @@ func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 		return nil, fmt.Errorf("build issuer: %w", err)
 	}
 
-	handler, err := issuer.Handler()
+	handler, err := issuerMux(mgr.GetClient(), issuer)
 	if err != nil {
 		return nil, fmt.Errorf("build issuer endpoints: %w", err)
 	}
@@ -150,6 +151,27 @@ func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 	klog.InfoS("Token issuance is enabled", "issuerURL", cfg.IssuerURL,
 		"keyID", signingKey.KeyID, "bindAddress", cfg.BindAddress)
 	return issuer, nil
+}
+
+// issuerMux combines issuer's own discovery and JWKS endpoints with
+// ExchangePrincipalToken, so one HTTP server answers all three.
+//
+// The issuer endpoints are mounted at "/" rather than re-registered here:
+// they already carry their own full paths, including the issuer URL's own
+// base path if it has one, and issuer.Handler() is the single place that
+// decides what those are. ExchangePrincipalToken is mounted at its own exact
+// path instead, since - unlike discovery and JWKS - it is not something an
+// external OIDC consumer needs to find relative to the issuer URL.
+func issuerMux(reader client.Reader, issuer *jwtissuer.Issuer) (http.Handler, error) {
+	discoveryHandler, err := issuer.Handler()
+	if err != nil {
+		return nil, err
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/", discoveryHandler)
+	mux.Handle(ExchangePrincipalTokenPath, newExchangePrincipalTokenHandler(reader, issuer))
+	return mux, nil
 }
 
 // unconditionalRunnable is a Runnable that runs whether or not this replica
