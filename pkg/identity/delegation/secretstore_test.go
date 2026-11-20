@@ -735,16 +735,15 @@ func TestFinishRequiresAVersion(t *testing.T) {
 }
 
 // TestFinishIsCompareAndSwap covers a stale caller finishing a session that
-// moved on underneath it, specifically through the CAS check on the write
-// rather than through the status guard above.
+// moved on underneath it.
 //
 // A sequential stale-copy scenario, call Finish once and reuse the pre-call
 // copy, cannot reach this path: by the time the second call's own read
 // happens, the status has already moved to terminal and the guard above
-// refuses it first. To isolate the CAS check, an unrelated write bumps the
-// stored Secret's resourceVersion without touching status, so the session is
-// still genuinely Exchanging when the stale Finish call reads it and only the
-// write itself can detect that the caller's version is behind.
+// refuses it first. To isolate a genuine version mismatch, an unrelated write
+// bumps the stored Secret's resourceVersion without touching status, so the
+// session is still genuinely Exchanging when the stale Finish call reads it
+// and only the version comparison can tell the caller's copy is behind.
 func TestFinishIsCompareAndSwap(t *testing.T) {
 	sessions, _, c := newStores(t)
 	ctx := context.Background()
@@ -778,6 +777,45 @@ func TestFinishIsCompareAndSwap(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	if got.Status != StatusExchanging {
+		t.Errorf("status is %q, the refused Finish must not have moved it", got.Status)
+	}
+}
+
+// TestFinishPrefersConflictToAStaleStatusRead covers the gap zmberg's review
+// found: the version comparison above and the status guard below both run
+// against the same read, but a client backed by an informer cache can still
+// serve the pre-exchange Secret here even after BeginExchange's own write
+// landed directly against the API server. Checking status first would read
+// that stale copy's Pending and refuse with the terminal ErrNotPending, when
+// the session actually already exchanged its token successfully and can
+// then never be finished. Checking the version first means any mismatch,
+// whatever status the stale read happens to show, gets the retryable
+// ErrConflict instead.
+//
+// The store here is never actually stale; the fake client always serves the
+// current Secret, genuinely still Pending. What stands in for the cache
+// lagging behind is the caller's side of the same race: a Version from a
+// BeginExchange call the store has not seen yet.
+func TestFinishPrefersConflictToAStaleStatusRead(t *testing.T) {
+	sessions, _, _ := newStores(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if err := sessions.Create(ctx, testSession(now)); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	aheadOfTheStore := &Session{Key: testSessionKey(), Version: "a-version-the-store-never-wrote"}
+	err := sessions.Finish(ctx, aheadOfTheStore, StatusCompleted)
+	if !errors.Is(err, ErrConflict) {
+		t.Errorf("Finish with a version mismatched against a Pending read returned %v, want ErrConflict", err)
+	}
+
+	got, err := sessions.Get(ctx, testSessionKey())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != StatusPending {
 		t.Errorf("status is %q, the refused Finish must not have moved it", got.Status)
 	}
 }

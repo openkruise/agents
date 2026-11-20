@@ -417,6 +417,16 @@ func (s *SecretSessionStore) Finish(ctx context.Context, session *Session, statu
 	if err != nil {
 		return err
 	}
+	// The status guard below is only trustworthy when this read landed on
+	// exactly the version BeginExchange wrote. A client backed by an informer
+	// cache can still be serving the pre-exchange Secret here, which would
+	// show Pending even though the exchange already happened; failing that
+	// case closed with ErrNotPending would make a completed session
+	// unfinishable forever. A version mismatch is retried by the caller, so it
+	// returns ErrConflict rather than the terminal ErrNotPending.
+	if secret.ResourceVersion != session.Version {
+		return ErrConflict
+	}
 	// Section 6.4's state machine only allows Exchanging -> Completed/Failed.
 	// Without this, a Pending session could be finished directly and never
 	// pass through the single-use check BeginExchange performs.
