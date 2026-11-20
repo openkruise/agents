@@ -51,6 +51,37 @@ type lookupKeyStorage struct {
 	operations []string
 }
 
+func TestReadyBeforeConfigRoutes(t *testing.T) {
+	auth := &keys.Config{}
+	for _, tt := range []struct {
+		keyConfig    *keys.Config
+		method, path string
+	}{
+		{nil, http.MethodGet, "/v2/sandboxes"},
+		{auth, http.MethodGet, "/kruise/api/v2/sandboxes"},
+		{auth, http.MethodPost, "/kruise/api/sandboxes/test/traffic-access-token"},
+		{auth, http.MethodGet, "/api-keys"},
+		{auth, http.MethodGet, "/kruise/api/api-keys"},
+	} {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			controller := NewController(ControllerOptions{ReadyBeforeConfig: true, KeyConfig: tt.keyConfig})
+			store := &lookupKeyStorage{}
+			if tt.keyConfig != nil {
+				controller.keys = store
+			}
+			controller.registerRoutes()
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set(models.HeaderApiKey, "test-key")
+			w := httptest.NewRecorder()
+			controller.mux.ServeHTTP(w, req)
+			require.Equal(t, http.StatusServiceUnavailable, w.Code)
+			require.Contains(t, w.Body.String(), `"code":503`)
+			require.Contains(t, w.Body.String(), `"request_id"`)
+			require.Empty(t, store.calls, "waiting requests must not touch authentication storage")
+		})
+	}
+}
+
 func (s *lookupKeyStorage) Reload(context.Context, map[string]string) (configreload.Result, error) {
 	return configreload.Accepted, nil
 }

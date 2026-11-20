@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
@@ -908,7 +909,7 @@ func TestAntiDriftEventWorkerStopsWhenRunContextCanceled(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("event worker did not stop after run context cancellation")
 	}
-	driver.Stop()
+	driver.Stop(context.Background())
 }
 
 func TestAntiDriftRunStartsNonBlockingAndStopRemovesRegistration(t *testing.T) {
@@ -938,7 +939,7 @@ func TestAntiDriftRunStartsNonBlockingAndStopRemovesRegistration(t *testing.T) {
 	}
 
 	cancel()
-	driver.Stop()
+	driver.Stop(context.Background())
 	assert.True(t, registration.removed.Load())
 }
 
@@ -964,7 +965,7 @@ func TestAntiDriftRunExecutesInitialCycleBeforeInterval(t *testing.T) {
 	}, 100*time.Millisecond, 10*time.Millisecond)
 
 	cancel()
-	driver.Stop()
+	driver.Stop(context.Background())
 }
 
 func TestAntiDriftSetSubscriptionAfterStopRemovesSubscription(t *testing.T) {
@@ -977,10 +978,24 @@ func TestAntiDriftSetSubscriptionAfterStopRemovesSubscription(t *testing.T) {
 	)
 	registration := &stubRegistration{}
 
-	driver.Stop()
+	driver.Stop(context.Background())
 	driver.SetSubscription(registration)
-	driver.Stop()
+	driver.Stop(context.Background())
 	assert.True(t, registration.removed.Load())
+}
+
+func TestAntiDriftStopBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		driver := &AntiDriftDriver{stopCh: make(chan struct{}), runDone: make(chan struct{})}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		driver.Stop(ctx)
+		select {
+		case <-driver.stopCh:
+		default:
+			t.Fatal("worker was not signaled")
+		}
+	})
 }
 
 func (b *fakeBackend) acquireLockstrings() []string {
@@ -1102,7 +1117,7 @@ func TestAntiDriftRunWaitsForPrimary(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "cycle should run after becoming primary")
 
 	cancel()
-	driver.Stop()
+	driver.Stop(context.Background())
 }
 
 func TestAntiDriftPrimaryLossCancelsCycleAndClearsLeaked(t *testing.T) {
@@ -1149,7 +1164,7 @@ func TestAntiDriftPrimaryLossCancelsCycleAndClearsLeaked(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "seenLeaked must be cleared on primary loss")
 
 	cancel()
-	driver.Stop()
+	driver.Stop(context.Background())
 }
 
 func TestAntiDriftRunsImmediateCycleOnPrimaryAcquire(t *testing.T) {
@@ -1182,5 +1197,5 @@ func TestAntiDriftRunsImmediateCycleOnPrimaryAcquire(t *testing.T) {
 	assert.LessOrEqual(t, backend.listEntriesCalls.Load(), int64(2))
 
 	cancel()
-	driver.Stop()
+	driver.Stop(context.Background())
 }
