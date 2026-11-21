@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/openkruise/agents/pkg/identity/aead"
 	"github.com/openkruise/agents/pkg/identity/jwtissuer"
 )
 
@@ -60,6 +61,14 @@ type IssuerConfig struct {
 
 	// BindAddress is the address the endpoints listen on.
 	BindAddress string
+
+	// UserInfoKeyring seals the userinfo claim on a minted principal token.
+	// Nil leaves ExchangePrincipalToken unable to mint anything:
+	// IssuePrincipalToken refuses outright rather than issue a token whose
+	// userinfo claim would be absent or unsealed. The caller loads this the
+	// same way it loads the credential encryption keyring, since both come
+	// from the same kind of operator-mounted key directory.
+	UserInfoKeyring *aead.Keyring
 }
 
 // AddIssuer builds an Issuer from cfg and registers a listener serving its
@@ -93,7 +102,11 @@ func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 		return nil, fmt.Errorf("load signing key: %w", err)
 	}
 
-	issuer, err := jwtissuer.New(cfg.IssuerURL, signingKey)
+	var opts []jwtissuer.Option
+	if cfg.UserInfoKeyring != nil {
+		opts = append(opts, jwtissuer.WithUserInfoKeyring(cfg.UserInfoKeyring))
+	}
+	issuer, err := jwtissuer.New(cfg.IssuerURL, signingKey, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("build issuer: %w", err)
 	}
