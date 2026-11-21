@@ -48,7 +48,8 @@ def test_gateway_uuid_auth(sandbox_context, config, skip_init_runtime: bool):
     access_token = sandbox._envd_access_token
     assert access_token, "CreateSandbox should return an access token"
     assert UUID(access_token).version == 4
-    assert get_sandbox_access_token(sandbox_id) == access_token
+    token_matches_annotation = get_sandbox_access_token(sandbox_id) == access_token
+    assert token_matches_annotation, "Returned access token does not match the annotation"
     if skip_init_runtime:
         annotations = get_sandbox_resource(sandbox_id)["metadata"].get("annotations", {})
         assert "agents.kruise.io/init-runtime-request" not in annotations
@@ -235,3 +236,28 @@ def test_gateway_uuid_auth_rejects_tokenless_route(
     for response in responses:
         assert response.status_code == 401, response.text
         assert response.text == "unauthorized: invalid or missing access token"
+
+
+@pytest.mark.parametrize("initial_status", [401, 502, 503])
+def test_gateway_readiness_retries_stale_routes(monkeypatch, initial_status: int) -> None:
+    stale = requests.Response()
+    stale.status_code = initial_status
+    ready = requests.Response()
+    ready.status_code = 200
+    responses = iter((stale, ready))
+    monkeypatch.setattr("gateway_utils.gateway_request", lambda *args: next(responses))
+    monkeypatch.setattr("gateway_utils.time.sleep", lambda seconds: None)
+
+    response = gateway_request_eventually(None, "sandbox-id", "valid-token")
+
+    assert response is ready
+
+
+def test_gateway_readiness_preserves_jwt_rejection(monkeypatch) -> None:
+    rejected = requests.Response()
+    rejected.status_code = 403
+    monkeypatch.setattr("gateway_utils.gateway_request", lambda *args: rejected)
+
+    response = gateway_request_eventually(None, "sandbox-id", "runtime-token", "bad-jwt")
+
+    assert response is rejected
