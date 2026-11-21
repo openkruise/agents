@@ -2519,9 +2519,13 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				assert.Nil(t, opts.Modifier)
 			}
 			if !tt.expectError {
+				assert.NotEmpty(t, opts.AccessToken)
 				assert.Equal(t, tt.autoPauseControllerGate && tt.kruiseIntegrationGate, opts.ProbeUpdatesEnabled)
 				assert.Equal(t, tt.claim.Spec.Probes, opts.Probes)
 				assert.Equal(t, tt.claim.Spec.AutoPausePolicy, opts.AutoPausePolicy)
+				if opts.InitRuntime != nil {
+					assert.Equal(t, opts.InitRuntime.AccessToken, opts.AccessToken)
+				}
 				if tt.validate != nil {
 					tt.validate(t, opts)
 				}
