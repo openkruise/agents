@@ -25,9 +25,11 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandboxtemplate"
 	"github.com/openkruise/agents/pkg/utils/defaults"
 )
 
@@ -61,6 +63,9 @@ func (h *Defaulter) Handle(ctx context.Context, req admission.Request) admission
 
 	// Apply defaulting logic to volume claim templates
 	setDefaultVolumeClaimTemplates(obj.Spec.VolumeClaimTemplates)
+	if sandboxtemplate.IsBuildVersion(obj) {
+		controllerutil.AddFinalizer(obj, agentsv1alpha1.SandboxTemplateFinalizer)
+	}
 
 	if !reflect.DeepEqual(obj, clone) {
 		marshal, err := json.Marshal(obj)

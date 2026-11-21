@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/evanphx/json-patch/v5"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -35,6 +36,63 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 )
+
+func TestVersionFinalizerDefaulting(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		managed    bool
+		finalizers []string
+		patch      bool
+	}{
+		{name: "new labelled Version", managed: true, patch: true},
+		{name: "preserve other finalizer", managed: true, finalizers: []string{"example.com/retain"}, patch: true},
+		{name: "already defaulted", managed: true, finalizers: []string{v1alpha1.SandboxTemplateFinalizer}},
+		{name: "already defaulted with other finalizer", managed: true, finalizers: []string{"example.com/retain", v1alpha1.SandboxTemplateFinalizer}},
+		{name: "ordinary unlabelled template"},
+		{name: "ordinary template preserves other finalizer", finalizers: []string{"example.com/retain"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := runtime.NewScheme()
+			require.NoError(t, v1alpha1.AddToScheme(s))
+			version := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "build", Namespace: "default", Finalizers: tt.finalizers}}
+			if tt.managed {
+				version.Labels = map[string]string{v1alpha1.LabelTemplateName: "template"}
+			}
+			raw, err := json.Marshal(version)
+			require.NoError(t, err)
+			handler := &Defaulter{Decoder: admission.NewDecoder(s)}
+			request := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Create, Object: runtime.RawExtension{Raw: raw}}}
+			response := handler.Handle(t.Context(), request)
+			require.True(t, response.Allowed)
+			if tt.patch {
+				require.NotEmpty(t, response.Patches)
+				data, err := json.Marshal(response.Patches)
+				require.NoError(t, err)
+				patch, err := jsonpatch.DecodePatch(data)
+				require.NoError(t, err)
+				raw, err = patch.Apply(raw)
+				require.NoError(t, err)
+			} else {
+				require.Empty(t, response.Patches)
+			}
+			var defaulted v1alpha1.SandboxTemplate
+			require.NoError(t, json.Unmarshal(raw, &defaulted))
+			if tt.managed {
+				require.Contains(t, defaulted.Finalizers, v1alpha1.SandboxTemplateFinalizer)
+			} else {
+				require.NotContains(t, defaulted.Finalizers, v1alpha1.SandboxTemplateFinalizer)
+			}
+			for _, finalizer := range tt.finalizers {
+				require.Contains(t, defaulted.Finalizers, finalizer)
+			}
+			require.Equal(t, version.OwnerReferences, defaulted.OwnerReferences)
+			request.Object.Raw = raw
+			response = handler.Handle(t.Context(), request)
+			require.True(t, response.Allowed)
+			require.Empty(t, response.Patches)
+		})
+	}
+}
 
 func TestDefaulter_Handle(t *testing.T) {
 	err := v1alpha1.AddToScheme(scheme.Scheme)

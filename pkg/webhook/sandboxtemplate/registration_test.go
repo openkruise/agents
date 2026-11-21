@@ -74,10 +74,15 @@ func TestGeneratedTemplateAdmissionConfiguration(t *testing.T) {
 	require.NoError(t, err)
 	var role rbacv1.ClusterRole
 	require.NoError(t, yaml.Unmarshal(data, &role))
+	versionFinalizersGranted := false
 	for _, rule := range role.Rules {
 		require.NotContains(t, rule.Resources, "sandboxtemplateclaims")
 		require.NotContains(t, rule.Resources, "sandboxtemplateclaims/finalizers")
+		if slices.Contains(rule.APIGroups, "agents.kruise.io") && slices.Contains(rule.Resources, "sandboxtemplates/finalizers") && slices.Contains(rule.Verbs, "update") {
+			versionFinalizersGranted = true
+		}
 	}
+	require.True(t, versionFinalizersGranted, "SandboxTemplate Version finalizer update must be granted")
 	_, err = os.Stat("../../../config/crd/bases/agents.kruise.io_sandboxtemplateclaims.yaml")
 	require.True(t, os.IsNotExist(err), "%v", err)
 }

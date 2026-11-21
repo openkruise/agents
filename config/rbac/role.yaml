@@ -66,7 +66,6 @@ rules:
   - agents.kruise.io
   resources:
   - checkpoints
-  - sandboxtemplates
   verbs:
   - create
   - delete
@@ -95,6 +94,7 @@ rules:
   - commits/finalizers
   - sandboxes/finalizers
   - sandboxsets/finalizers
+  - sandboxtemplates/finalizers
   - sessionservices/finalizers
   verbs:
   - update
@@ -106,6 +106,7 @@ rules:
   - sandboxclaims/status
   - sandboxes/status
   - sandboxsets/status
+  - sandboxtemplates/status
   - sandboxupdateops/status
   - sessionservices/scale
   - sessionservices/status
@@ -118,6 +119,17 @@ rules:
   resources:
   - sandboxclaims
   verbs:
+  - delete
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - agents.kruise.io
+  resources:
+  - sandboxtemplates
+  verbs:
+  - create
   - delete
   - get
   - list
@@ -170,6 +182,18 @@ rules:
   - delete
   - get
   - list
+  - watch
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1

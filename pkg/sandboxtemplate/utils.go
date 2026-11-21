@@ -18,6 +18,14 @@ package sandboxtemplate
 
 import api "github.com/openkruise/agents/api/v1alpha1"
 
+// BuildContainerName names the business container that a template Build
+// provisions and captures.
+const BuildContainerName = "runtime"
+
+// ExecutionIdentityAnnotation stores the execution identity of the build
+// worker on the Version, in the E2B key domain.
+const ExecutionIdentityAnnotation = api.E2BPrefix + "template-execution-identity"
+
 func IsBuildVersion(v *api.SandboxTemplate) bool {
 	return v != nil && v.Labels[api.LabelTemplateName] != ""
 }

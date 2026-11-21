@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
+	"github.com/openkruise/agents/pkg/controller/sandboxtemplate"
 	"github.com/openkruise/agents/pkg/controller/sandboxupdateops"
 	"github.com/openkruise/agents/pkg/controller/securitytokenrefresh"
 	"github.com/openkruise/agents/pkg/controller/sessionservice"
@@ -42,7 +44,8 @@ type Deps struct {
 	// agent-runtimes. Nil disables runtime TLS for the whole process.
 	RuntimeTLSBundle *runtimeclient.TLSBundle
 	// SyncRouteWithPeers is an optional route publishing callback; nil disables active sync.
-	SyncRouteWithPeers func(context.Context, sandboxroute.Route) error
+	SyncRouteWithPeers   func(context.Context, sandboxroute.Route) error
+	TemplateBuildTimeout time.Duration
 }
 
 func SetupWithManager(m manager.Manager, deps Deps) error {
@@ -69,6 +72,9 @@ func SetupWithManager(m manager.Manager, deps Deps) error {
 		return err
 	}
 	if err := sessionservice.Add(m); err != nil {
+		return err
+	}
+	if err := sandboxtemplate.Add(m, sandboxtemplate.Options{Timeout: deps.TemplateBuildTimeout, RuntimeTLSBundle: deps.RuntimeTLSBundle}); err != nil {
 		return err
 	}
 	return nil

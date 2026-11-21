@@ -22,6 +22,8 @@ import (
 )
 
 const (
+	SandboxTemplateFinalizer = "agents.kruise.io/sandbox-template"
+
 	// SandboxTemplateBackendKubernetes selects the Kubernetes sandboxcr
 	// backend. Its public wire value is "k8s".
 	SandboxTemplateBackendKubernetes = "k8s"
@@ -264,6 +266,12 @@ type SandboxTemplateStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
+
+// SandboxTemplateConditionBuildReady reports Build execution and capture progress.
+const SandboxTemplateConditionBuildReady = "BuildReady"
+
+// SandboxTemplateArtifactCheckpoint references a Checkpoint whose status checkpoint ID restores the artifact.
+const SandboxTemplateArtifactCheckpoint = "checkpoint"
 
 // +genclient
 // +kubebuilder:object:root=true
