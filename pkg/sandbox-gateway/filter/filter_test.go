@@ -859,20 +859,55 @@ func TestDecodeHeadersAccessTokenAuth(t *testing.T) {
 			expectedReplyDetail: "unauthorized",
 		},
 		{
-			name:             "no token configured - backward compatible, skip auth",
-			routeAccessToken: "",
-			requestToken:     "",
-			setTokenHeader:   false,
-			expectedStatus:   api.Continue,
-			expectLocalReply: false,
+			name:                "no token configured - missing request token is rejected",
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
 		},
 		{
-			name:             "no token configured - request carries token anyway, still allowed",
-			routeAccessToken: "",
-			requestToken:     "some-token",
-			setTokenHeader:   true,
-			expectedStatus:   api.Continue,
-			expectLocalReply: false,
+			name:                "no token configured - arbitrary request token is rejected",
+			requestToken:        "some-token",
+			setTokenHeader:      true,
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
+		},
+		{
+			name:                "no token configured - empty token header is rejected",
+			setTokenHeader:      true,
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
+		},
+		{
+			name:                "no token configured via kruise path",
+			useKruisePath:       true,
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
+		},
+		{
+			name:                "JWT mode rejects a route without a UUID token",
+			enableJWTAuth:       true,
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
+		},
+		{
+			name:           "auth disabled allows a route without a UUID token",
+			disableAuth:    true,
+			expectedStatus: api.Continue,
+		},
+		{
+			name:           "JWT mode without the baseline allows a route without a UUID token",
+			disableAuth:    true,
+			enableJWTAuth:  true,
+			expectedStatus: api.Continue,
 		},
 		{
 			name:             "auth disabled skips validation despite route token",
@@ -992,6 +1027,7 @@ func TestDecodeHeadersAccessTokenAuth(t *testing.T) {
 				assert.Equal(t, tt.expectedStatusCode, mockCallbacks.decoderCallbacks.replyStatusCode)
 				assert.Equal(t, tt.expectedReplyDetail, mockCallbacks.decoderCallbacks.replyDetails)
 				assert.Contains(t, mockCallbacks.decoderCallbacks.replyBody, "unauthorized")
+				assert.NotContains(t, mockCallbacks.streamInfo.dynamicMetadata.data, "envoy.lb.original_dst")
 			} else {
 				// Verify upstream was set correctly for successful cases
 				metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
@@ -1141,6 +1177,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 		{
 			name:             "route without JWT requirement skips JWT verification",
 			managerState:     "missing",
+			routeToken:       "runtime-token",
 			requestJWT:       "unused-jwt",
 			expectStatus:     api.Continue,
 			expectJWTRemoved: true,
