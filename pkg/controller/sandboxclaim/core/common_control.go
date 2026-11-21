@@ -356,9 +356,10 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	var storageAuthKey, storageAuthValue string
 
 	opts := infra.ClaimSandboxOptions{
-		Namespace: claim.Namespace,
-		User:      string(claim.UID), // Use UID to ensure uniqueness across claim recreations
-		Template:  sandboxSet.Name,
+		Namespace:   claim.Namespace,
+		User:        string(claim.UID), // Use UID to ensure uniqueness across claim recreations
+		Template:    sandboxSet.Name,
+		AccessToken: runtimeconfig.NewDefaultAccessToken(),
 		ProbeUpdatesEnabled: utilfeature.DefaultFeatureGate.Enabled(features.AutoPauseControllerGate) &&
 			utilfeature.DefaultFeatureGate.Enabled(features.KruiseIntegrationGate),
 		Modifier: func(sbx infra.Sandbox) error {
@@ -515,7 +516,7 @@ func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *infra
 	if hasAgentRuntime {
 		opts.InitRuntime = &runtimeconfig.InitRuntimeOptions{
 			EnvVars:     claim.Spec.EnvVars,
-			AccessToken: runtimeconfig.NewDefaultAccessToken(),
+			AccessToken: opts.AccessToken,
 		}
 	} else {
 		logger.Error(fmt.Errorf("agent-runtime not configured in SandboxSet"), "SkipInitRuntime is false but no agent-runtime found, skip InitRuntime",

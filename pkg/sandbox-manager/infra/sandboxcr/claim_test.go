@@ -5175,6 +5175,7 @@ func TestModifyPickedSandbox_InitRuntime(t *testing.T) {
 		{
 			name: "with init runtime options",
 			opts: infra.ClaimSandboxOptions{
+				AccessToken: "test-token",
 				InitRuntime: &config.InitRuntimeOptions{
 					EnvVars: map[string]string{
 						"ENV1": "value1",
@@ -5202,6 +5203,29 @@ func TestModifyPickedSandbox_InitRuntime(t *testing.T) {
 			},
 			notExpectedAnnos: []string{
 				v1alpha1.AnnotationRuntimeAccessToken,
+			},
+		},
+		{
+			name: "outer access token is persisted with runtime initialization",
+			opts: infra.ClaimSandboxOptions{
+				AccessToken: "claim-token",
+				InitRuntime: &config.InitRuntimeOptions{},
+			},
+			expectedAnnos: map[string]string{
+				v1alpha1.AnnotationInitRuntimeRequest: `{}`,
+				v1alpha1.AnnotationRuntimeAccessToken: "claim-token",
+			},
+		},
+		{
+			name: "access token without runtime initialization",
+			opts: infra.ClaimSandboxOptions{
+				AccessToken: "gateway-only-token",
+			},
+			expectedAnnos: map[string]string{
+				v1alpha1.AnnotationRuntimeAccessToken: "gateway-only-token",
+			},
+			notExpectedAnnos: []string{
+				v1alpha1.AnnotationInitRuntimeRequest,
 			},
 		},
 		{
@@ -5646,8 +5670,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 		{
 			name: "issue security token success and propagate",
 			options: infra.ClaimSandboxOptions{
-				User:     user,
-				Template: existTemplate,
+				AccessToken: "original-uuid-token",
+				User:        user,
+				Template:    existTemplate,
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
@@ -5662,7 +5687,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
 				annotations := sbx.GetAnnotations()
-				// Original UUID token is written via InitRuntime
+				// Original UUID token is written via the outer AccessToken.
 				assert.Equal(t, "original-uuid-token", annotations[v1alpha1.AnnotationRuntimeAccessToken])
 				// SecurityToken metrics should be recorded
 				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
@@ -5676,8 +5701,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 		{
 			name: "issue security token failure returns retriable error",
 			options: infra.ClaimSandboxOptions{
-				User:     user,
-				Template: existTemplate,
+				AccessToken: "original-uuid-token",
+				User:        user,
+				Template:    existTemplate,
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
@@ -5696,8 +5722,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 		{
 			name: "propagate security token failure returns retriable error",
 			options: infra.ClaimSandboxOptions{
-				User:     user,
-				Template: existTemplate,
+				AccessToken: "original-uuid-token",
+				User:        user,
+				Template:    existTemplate,
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
@@ -5715,8 +5742,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 		{
 			name: "security token is issued even when access token is not UUID",
 			options: infra.ClaimSandboxOptions{
-				User:     user,
-				Template: existTemplate,
+				AccessToken: "some-token",
+				User:        user,
+				Template:    existTemplate,
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "some-token",
 				},
@@ -5763,8 +5791,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			// IsIDTokenRequested predicate.
 			name: "skips security token issuance when agent-name annotation is absent",
 			options: infra.ClaimSandboxOptions{
-				User:     user,
-				Template: existTemplate,
+				AccessToken: "original-uuid-token",
+				User:        user,
+				Template:    existTemplate,
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
