@@ -89,6 +89,10 @@ type NewSandboxRequest struct {
 	// annotation value produced by the server from either input entry. It is
 	// never decoded from the request body.
 	SecurityRulesJSON string `json:"-"`
+	// SecurityProfileJSON is the validated inline profile for this delivery.
+	SecurityProfileJSON string `json:"-"`
+	// EgressAnnotation is the validated Agentio network configuration for this delivery.
+	EgressAnnotation string `json:"-"`
 }
 
 type SandboxNetworkConfig struct {

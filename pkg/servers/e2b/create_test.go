@@ -686,10 +686,12 @@ func TestCreateSandboxWithClone_Naming(t *testing.T) {
 	defer cleanupCP()
 
 	var capturedName, capturedGenerateName string
+	var capturedNetwork string
 	origCreateSandbox := sandboxcr.DefaultCreateSandbox
 	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
 		capturedName = sbx.Name
 		capturedGenerateName = sbx.GenerateName
+		capturedNetwork = sbx.Annotations[e2bNetworkAnnotation]
 		// The fake client does not auto-resolve GenerateName; assign a unique
 		// Name so Create succeeds. Capture happens before mutation.
 		if sbx.Name == "" {
@@ -757,6 +759,56 @@ func TestCreateSandboxWithClone_Naming(t *testing.T) {
 			require.Nil(t, apiErr)
 			assert.Equal(t, tt.expectName, capturedName, "ObjectMeta.Name should reflect Extensions.Name")
 			assert.Equal(t, tt.expectGenerateName, capturedGenerateName, "ObjectMeta.GenerateName should reflect Extensions.GenerateName")
+		})
+	}
+
+	t.Run("clone persists Agentio policy at creation", func(t *testing.T) {
+		controller.networkAnnotation = true
+		_, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID:          "cp-id",
+			AllowInternetAccess: ptr.To(false),
+		}, nil, user))
+		require.Nil(t, apiErr)
+		require.JSONEq(t, `{"allowInternetAccess":false,"network":{}}`, capturedNetwork)
+	})
+}
+
+func TestParseCreateSandboxRequest_SecurityProfile(t *testing.T) {
+	const validProfile = `{"tcpRules":[{"name":"deny-ssh","match":[{"cidrs":["10.23.0.0/16"],"ports":[22]}],"action":"Deny"}]}`
+	const legacyRules = `[{"name":"block","match":[{"domains":["api.example.com"]}],"actions":{"block":{"statusCode":403}}}]`
+	tests := []struct {
+		name        string
+		profile     string
+		legacy      string
+		network     *models.SandboxNetworkConfig
+		internet    *bool
+		wantMessage string
+	}{
+		{name: "both metadata keys", profile: validProfile, legacy: legacyRules, wantMessage: "mutually exclusive"},
+		{name: "profile with allowOut", profile: validProfile, network: &models.SandboxNetworkConfig{AllowOut: []string{"192.0.2.10"}}, wantMessage: "cannot be combined"},
+		{name: "profile with denyOut", profile: validProfile, network: &models.SandboxNetworkConfig{DenyOut: []string{"10.0.0.0/8"}}, wantMessage: "cannot be combined"},
+		{name: "profile with network.rules", profile: validProfile, network: &models.SandboxNetworkConfig{Rules: map[string][]models.SandboxNetworkRule{"api.example.com": {{}}}}, wantMessage: "cannot be combined"},
+		{name: "profile with internet disabled", profile: validProfile, internet: ptr.To(false), wantMessage: "cannot be combined"},
+		{name: "unsupported field", profile: `{"inputs":[]}`, wantMessage: "unknown field"},
+		{name: "unsupported HTTP action", profile: `{"rules":[{"name":"skip","match":[{"domains":["*"]}],"actions":{"bypass":true}}]}`, wantMessage: "bypass is not allowed"},
+		{name: "invalid CIDR", profile: `{"tcpRules":[{"name":"deny","match":[{"cidrs":["bad"]}],"action":"Deny"}]}`, wantMessage: "invalid IP or CIDR"},
+		{name: "invalid port", profile: `{"tcpRules":[{"name":"deny","match":[{"ports":[0]}],"action":"Deny"}]}`, wantMessage: "outside 1-65535"},
+		{name: "null match", profile: `{"tcpRules":[{"name":"allow","match":[null],"action":"Allow"}]}`, wantMessage: "expected an object"},
+		{name: "duplicate name", profile: `{"tcpRules":[{"name":"same","match":[{}],"action":"Allow"},{"name":"same","match":[{}],"action":"Deny"}]}`, wantMessage: "duplicate name"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := &Controller{maxTimeout: 3600}
+			metadata := map[string]string{securityProfileMetadataKey: tt.profile}
+			if tt.legacy != "" {
+				metadata[models.ExtensionKeySecurityRules] = tt.legacy
+			}
+			_, apiErr := ctrl.parseCreateSandboxRequest(NewRequest(t, nil, models.NewSandboxRequest{
+				Metadata: metadata, Network: tt.network, AllowInternetAccess: tt.internet,
+			}, nil, nil))
+			require.NotNil(t, apiErr)
+			require.Equal(t, http.StatusBadRequest, apiErr.Code)
+			require.Contains(t, apiErr.Message, tt.wantMessage)
 		})
 	}
 }

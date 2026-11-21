@@ -23,6 +23,13 @@ docker build -t sandbox-manager:latest .
     kubectl apply -f bin/sandbox-manager.yaml
     ```
 
+## 使用 Agentio 管理 E2B 出口策略
+
+启动 sandbox-manager 时设置 `--e2b-network-annotation=true`，将新交付 E2B 沙箱的网络配置写入
+`agents.kruise.io/e2b-network`。Agentio 需要启用 Sandbox 策略发现，并通过原生出口网关转发受管出站流量。
+存量 E2B 沙箱继续使用原有 TrafficPolicy。先升级所有 sandbox-manager 副本再启用参数，后续策略读写会根据
+Sandbox 上是否有该注解选择策略来源。
+
 ## API Key Quota
 
 API key 可以携带静态配额，维度包括 `sandbox.count`、`limits.cpu`、`limits.memory`，作用域为 `running` 或 `all`。

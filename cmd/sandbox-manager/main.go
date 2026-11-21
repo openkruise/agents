@@ -99,6 +99,7 @@ func main() {
 	var e2bEnableAuth bool
 	var domain string
 	var e2bMaxTimeout int
+	var e2bNetworkAnnotation bool
 	var enableShortSandboxID bool
 	var enableDeprecatedResponseMetrics bool
 	var shortSandboxIDPrefix string
@@ -151,6 +152,8 @@ func main() {
 			"the HTTP Host header (api. prefix stripped for native paths; host "+
 			"preserved for /kruise/* customized paths).")
 	pflag.IntVar(&e2bMaxTimeout, "e2b-max-timeout", models.DefaultMaxTimeout, "E2B maximum timeout in seconds")
+	pflag.BoolVar(&e2bNetworkAnnotation, "e2b-network-annotation", false,
+		"Persist network policies for new E2B sandboxes as annotations. Requires Agentio Sandbox policy discovery and outbound traffic through the Agentio egress gateway.")
 	pflag.BoolVar(&enableShortSandboxID, "enable-short-sandbox-id", false, "Assign short IDs to successfully claimed or cloned Sandboxes")
 	pflag.BoolVar(&enableDeprecatedResponseMetrics, "enable-deprecated-response-metrics", true,
 		"Deprecated: keep recording and exposing sandbox_claim_creation_responses and the legacy "+
@@ -424,11 +427,12 @@ func main() {
 	}
 
 	sandboxController := e2b.NewController(e2b.ControllerOptions{
-		Domain:      domain,
-		Port:        port,
-		MetricsPort: metricsPort,
-		MaxTimeout:  e2bMaxTimeout,
-		KeyConfig:   keyCfg,
+		Domain:            domain,
+		Port:              port,
+		MetricsPort:       metricsPort,
+		MaxTimeout:        e2bMaxTimeout,
+		KeyConfig:         keyCfg,
+		NetworkAnnotation: e2bNetworkAnnotation,
 		Manager: config.SandboxManagerOptions{
 			SystemNamespace:                 sysNs,
 			PeerSelector:                    peerSelector,
