@@ -1,17 +1,17 @@
 """Tests for sandbox-gateway access token authentication."""
 import logging
-import time
+from uuid import UUID
 
 import pytest
 import requests
 from e2b_code_interpreter import Sandbox
-
 from gateway_utils import (
     WORKLOAD_PORT,
     assert_workload_reached,
     gateway_request,
     gateway_request_eventually,
     get_sandbox_access_token,
+    get_sandbox_resource,
     start_workload_server,
 )
 
@@ -19,32 +19,42 @@ logger = logging.getLogger(__name__)
 pytestmark = pytest.mark.gateway_uuid_auth
 
 
-def test_gateway_uuid_auth(sandbox_context, config):
+@pytest.mark.parametrize(
+    "skip_init_runtime",
+    [
+        pytest.param(False, id="runtime-init"),
+        pytest.param(True, id="skip-init-runtime"),
+    ],
+)
+def test_gateway_uuid_auth(sandbox_context, config, skip_init_runtime: bool):
     """Verify UUID authentication for header-based and host-based routing."""
     sandbox: Sandbox = sandbox_context.add(
         Sandbox.create(
             template=config.templates.code_interpreter,
             timeout=120,
+            metadata={
+                "e2b.agents.kruise.io/skip-init-runtime": str(skip_init_runtime).lower(),
+            },
             headers={"x-request-id": sandbox_context.request_id},
         )
     )
     sandbox_id = sandbox.sandbox_id
     logger.info("sandbox-id: %s", sandbox_id)
 
-    # Wait for gateway registry to sync
-    time.sleep(3)
-
-    access_token = get_sandbox_access_token(sandbox_id)
-    assert access_token != "", "Sandbox should have a runtime-access-token annotation"
+    access_token = sandbox._envd_access_token
+    assert access_token, "CreateSandbox should return an access token"
+    assert UUID(access_token).version == 4
+    assert get_sandbox_access_token(sandbox_id) == access_token
+    if skip_init_runtime:
+        annotations = get_sandbox_resource(sandbox_id)["metadata"].get("annotations", {})
+        assert "agents.kruise.io/init-runtime-request" not in annotations
 
     base_headers = {
         "e2b-sandbox-id": sandbox_id,
         "e2b-sandbox-port": "49983",
     }
-    valid_response = requests.get(
-        f"{config.gateway_url}/",
-        headers={**base_headers, "X-Access-Token": access_token},
-        timeout=10,
+    valid_response = gateway_request_eventually(
+        config, sandbox_id, access_token
     )
     assert valid_response.status_code not in (401, 502, 503), (
         f"Gateway rejected a valid UUID token: {valid_response.status_code}"
@@ -124,6 +134,16 @@ def test_gateway_uuid_auth(sandbox_context, config):
     assert workload_host_missing.status_code == 401, (
         f"Expected 401 without UUID token via host routing on the workload port, "
         f"got {workload_host_missing.status_code}"
+    )
+
+    workload_host_invalid = requests.get(
+        f"{config.gateway_url}/",
+        headers={"Host": workload_host, "X-Access-Token": "wrong-token-value"},
+        timeout=10,
+    )
+    assert workload_host_invalid.status_code == 401, (
+        f"Expected 401 with invalid UUID token via host routing on the workload port, "
+        f"got {workload_host_invalid.status_code}"
     )
 
     workload_host_valid = requests.get(
