@@ -29,14 +29,18 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4/jwt"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/openkruise/agents/pkg/identity/aead"
 	"github.com/openkruise/agents/pkg/identity/jwtissuer"
 )
 
@@ -212,6 +216,60 @@ func TestAddIssuer(t *testing.T) {
 	}
 }
 
+// TestAddIssuerWiresTheUserInfoKeyring covers the gap a live deployment would
+// otherwise only find the first time an agent called ExchangePrincipalToken:
+// IssuePrincipalToken refuses to mint anything without a userinfo keyring, so
+// IssuerConfig.UserInfoKeyring has to actually reach the Issuer AddIssuer
+// builds, not just sit on the config struct unread.
+func TestAddIssuerWiresTheUserInfoKeyring(t *testing.T) {
+	signingKey := writeSigningKey(t)
+	certFile, keyFile := writeServingPair(t)
+	cfg := IssuerConfig{
+		IssuerURL:      "https://issuer.test",
+		SigningKeyFile: signingKey,
+		TLSCertFile:    certFile,
+		TLSKeyFile:     keyFile,
+		BindAddress:    "127.0.0.1:0",
+	}
+
+	without, err := AddIssuer(newTestManager(t), cfg)
+	if err != nil {
+		t.Fatalf("AddIssuer without a keyring: %v", err)
+	}
+	if _, _, err := without.IssuePrincipalToken(jwtissuer.PrincipalBinding{
+		IDToken: "placeholder", Issuer: "https://idp.example.com", Subject: "alice",
+		Agent: jwtissuer.AgentBinding{Namespace: "team-a", AgentIdentityName: "checkout-agent", SandboxUID: "sbx-1"},
+	}, 0); err == nil {
+		t.Error("IssuePrincipalToken succeeded without a userinfo keyring configured, want a refusal")
+	}
+
+	secret := make([]byte, aead.KeySize)
+	if _, err := rand.Read(secret); err != nil {
+		t.Fatalf("generate keyring secret: %v", err)
+	}
+	keyring, err := aead.NewKeyring(aead.Key{ID: "userinfo-1", Secret: secret})
+	if err != nil {
+		t.Fatalf("build keyring: %v", err)
+	}
+	cfg.UserInfoKeyring = keyring
+
+	with, err := AddIssuer(newTestManager(t), cfg)
+	if err != nil {
+		t.Fatalf("AddIssuer with a keyring: %v", err)
+	}
+	idTokenKey := mustIDTokenKey(t)
+	rawIDToken := signIDToken(t, idTokenKey, "idp-key-1", jwt.Claims{
+		Issuer: "https://idp.example.com", Subject: "alice",
+	})
+	if _, _, err := with.IssuePrincipalToken(jwtissuer.PrincipalBinding{
+		IDToken: rawIDToken,
+		Issuer:  "https://idp.example.com", Subject: "alice",
+		Agent: jwtissuer.AgentBinding{Namespace: "team-a", AgentIdentityName: "checkout-agent", SandboxUID: "sbx-1"},
+	}, 0); err != nil {
+		t.Errorf("IssuePrincipalToken with a configured keyring: %v", err)
+	}
+}
+
 // TestAddIssuerKeyIDIsDerived checks that two replicas loading the same key
 // material agree on the same kid without coordinating, which is what lets a
 // verifier match a token header against the published JWKS.
@@ -340,6 +398,58 @@ func TestServeServesTheJWKSOverTLS(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not return after the context was cancelled")
 	}
+}
+
+// TestIssuerMuxRoutesAllThreeEndpoints confirms the combined mux AddIssuer
+// builds still routes discovery and JWKS to the issuer's own handler, and
+// routes ExchangePrincipalToken to its own handler rather than falling
+// through to a 404. It deliberately presents no Authorization header: the
+// point here is routing, not authentication, and a 401 from the exchange
+// handler is just as good a proof that the request reached it as a 200
+// would be, without needing a cluster or a real agent token.
+func TestIssuerMuxRoutesAllThreeEndpoints(t *testing.T) {
+	signingKey, err := jwtissuer.LoadSigningKeyFromFile(writeSigningKey(t))
+	if err != nil {
+		t.Fatalf("load signing key: %v", err)
+	}
+	issuer, err := jwtissuer.New("https://issuer.example", signingKey)
+	if err != nil {
+		t.Fatalf("build issuer: %v", err)
+	}
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+	mux, err := issuerMux(fc, issuer)
+	if err != nil {
+		t.Fatalf("build issuer mux: %v", err)
+	}
+
+	for _, tt := range []struct {
+		path       string
+		method     string
+		wantStatus int
+	}{
+		{path: jwtissuer.DiscoveryPath, method: http.MethodGet, wantStatus: http.StatusOK},
+		{path: jwtissuer.JWKSPath, method: http.MethodGet, wantStatus: http.StatusOK},
+		{path: ExchangePrincipalTokenPath, method: http.MethodPost, wantStatus: http.StatusUnauthorized},
+	} {
+		t.Run(tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status: got %d, want %d; body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("an unregistered path is still a 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/no-such-path", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("status: got %d, want %d", rec.Code, http.StatusNotFound)
+		}
+	})
 }
 
 func fetchJSON(t *testing.T, client *http.Client, url string, into any) {
