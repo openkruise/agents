@@ -36,9 +36,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4/jwt"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/openkruise/agents/pkg/identity/aead"
 	"github.com/openkruise/agents/pkg/identity/jwtissuer"
 )
 
@@ -211,6 +213,60 @@ func TestAddIssuer(t *testing.T) {
 				t.Error("expected issuance to be disabled, got an issuer")
 			}
 		})
+	}
+}
+
+// TestAddIssuerWiresTheUserInfoKeyring covers the gap a live deployment would
+// otherwise only find the first time an agent called ExchangePrincipalToken:
+// IssuePrincipalToken refuses to mint anything without a userinfo keyring, so
+// IssuerConfig.UserInfoKeyring has to actually reach the Issuer AddIssuer
+// builds, not just sit on the config struct unread.
+func TestAddIssuerWiresTheUserInfoKeyring(t *testing.T) {
+	signingKey := writeSigningKey(t)
+	certFile, keyFile := writeServingPair(t)
+	cfg := IssuerConfig{
+		IssuerURL:      "https://issuer.test",
+		SigningKeyFile: signingKey,
+		TLSCertFile:    certFile,
+		TLSKeyFile:     keyFile,
+		BindAddress:    "127.0.0.1:0",
+	}
+
+	without, err := AddIssuer(newTestManager(t), cfg)
+	if err != nil {
+		t.Fatalf("AddIssuer without a keyring: %v", err)
+	}
+	if _, _, err := without.IssuePrincipalToken(jwtissuer.PrincipalBinding{
+		IDToken: "placeholder", Issuer: "https://idp.example.com", Subject: "alice",
+		Agent: jwtissuer.AgentBinding{Namespace: "team-a", AgentIdentityName: "checkout-agent", SandboxUID: "sbx-1"},
+	}, 0); err == nil {
+		t.Error("IssuePrincipalToken succeeded without a userinfo keyring configured, want a refusal")
+	}
+
+	secret := make([]byte, aead.KeySize)
+	if _, err := rand.Read(secret); err != nil {
+		t.Fatalf("generate keyring secret: %v", err)
+	}
+	keyring, err := aead.NewKeyring(aead.Key{ID: "userinfo-1", Secret: secret})
+	if err != nil {
+		t.Fatalf("build keyring: %v", err)
+	}
+	cfg.UserInfoKeyring = keyring
+
+	with, err := AddIssuer(newTestManager(t), cfg)
+	if err != nil {
+		t.Fatalf("AddIssuer with a keyring: %v", err)
+	}
+	idTokenKey := mustIDTokenKey(t)
+	rawIDToken := signIDToken(t, idTokenKey, "idp-key-1", jwt.Claims{
+		Issuer: "https://idp.example.com", Subject: "alice",
+	})
+	if _, _, err := with.IssuePrincipalToken(jwtissuer.PrincipalBinding{
+		IDToken: rawIDToken,
+		Issuer:  "https://idp.example.com", Subject: "alice",
+		Agent: jwtissuer.AgentBinding{Namespace: "team-a", AgentIdentityName: "checkout-agent", SandboxUID: "sbx-1"},
+	}, 0); err != nil {
+		t.Errorf("IssuePrincipalToken with a configured keyring: %v", err)
 	}
 }
 
