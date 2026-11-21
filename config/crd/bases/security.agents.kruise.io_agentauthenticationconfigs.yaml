@@ -91,6 +91,9 @@ spec:
             required:
             - type
             type: object
+            x-kubernetes-validations:
+            - message: jwt is required when type is jwt
+              rule: self.type != 'jwt' || has(self.jwt)
           status:
             description: Status is the current state of the issuer.
             properties:
