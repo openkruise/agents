@@ -18,6 +18,7 @@ package e2b
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -595,6 +596,121 @@ func TestUpdateSandboxNetwork_Success(t *testing.T) {
 			} else {
 				assert.Empty(t, tpList.Items, "expected no TrafficPolicy CRs")
 			}
+		})
+	}
+}
+
+func TestE2BNetworkAnnotationLifecycle(t *testing.T) {
+	controller, c, teardown := Setup(t)
+	defer teardown()
+	controller.networkAnnotation = true
+	templateName := "test-annotated-network"
+	defer CreateSandboxPool(t, controller, templateName, 2)()
+	user := adminTestUser()
+
+	created, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+		},
+		Network: &models.SandboxNetworkConfig{
+			AllowOut: []string{"192.0.2.10"},
+			Rules: map[string][]models.SandboxNetworkRule{
+				"API.Example.COM": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"X-Test": "initial"},
+				}}},
+			},
+		},
+	}, nil, user))
+	require.Nil(t, apiErr)
+	id := created.Body.SandboxID
+	params := map[string]string{"sandboxID": id}
+
+	sandbox := GetSandbox(t, id, c)
+	initial := sandbox.Annotations[e2bNetworkAnnotation]
+	require.JSONEq(t, `{"network":{"allowOut":["192.0.2.10"],"rules":{"api.example.com":[{"transform":{"headers":{"x-test":"initial"}}}]}}}`, initial)
+	require.NotContains(t, sandbox.Annotations, agentsv1alpha1.AnnotationSecurityRules)
+
+	// The instance's persisted annotation remains authoritative after changing the creation default.
+	controller.networkAnnotation = false
+	updated, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
+		AllowOut: []string{"192.0.2.11"},
+		DenyOut:  []string{"10.0.0.0/8"},
+	}, params, user))
+	require.Nil(t, apiErr)
+	require.Equal(t, http.StatusNoContent, updated.Code)
+
+	sandbox = GetSandbox(t, id, c)
+	require.JSONEq(t, `{"network":{"allowOut":["192.0.2.11"],"denyOut":["10.0.0.0/8"],"rules":{"api.example.com":[{"transform":{"headers":{"x-test":"initial"}}}]}}}`, sandbox.Annotations[e2bNetworkAnnotation])
+	described, apiErr := controller.DescribeSandbox(NewRequest(t, nil, nil, params, user))
+	require.Nil(t, apiErr)
+	require.Equal(t, &models.SandboxNetworkConfig{
+		AllowOut: []string{"192.0.2.11"}, DenyOut: []string{"10.0.0.0/8"},
+	}, described.Body.Network)
+
+	for _, allowInternetAccess := range []bool{true, false} {
+		_, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
+			AllowInternetAccess: ptr.To(allowInternetAccess),
+			AllowOut:            []string{"192.0.2.11"},
+		}, params, user))
+		require.Nil(t, apiErr)
+		sandbox := GetSandbox(t, id, c)
+		require.JSONEq(t, fmt.Sprintf(`{"allowInternetAccess":%t,"network":{"allowOut":["192.0.2.11"],"rules":{"api.example.com":[{"transform":{"headers":{"x-test":"initial"}}}]}}}`, allowInternetAccess), sandbox.Annotations[e2bNetworkAnnotation])
+	}
+
+	_, apiErr = controller.UpdateSandboxNetwork(NewRequest(t, nil, json.RawMessage(`{"rules":{}}`), params, user))
+	require.Nil(t, apiErr)
+	sandbox = GetSandbox(t, id, c)
+	require.JSONEq(t, `{"network":{}}`, sandbox.Annotations[e2bNetworkAnnotation])
+
+	policies := &agentsv1alpha1.TrafficPolicyList{}
+	require.NoError(t, getTestCRClient(controller).List(t.Context(), policies,
+		ctrlclient.InNamespace(Namespace), ctrlclient.MatchingFields{cache.IndexTrafficPolicySandboxID: id}))
+	require.Empty(t, policies.Items)
+}
+
+func TestE2BSecurityProfileExclusive(t *testing.T) {
+	const profile = `{
+		"rules":[{"name":"block-api","match":[{"domains":["blocked.example.com"]}],"actions":{"block":{"statusCode":403}}}],
+		"tcpRules":[{"name":"deny-ssh","match":[{"ports":[22]}],"action":"Deny"}]
+	}`
+	for _, networkAnnotation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("networkAnnotation=%t", networkAnnotation), func(t *testing.T) {
+			controller, c, teardown := Setup(t)
+			defer teardown()
+			controller.networkAnnotation = networkAnnotation
+			templateName := "test-security-profile"
+			defer CreateSandboxPool(t, controller, templateName, 2)()
+			user := adminTestUser()
+
+			created, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID:          templateName,
+				AllowInternetAccess: ptr.To(true),
+				Network:             &models.SandboxNetworkConfig{},
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+					securityProfileMetadataKey:         profile,
+				},
+			}, nil, user))
+			require.Nil(t, apiErr)
+			id := created.Body.SandboxID
+			annotations := GetSandbox(t, id, c).Annotations
+			require.JSONEq(t, profile, annotations[securityProfileAnnotation])
+			require.NotContains(t, annotations, securityProfileMetadataKey)
+			require.NotContains(t, annotations, e2bNetworkAnnotation)
+
+			_, apiErr = controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
+				AllowOut: []string{"192.0.2.10"},
+			}, map[string]string{"sandboxID": id}, user))
+			require.NotNil(t, apiErr)
+			require.Equal(t, http.StatusBadRequest, apiErr.Code)
+			require.Contains(t, apiErr.Message, securityProfileAnnotation)
+			require.Equal(t, annotations, GetSandbox(t, id, c).Annotations)
+
+			policies := &agentsv1alpha1.TrafficPolicyList{}
+			require.NoError(t, getTestCRClient(controller).List(t.Context(), policies,
+				ctrlclient.InNamespace(Namespace), ctrlclient.MatchingFields{cache.IndexTrafficPolicySandboxID: id}))
+			require.Empty(t, policies.Items)
 		})
 	}
 }

@@ -45,9 +45,10 @@ import (
 // Controller handles sandbox-related operations
 type Controller struct {
 	// E2B API surface
-	maxTimeout int
-	domain     string
-	keyCfg     *keys.Config
+	maxTimeout        int
+	domain            string
+	keyCfg            *keys.Config
+	networkAnnotation bool
 
 	// mgrOpts is handed to the sandbox-manager builder unchanged. It also carries
 	// the system namespace the API handlers fall back to, so it is the single
@@ -91,6 +92,8 @@ type ControllerOptions struct {
 	MaxTimeout int
 	// KeyConfig configures API key storage. Nil disables E2B authentication.
 	KeyConfig *keys.Config
+	// NetworkAnnotation selects Agentio's inline egress policies for new sandboxes.
+	NetworkAnnotation bool
 
 	// Manager is passed to the sandbox-manager builder unchanged.
 	Manager config.SandboxManagerOptions
@@ -108,15 +111,16 @@ type ControllerOptions struct {
 // NewController creates a new E2B Controller from opts.
 func NewController(opts ControllerOptions) *Controller {
 	sc := &Controller{
-		mux:              http.NewServeMux(),
-		domain:           opts.Domain,
-		adapter:          adapters.DefaultAdapterFactory(opts.Port, opts.Manager.BindAddress),
-		maxTimeout:       opts.MaxTimeout,
-		keyCfg:           opts.KeyConfig,
-		mgrOpts:          opts.Manager,
-		runtimeTLSBundle: opts.RuntimeTLSBundle,
-		peerSecurity:     opts.PeerSecurity,
-		configSource:     opts.ConfigSource,
+		mux:               http.NewServeMux(),
+		domain:            opts.Domain,
+		adapter:           adapters.DefaultAdapterFactory(opts.Port, opts.Manager.BindAddress),
+		maxTimeout:        opts.MaxTimeout,
+		keyCfg:            opts.KeyConfig,
+		networkAnnotation: opts.NetworkAnnotation,
+		mgrOpts:           opts.Manager,
+		runtimeTLSBundle:  opts.RuntimeTLSBundle,
+		peerSecurity:      opts.PeerSecurity,
+		configSource:      opts.ConfigSource,
 	}
 
 	sc.server = &http.Server{
