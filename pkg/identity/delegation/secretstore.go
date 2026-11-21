@@ -49,6 +49,30 @@ const (
 	LabelRecordKind         = "identity.agents.kruise.io/record"
 	LabelAgentIdentity      = "identity.agents.kruise.io/agent-identity"
 	LabelCredentialProvider = "identity.agents.kruise.io/credential-provider"
+
+	// LabelSessionNamespace and LabelStateDigest are carried on a session
+	// alone, not a delegation, and exist for one reason: ResolveStateDigest.
+	// Section 6.4 looks a session up "by the digest" of the state a callback
+	// returns, and a callback is explicitly given nothing else - no namespace,
+	// per section 7.5 - so a SessionKey, which needs a namespace to compute
+	// SessionSecretName at all, cannot be assembled from what the callback
+	// has. These labels are the secondary index that lets it be recovered from
+	// the digest alone instead.
+	//
+	// LabelSessionNamespace is the Kubernetes namespace name a session's
+	// SessionKey.Namespace holds, not the Secret's own namespace, which is
+	// always this store's fixed storage location. A Kubernetes namespace name
+	// is a DNS label capped at 63 characters by the API server itself, so,
+	// unlike LabelAgentIdentity and LabelCredentialProvider, it is never run
+	// through safeLabelValue: nothing this store is ever handed can be too
+	// long for a label value in the first place.
+	LabelSessionNamespace = "identity.agents.kruise.io/session-namespace"
+	// LabelStateDigest is the session's own StateDigest, through
+	// safeLabelValue for the same reason every other label here is: a caller
+	// is not required to hand this store an authzcode.StateDigest specifically,
+	// only a string, and nothing stops a future caller from passing something
+	// longer.
+	LabelStateDigest = "identity.agents.kruise.io/state-digest"
 )
 
 // payloadKey is the single Secret data key holding the sealed record.
@@ -326,6 +350,8 @@ func (s *SecretSessionStore) Create(ctx context.Context, session *Session) error
 				LabelRecordKind:         "oauth-session",
 				LabelAgentIdentity:      safeLabelValue(session.AgentIdentity),
 				LabelCredentialProvider: safeLabelValue(session.CredentialProvider),
+				LabelSessionNamespace:   session.Key.Namespace,
+				LabelStateDigest:        safeLabelValue(session.Key.StateDigest),
 			},
 			Annotations: map[string]string{
 				expiresAtAnnotation: session.ExpiresAt.UTC().Format(time.RFC3339),
@@ -343,6 +369,46 @@ func (s *SecretSessionStore) Create(ctx context.Context, session *Session) error
 	session.Status = StatusPending
 	session.Version = secret.ResourceVersion
 	return nil
+}
+
+// ResolveStateDigest finds the SessionKey for a session addressed only by its
+// state digest, with no namespace.
+//
+// This is what the OAuth callback needs: section 7.5 gives it nothing but
+// code, state and error, so by the time it runs, the only thing it can
+// compute from the request is the state's digest, never the namespace half of
+// a SessionKey. Every other method on this store takes a full SessionKey
+// because computing SessionSecretName needs both halves; this is the one way
+// to recover the half the callback was not given. The labels Create writes on
+// every session are what make the lookup possible.
+func (s *SecretSessionStore) ResolveStateDigest(ctx context.Context, digest string) (SessionKey, error) {
+	if digest == "" {
+		return SessionKey{}, fmt.Errorf("delegation: state digest must not be empty")
+	}
+
+	var candidates corev1.SecretList
+	if err := s.client.List(ctx, &candidates, client.InNamespace(s.namespace), client.MatchingLabels{
+		LabelRecordKind:  "oauth-session",
+		LabelStateDigest: safeLabelValue(digest),
+	}); err != nil {
+		return SessionKey{}, fmt.Errorf("delegation: list sessions by state digest: %w", err)
+	}
+
+	switch len(candidates.Items) {
+	case 0:
+		return SessionKey{}, ErrNotFound
+	case 1:
+		namespace := candidates.Items[0].Labels[LabelSessionNamespace]
+		return SessionKey{Namespace: namespace, StateDigest: digest}, nil
+	default:
+		// Two sessions sharing a digest within this one store namespace means
+		// either two different digests collided under safeLabelValue's own
+		// truncation, or - far less likely, given NewState's 256 bits of
+		// entropy - the states themselves collided. Neither is something
+		// picking one of them resolves correctly, so this is reported rather
+		// than guessed at.
+		return SessionKey{}, fmt.Errorf("delegation: %d sessions share state digest %q", len(candidates.Items), digest)
+	}
 }
 
 func (s *SecretSessionStore) Get(ctx context.Context, key SessionKey) (*Session, error) {

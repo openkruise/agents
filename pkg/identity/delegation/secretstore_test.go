@@ -1136,6 +1136,94 @@ func TestExpiresAtAnnotationRoundTrips(t *testing.T) {
 	}
 }
 
+// TestResolveStateDigest covers the lookup the OAuth callback actually has
+// available: a state digest alone, with no namespace, which is what section
+// 7.5 limits a callback request to. Create is what plants the label index
+// this depends on.
+func TestResolveStateDigest(t *testing.T) {
+	sessions, _, _ := newStores(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	original := testSession(now)
+	if err := sessions.Create(ctx, original); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	resolved, err := sessions.ResolveStateDigest(ctx, testSessionKey().StateDigest)
+	if err != nil {
+		t.Fatalf("ResolveStateDigest: %v", err)
+	}
+	if resolved != testSessionKey() {
+		t.Errorf("ResolveStateDigest: got %+v, want %+v", resolved, testSessionKey())
+	}
+
+	// The resolved key must actually work, not just look right: it has to
+	// address the same session every other method on this store would reach
+	// through the full key a caller who already knew the namespace would use.
+	got, err := sessions.Get(ctx, resolved)
+	if err != nil {
+		t.Fatalf("Get with the resolved key: %v", err)
+	}
+	if got.AgentIdentity != original.AgentIdentity || got.CredentialProvider != original.CredentialProvider {
+		t.Error("the session reached through the resolved key is not the one Create stored")
+	}
+}
+
+// TestResolveStateDigestDoesNotConfuseNamespaces covers the reason this
+// exists at all: two different namespaces' sessions must resolve to their own
+// namespace, never each other's, even though the callback that calls this
+// never names one.
+func TestResolveStateDigestDoesNotConfuseNamespaces(t *testing.T) {
+	sessions, _, _ := newStores(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	teamA := testSession(now)
+	teamA.Key = SessionKey{Namespace: "team-a", StateDigest: "state-digest-team-a"}
+	teamB := testSession(now)
+	teamB.Key = SessionKey{Namespace: "team-b", StateDigest: "state-digest-team-b"}
+
+	if err := sessions.Create(ctx, teamA); err != nil {
+		t.Fatalf("Create team-a: %v", err)
+	}
+	if err := sessions.Create(ctx, teamB); err != nil {
+		t.Fatalf("Create team-b: %v", err)
+	}
+
+	gotA, err := sessions.ResolveStateDigest(ctx, "state-digest-team-a")
+	if err != nil {
+		t.Fatalf("ResolveStateDigest team-a: %v", err)
+	}
+	if gotA.Namespace != "team-a" {
+		t.Errorf("team-a resolved to namespace %q", gotA.Namespace)
+	}
+
+	gotB, err := sessions.ResolveStateDigest(ctx, "state-digest-team-b")
+	if err != nil {
+		t.Fatalf("ResolveStateDigest team-b: %v", err)
+	}
+	if gotB.Namespace != "team-b" {
+		t.Errorf("team-b resolved to namespace %q", gotB.Namespace)
+	}
+}
+
+// TestResolveStateDigestRefusesWhatDoesNotExist covers the two ways a lookup
+// can fail to find anything: a digest nothing was ever created under, and an
+// empty one, which validateSessionKey would also reject if it reached a full
+// SessionKey but ResolveStateDigest never constructs one to check.
+func TestResolveStateDigestRefusesWhatDoesNotExist(t *testing.T) {
+	sessions, _, _ := newStores(t)
+	ctx := context.Background()
+
+	if _, err := sessions.ResolveStateDigest(ctx, "a-digest-nothing-was-created-under"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown digest: got %v, want ErrNotFound", err)
+	}
+	if _, err := sessions.ResolveStateDigest(ctx, ""); err == nil {
+		t.Error("an empty digest was accepted")
+	}
+}
+
 // TestGoStringAndJSONRedactSecrets extends the formatting coverage to the two
 // paths String does not reach: %#v, which bypasses the Stringer entirely, and
 // json.Marshal, which would write a secret straight into whatever the caller
