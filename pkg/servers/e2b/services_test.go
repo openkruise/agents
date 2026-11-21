@@ -810,7 +810,7 @@ func TestCreateSandboxAlwaysCreatesAccessToken(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxSkipsAccessTokenWhenInitRuntimeIsSkipped(t *testing.T) {
+func TestCreateSandboxAllocatesAccessTokenWhenInitRuntimeIsSkipped(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
 
@@ -851,10 +851,13 @@ func TestCreateSandboxSkipsAccessTokenWhenInitRuntimeIsSkipped(t *testing.T) {
 			resp, apiError := controller.CreateSandbox(NewRequest(t, nil, body, nil, user))
 			require.Nil(t, apiError)
 			require.NotNil(t, resp.Body)
-			assert.Empty(t, resp.Body.EnvdAccessToken)
+			require.NotEmpty(t, resp.Body.EnvdAccessToken)
+			_, err := uuid.Parse(resp.Body.EnvdAccessToken)
+			require.NoError(t, err)
 
 			sbx := GetSandbox(t, resp.Body.SandboxID, fc)
-			assert.NotContains(t, sbx.Annotations, v1alpha1.AnnotationRuntimeAccessToken)
+			assert.Equal(t, resp.Body.EnvdAccessToken, sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken])
+			assert.NotContains(t, sbx.Annotations, v1alpha1.AnnotationInitRuntimeRequest)
 		})
 	}
 }
