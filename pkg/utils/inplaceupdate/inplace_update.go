@@ -60,7 +60,7 @@ type ErrorClass int
 
 const (
 	InplaceUpdateFailed ErrorClass = iota
-	// InplaceUpdateInvalidPodState indicates a missing template-hash label or an unparseable in-place update state.
+	// InplaceUpdateInvalidPodState indicates a missing template-hash label or an unparsable in-place update state.
 	InplaceUpdateInvalidPodState
 	InplaceUpdateUnsupportedChange
 	// InplaceUpdateResizeRejected indicates rejection before writing, including QoS changes and memory downscaling.

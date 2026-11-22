@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
@@ -112,9 +114,82 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 	})
 
 	AfterEach(func() {
+		if CurrentSpecReport().Failed() && namespace != "" {
+			diagnosticCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			_, _ = fmt.Fprintf(GinkgoWriter, "[claim-failure] collecting diagnostics before deleting namespace %s\n", namespace)
+			sandboxes := &agentsv1alpha1.SandboxList{}
+			if err := k8sClient.List(diagnosticCtx, sandboxes, &client.ListOptions{Namespace: namespace, Limit: 10}); err != nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "[claim-failure] list sandboxes: %v\n", err)
+			} else {
+				for _, sbx := range sandboxes.Items {
+					status, err := json.Marshal(sbx.Status)
+					if err != nil {
+						_, _ = fmt.Fprintf(GinkgoWriter, "[claim-failure] encode sandbox %s status: %v\n", sbx.Name, err)
+						continue
+					}
+					_, _ = fmt.Fprintf(GinkgoWriter, "[claim-failure] sandbox %s generation=%d status=%s\n", sbx.Name, sbx.Generation, status)
+				}
+			}
+			pods := &corev1.PodList{}
+			if err := k8sClient.List(diagnosticCtx, pods, &client.ListOptions{Namespace: namespace, Limit: 10}); err != nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "[claim-failure] list pods: %v\n", err)
+			} else {
+				for _, pod := range pods.Items {
+					status, err := json.Marshal(pod.Status)
+					if err != nil {
+						_, _ = fmt.Fprintf(GinkgoWriter, "[claim-failure] encode pod %s status: %v\n", pod.Name, err)
+						continue
+					}
+					_, _ = fmt.Fprintf(GinkgoWriter, "[claim-failure] pod %s uid=%s restartPolicy=%s templateHash=%s inplaceState=%s status=%s\n",
+						pod.Name, pod.UID, pod.Spec.RestartPolicy, pod.Labels[agentsv1alpha1.PodLabelTemplateHash],
+						pod.Annotations[inplaceupdate.PodAnnotationInPlaceUpdateStateKey], status)
+					for _, container := range pod.Spec.Containers {
+						_, _ = fmt.Fprintf(GinkgoWriter, "[claim-failure] pod %s container %s targetImage=%s\n", pod.Name, container.Name, container.Image)
+					}
+				}
+			}
+			events := &corev1.EventList{}
+			if err := k8sClient.List(diagnosticCtx, events, &client.ListOptions{Namespace: namespace, Limit: 100}); err != nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "[claim-failure] list events: %v\n", err)
+			} else {
+				for _, event := range events.Items {
+					_, _ = fmt.Fprintf(GinkgoWriter, "[claim-failure] event %s/%s type=%s reason=%s count=%d first=%s last=%s eventTime=%s message=%q\n",
+						event.InvolvedObject.Kind, event.InvolvedObject.Name, event.Type, event.Reason, event.Count,
+						event.FirstTimestamp.Time.Format(time.RFC3339), event.LastTimestamp.Time.Format(time.RFC3339),
+						event.EventTime.Time.Format(time.RFC3339), event.Message)
+				}
+			}
+			for _, pod := range pods.Items {
+				statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+				for _, container := range statuses {
+					for _, previous := range []bool{false, true} {
+						if previous && container.RestartCount == 0 {
+							continue
+						}
+						tailLines, limitBytes := int64(100), int64(8192)
+						logCtx, logCancel := context.WithTimeout(diagnosticCtx, 3*time.Second)
+						logs, err := clientset.CoreV1().Pods(namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+							Container: container.Name, Previous: previous, Timestamps: true,
+							TailLines: &tailLines, LimitBytes: &limitBytes,
+						}).DoRaw(logCtx)
+						logCancel()
+						if err != nil {
+							_, _ = fmt.Fprintf(GinkgoWriter, "[claim-failure] pod %s container %s previous=%t logs: %v\n", pod.Name, container.Name, previous, err)
+							continue
+						}
+						_, _ = fmt.Fprintf(GinkgoWriter, "[claim-failure] pod %s container %s previous=%t logs:\n%s\n", pod.Name, container.Name, previous, logs)
+					}
+				}
+			}
+		}
 		ns := &corev1.Namespace{}
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: namespace}, ns); err == nil {
-			_ = k8sClient.Delete(ctx, ns)
+			if err := k8sClient.Delete(ctx, ns); err != nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "delete namespace %s: %v\n", namespace, err)
+			}
+		} else if client.IgnoreNotFound(err) != nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "get namespace %s for cleanup: %v\n", namespace, err)
 		}
 	})
 
