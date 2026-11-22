@@ -3523,6 +3523,48 @@ func TestSandboxReconcile_WithVolumeClaimTemplates(t *testing.T) {
 }
 
 func TestCalculateStatus(t *testing.T) {
+	claimBox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-sandbox", Namespace: "default", Generation: 2},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test", Image: "nginx:v2"}},
+				}},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{UpdateRevision: "old-revision", ObservedGeneration: 1},
+	}
+	claimRevision, _ := core.HashSandbox(claimBox)
+	claimPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{agentsv1alpha1.PodLabelTemplateHash: claimRevision}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	priorClaimStatus := func(reason string) *agentsv1alpha1.SandboxStatus {
+		conditionStatus := metav1.ConditionFalse
+		if reason == agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded {
+			conditionStatus = metav1.ConditionTrue
+		}
+		return &agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning, UpdateRevision: "old-revision", ObservedGeneration: 1,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: conditionStatus, Reason: reason, ObservedGeneration: 1},
+				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxReadyReasonPodReady},
+			},
+		}
+	}
+	expectClaimReset := func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+		require.Equal(t, claimRevision, status.UpdateRevision)
+		require.Nil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate)))
+	}
+	unchangedClaimBox := claimBox.DeepCopy()
+	unchangedClaimBox.Status.UpdateRevision = claimRevision
+	unchangedClaimStatus := priorClaimStatus(agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded)
+	unchangedClaimStatus.UpdateRevision = claimRevision
+	pausingClaimBox := claimBox.DeepCopy()
+	pausingClaimBox.Spec.Paused = true
+	pausingClaimStatus := priorClaimStatus(agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded)
+	pausingClaimStatus.Phase = agentsv1alpha1.SandboxPaused
+
 	tests := []struct {
 		name              string
 		pod               *corev1.Pod
@@ -3533,6 +3575,45 @@ func TestCalculateStatus(t *testing.T) {
 		expectedShouldReq bool
 		checkConditions   func(t *testing.T, status *agentsv1alpha1.SandboxStatus)
 	}{
+		{
+			name: "new claim revision clears previous success even when pod hash already matches",
+			pod:  claimPod, box: claimBox, initStatus: priorClaimStatus(agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded),
+			expectedPhase: agentsv1alpha1.SandboxRunning, checkConditions: expectClaimReset,
+		},
+		{
+			name: "new claim revision clears previous failure",
+			pod:  claimPod, box: claimBox, initStatus: priorClaimStatus(agentsv1alpha1.SandboxInplaceUpdateReasonFailed),
+			expectedPhase: agentsv1alpha1.SandboxRunning, checkConditions: expectClaimReset,
+		},
+		{
+			name: "new claim revision clears previous unsupported resize",
+			pod:  claimPod, box: claimBox, initStatus: priorClaimStatus(agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize),
+			expectedPhase: agentsv1alpha1.SandboxRunning, checkConditions: expectClaimReset,
+		},
+		{
+			name: "generation change without a new revision preserves claim terminal state",
+			pod:  claimPod, box: unchangedClaimBox, initStatus: unchangedClaimStatus,
+			expectedPhase: agentsv1alpha1.SandboxRunning,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+				require.NotNil(t, cond)
+				require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded, cond.Reason)
+				ready := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady))
+				require.NotNil(t, ready)
+				require.Equal(t, metav1.ConditionTrue, ready.Status)
+			},
+		},
+		{
+			name: "pausing claim retains terminal state while retaining old revision",
+			pod:  claimPod, box: pausingClaimBox, initStatus: pausingClaimStatus,
+			expectedPhase: agentsv1alpha1.SandboxPaused,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				require.Equal(t, "old-revision", status.UpdateRevision)
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+				require.NotNil(t, cond)
+				require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded, cond.Reason)
+			},
+		},
 		{
 			name: "empty phase should set to pending",
 			pod:  nil,
@@ -5535,75 +5616,113 @@ func TestReconcile_ScaleExpectationUnsatisfied(t *testing.T) {
 	core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(sandbox))
 }
 
-// TestReconcile_ResourceVersionExpectationUnsatisfied tests the path where ResourceVersionExpectation is not satisfied (L146-152).
-func TestReconcile_ResourceVersionExpectationUnsatisfied(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = agentsv1alpha1.AddToScheme(scheme)
-
-	sandboxUID := types.UID("rv-exp-uid-12345")
-	sandbox := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "rv-exp-sandbox",
-			Namespace: "default",
-			UID:       sandboxUID,
-		},
-		Spec: agentsv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-				Template: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+func TestReconcile_ResourceVersionExpectations(t *testing.T) {
+	tests := []struct {
+		name          string
+		target        string
+		podVersion    string
+		phase         agentsv1alpha1.SandboxPhase
+		metadataOnly  bool
+		recreated     bool
+		timeout       bool
+		expectBlocked bool
+	}{
+		{name: "Sandbox cache stale", target: "sandbox", expectBlocked: true},
+		{name: "Claim Pod cache stale", target: "pod", podVersion: "10", phase: agentsv1alpha1.SandboxRunning, expectBlocked: true},
+		{name: "SUO Pod cache stale", target: "pod", podVersion: "10", phase: agentsv1alpha1.SandboxUpgrading, expectBlocked: true},
+		{name: "metadata-only still respects pending Pod version", target: "pod", podVersion: "10", metadataOnly: true, expectBlocked: true},
+		{name: "Pod cache reaches written version", target: "pod", podVersion: "20"},
+		{name: "Pod cache exceeds written version", target: "pod", podVersion: "21"},
+		{name: "absent Pod does not block", target: "pod"},
+		{name: "new Pod UID does not inherit old expectation", target: "pod", podVersion: "10", recreated: true},
+		{name: "Pod without expectation does not block", podVersion: "10"},
+		{name: "Pod timeout stops current reconcile", target: "pod", podVersion: "10", timeout: true, expectBlocked: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, clientgoscheme.AddToScheme(scheme))
+			require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "rv-exp-sandbox", Namespace: "default", UID: "rv-exp-box-uid", ResourceVersion: "10"},
+				Spec: agentsv1alpha1.SandboxSpec{EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Image: "nginx:2", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")}},
+					}}}},
+				}},
+				Status: agentsv1alpha1.SandboxStatus{Phase: tt.phase},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: box.Name, Namespace: box.Namespace, UID: "rv-exp-pod-uid", ResourceVersion: tt.podVersion,
+					Labels: map[string]string{agentsv1alpha1.PodLabelTemplateHash: "old"}},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:1",
+					Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")}}}}},
+			}
+			if tt.metadataOnly {
+				box.Spec.Template.Spec = *pod.Spec.DeepCopy()
+			}
+			var expected metav1.Object = pod.DeepCopy()
+			if tt.target == "sandbox" {
+				expected = box.DeepCopy()
+			}
+			expected.SetResourceVersion("20")
+			core.ResourceVersionExpectations.Delete(box)
+			core.ResourceVersionExpectations.Delete(pod)
+			core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+			if tt.target != "" {
+				core.ResourceVersionExpectations.Expect(expected)
+			}
+			t.Cleanup(func() {
+				core.ResourceVersionExpectations.Delete(expected)
+				core.ResourceVersionExpectations.Delete(pod)
+				core.ResourceVersionExpectations.Delete(box)
+				core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+			})
+			if tt.recreated {
+				pod.UID = "rv-exp-recreated-pod-uid"
+			}
+			if tt.timeout {
+				originalTimeout := expectations.ExpectationTimeout
+				expectations.ExpectationTimeout = 0
+				t.Cleanup(func() { expectations.ExpectationTimeout = originalTimeout })
+			}
+			writes := 0
+			writeReached := fmt.Errorf("reached business write after cache barrier")
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(box).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+						writes++
+						return writeReached
 					},
-				},
-			},
-		},
+				})
+			if tt.podVersion != "" {
+				builder.WithObjects(pod)
+			}
+			cli := builder.Build()
+			reconciler := &SandboxReconciler{Client: cli, Scheme: scheme, rateLimiter: core.NewRateLimiter()}
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(box)}
+			result, err := reconciler.Reconcile(t.Context(), req)
+			if !tt.expectBlocked {
+				require.ErrorIs(t, err, writeReached)
+				require.Equal(t, 1, writes)
+				return
+			}
+			require.NoError(t, err)
+			require.Zero(t, writes, "do not write the Pod or Sandbox status while the cache is stale")
+			require.Positive(t, result.RequeueAfter)
+			if tt.timeout {
+				require.Equal(t, staleCacheRequeueInterval, result.RequeueAfter)
+				isSatisfied, _ := core.ResourceVersionExpectations.IsSatisfied(pod)
+				require.True(t, isSatisfied)
+				return
+			}
+			// Re-entering with the same stale cache must wait without delivering the same target again.
+			result, err = reconciler.Reconcile(t.Context(), req)
+			require.NoError(t, err)
+			require.Positive(t, result.RequeueAfter)
+			require.Zero(t, writes)
+		})
 	}
-
-	fakeRecorder := record.NewFakeRecorder(100)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(sandbox).Build()
-	rl := core.NewRateLimiter()
-	reconciler := &SandboxReconciler{
-		Client: fakeClient,
-		Scheme: scheme,
-		controls: core.NewSandboxControl(core.SandboxControlArgs{
-			Client:      fakeClient,
-			Recorder:    fakeRecorder,
-			RateLimiter: rl,
-			PodControl:  core.NewPodControl(fakeClient, fakeRecorder, core.GeneratePodFromSandbox),
-		}),
-		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
-		rateLimiter:       rl,
-	}
-
-	// Create a fake object with the same UID but a much higher resource version
-	fakeObj := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "rv-exp-sandbox",
-			Namespace:       "default",
-			UID:             sandboxUID,
-			ResourceVersion: "999999",
-		},
-	}
-	core.ResourceVersionExpectations.Expect(fakeObj)
-
-	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      sandbox.Name,
-			Namespace: sandbox.Namespace,
-		},
-	}
-
-	result, err := reconciler.Reconcile(context.Background(), req)
-	if err != nil {
-		t.Errorf("Reconcile() unexpected error: %v", err)
-	}
-	// Should requeue with a duration because ResourceVersion expectation is not satisfied
-	if result.RequeueAfter <= 0 {
-		t.Errorf("Expected RequeueAfter > 0 for unsatisfied ResourceVersionExpectation, got %v", result.RequeueAfter)
-	}
-
-	// Clean up
-	core.ResourceVersionExpectations.Delete(fakeObj)
 }
 
 // TestReconcile_ScaleExpectationTimeout tests the path where ScaleExpectation is unsatisfied overtime (L146-147).
@@ -5987,15 +6106,16 @@ func TestReconcile_ErrorPath_UpdatesSandboxStatus(t *testing.T) {
 		t.Error("Expected at least one Pod patch attempt")
 	}
 	// The error branch must persist the update state, not just return the
-	// error: the claim adapter records the write failure on the InplaceUpdate
-	// condition and keeps Ready closed until the retried write succeeds.
+	// error: the claim adapter keeps the write failure non-terminal
+	// (InplaceUpdating with a stable message) and keeps Ready closed until the
+	// retried write succeeds.
 	stored := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, fakeClient.Get(t.Context(), req.NamespacedName, stored))
 	cond := utils.GetSandboxCondition(&stored.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 	require.NotNil(t, cond)
 	require.Equal(t, metav1.ConditionFalse, cond.Status)
-	require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonFailed, cond.Reason)
-	require.Contains(t, cond.Message, "simulated pod patch failure")
+	require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, cond.Reason)
+	require.Equal(t, "cannot deliver in-place update: unexpected error (see controller logs for details)", cond.Message)
 	ready := utils.GetSandboxCondition(&stored.Status, string(agentsv1alpha1.SandboxConditionReady))
 	require.NotNil(t, ready)
 	require.Equal(t, metav1.ConditionFalse, ready.Status)

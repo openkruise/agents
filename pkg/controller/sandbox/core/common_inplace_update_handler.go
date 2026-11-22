@@ -27,188 +27,145 @@ import (
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/klog/v2"
 )
 
-// 共享引擎处理 Pod 更新并观察完成状态；不读取或写入 Sandbox Condition。
-// 事件、终态策略和最终 Ready 由调用方处理，错误分类本身不代表旧 Pod 健康。
-type inplaceErrorClass int
-
-const (
-	inplaceClassUpdateFailed inplaceErrorClass = iota
-	inplaceClassUntrackedPod
-	inplaceClassUnsupportedChange
-	inplaceClassQoSRejected
-	inplaceClassStateCorrupted
-)
-
-// inplaceUpdateError is the single error type the engine returns for
-// classified step failures: a class for dispatch plus a message for humans.
-// The underlying cause, when there is one, stays reachable through Unwrap
-// and is what requeuing branches hand back to the reconciler.
-type inplaceUpdateError struct {
-	Class inplaceErrorClass
-	Cause error
-	msg   string
-}
-
-func (e *inplaceUpdateError) Error() string {
-	switch {
-	case e.msg != "" && e.Cause != nil:
-		return e.msg + ": " + e.Cause.Error()
-	case e.msg != "":
-		return e.msg
-	case e.Cause != nil:
-		return e.Cause.Error()
-	}
-	return "in-place update failed"
-}
-
-func (e *inplaceUpdateError) Unwrap() error { return e.Cause }
-
-// newInplaceError builds a classified failure with a fixed message.
-func newInplaceError(class inplaceErrorClass, msg string) *inplaceUpdateError {
-	return &inplaceUpdateError{Class: class, msg: msg}
-}
-
-// wrapInplaceError builds a classified failure around an underlying cause;
-// prefix may be empty when the cause message stands on its own.
-func wrapInplaceError(class inplaceErrorClass, prefix string, cause error) *inplaceUpdateError {
-	return &inplaceUpdateError{Class: class, msg: prefix, Cause: cause}
-}
-
-// Unclassified errors also fall under UpdateFailed, keeping the original cause
-// for the caller to decide how to handle it.
-func classifyInplaceError(err error) inplaceErrorClass {
-	var ie *inplaceUpdateError
-	if errors.As(err, &ie) {
-		return ie.Class
-	}
-	return inplaceClassUpdateFailed
-}
+// The shared engine updates Pods and observes completion without accessing Sandbox conditions.
+// inplaceupdate classifies errors; callers own events, terminal failure policy, and final readiness.
+// The engine emits MemoryDownscaleSkipped directly as the sole exception.
 
 // inplaceUnderlyingError removes the engine's classification wrapper when a
 // legacy adapter must preserve the underlying error text in a Condition.
 func inplaceUnderlyingError(err error) error {
-	var ie *inplaceUpdateError
+	var ie *inplaceupdate.Error
 	if errors.As(err, &ie) && ie.Cause != nil {
 		return ie.Cause
 	}
 	return err
 }
 
-// Claim 与 SUO 原地 adapter 使用此分类映射终态；重建保留原有错误处理。
+// isTerminalInplaceError classifies write errors for the SUO in-place adapter.
 func isTerminalInplaceError(err error) bool {
-	if classifyInplaceError(err) != inplaceClassUpdateFailed {
+	if inplaceupdate.ClassifyError(err) != inplaceupdate.InplaceUpdateFailed {
 		return true
 	}
 	var resizeErr *inplaceupdate.ResizeNotSupportedError
-	var applyErr *inplaceupdate.ResizeInfeasibleError
-	return errors.As(err, &resizeErr) || errors.As(err, &applyErr) ||
+	return errors.As(err, &resizeErr) ||
 		apierrors.IsForbidden(err) ||
 		apierrors.IsUnauthorized(err) || apierrors.IsInvalid(err) ||
 		apierrors.IsBadRequest(err) || apierrors.IsMethodNotSupported(err)
 }
 
-func isUnsupportedResizeError(err error) bool {
-	var resizeErr *inplaceupdate.ResizeNotSupportedError
-	return errors.As(err, &resizeErr)
-}
-
-// error 非空时 step 仍有效；Succeeded 表示完成观察通过或 metadata 快速路径完成，
-// 不代表 Pod Ready。部分写入重试误入快速路径的问题仍按 proposal 暂缓修复。
+// The step remains valid with a non-nil error; Succeeded means observation passed or no write was needed, not Pod Ready.
 type inplaceUpdateStepResult int
 
 const (
-	// Pre-check failed or the current update is not yet complete; this write has
-	// not been issued yet.
+	// The update has not completed, including write or observation failures.
+	// Failure and retry policy are determined by the accompanying error.
 	inplaceUpdateStepInProgress inplaceUpdateStepResult = iota
-	// A write has been attempted or is waiting to take effect, including write
-	// failures and partially successful writes.
-	inplaceUpdateStepPatchDelivered
+	// Completion observation passed or nothing needed writing; this does not
+	// imply Pod Ready.
 	inplaceUpdateStepSucceeded
+	// Validation, the resize pre-check, or completion observation reported a
+	// terminal failure for the current update round; the accompanying error
+	// describes the cause.
+	inplaceUpdateStepFailed
 )
 
 // The QoS pre-check is deliberately not part of validation: it only guards a
 // write, so it runs immediately before the update is attempted.
 func validateInplaceUpdate(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (*inplaceupdate.InPlaceUpdateState, error) {
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == "" {
-		return nil, newInplaceError(inplaceClassUntrackedPod, "pod has no template-hash label and does not support in-place update")
+		return nil, inplaceupdate.NewError(inplaceupdate.InplaceUpdateInvalidPodState, "pod has no template-hash label and does not support in-place update", nil)
 	}
 	_, immutable := HashSandbox(box)
 	if recorded := box.Annotations[agentsv1alpha1.SandboxHashImmutablePart]; recorded != "" && recorded != immutable {
-		return nil, newInplaceError(inplaceClassUnsupportedChange, "in-place update only supports changing container images, resources and template metadata")
+		return nil, inplaceupdate.NewError(inplaceupdate.InplaceUpdateUnsupportedChange, "in-place update only supports changing container images, resources and template metadata", nil)
 	}
 	state, err := inplaceupdate.GetPodInPlaceUpdateState(pod)
 	if err != nil {
-		return nil, wrapInplaceError(inplaceClassStateCorrupted, "cannot determine in-place update progress", err)
+		return nil, inplaceupdate.NewError(inplaceupdate.InplaceUpdateInvalidPodState, "cannot determine in-place update progress", err)
 	}
 	return state, nil
 }
 
-// Configuration taking effect and final Ready are judged separately; the wait
-// diagnostics are produced by the adapter based on Pod status.
-func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPlaceUpdateControl,
+// Configuration completion and final readiness are checked separately; callers handle status using the shared step and error.
+// Successful writes update the caller-owned pod with the response for readiness checks, status synchronization, and wait diagnostics.
+func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPlaceUpdateControl, recorder record.EventRecorder,
 	pod *corev1.Pod, box *agentsv1alpha1.Sandbox, targetRevision string,
 ) (inplaceUpdateStepResult, error) {
-	if err := ctx.Err(); err != nil {
-		return inplaceUpdateStepInProgress, wrapInplaceError(inplaceClassUpdateFailed, "update cancelled", err)
-	}
-
+	// Check that the pod has a template-hash label, the sandbox's recorded
+	// immutable template hash (if present) matches the current template, and
+	// any existing pod in-place update state annotation can be parsed.
 	state, err := validateInplaceUpdate(pod, box)
 	if err != nil {
-		return inplaceUpdateStepInProgress, err
+		return inplaceUpdateStepFailed, err
 	}
 
-	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == targetRevision {
-		return observeInplaceUpdate(ctx, pod, state)
-	}
-
-	// An earlier round may still be recorded on the pod. The latest target
-	// supersedes it for both Claim and SUO. Keep track of pending state only so
-	// metadata delivery cannot report success before the replacement target has
-	// taken effect.
-	previousPending := false
-	if state != nil {
-		completed, completedErr := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod, state)
-		previousPending = !completed || completedErr != nil
-	}
-
-	metadataOnly := isMetadataOnlyChange(pod, box)
-	if !metadataOnly {
-		if orig, target, changed := inplaceupdate.CheckResizeQoSChange(box, pod); changed {
-			return inplaceUpdateStepInProgress, newInplaceError(inplaceClassQoSRejected,
-				fmt.Sprintf("resource resize would change QoS class from %s to %s, resize rejected", orig, target))
+	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != targetRevision {
+		logger := klog.FromContext(ctx)
+		opts := inplaceupdate.InPlaceUpdateOptions{
+			Pod:      pod,
+			Box:      box,
+			Revision: targetRevision,
+		}
+		// Memory downscale is rejected at the claim write path (SetResources) and
+		// at claim admission; here we only surface an advisory event. A hard
+		// failure would misclassify pods whose memory was raised by the
+		// environment (LimitRange minimums, admission webhooks, VPA actuation) as
+		// downscales and permanently block unrelated image/metadata rollouts.
+		if downscaleErr := inplaceupdate.CheckMemoryDownscale(box, pod); downscaleErr != nil {
+			logger.Info("skipping memory downscale", "sandbox", klog.KObj(box), "reason", downscaleErr.Error())
+			if recorder != nil {
+				recorder.Eventf(box, corev1.EventTypeWarning, "MemoryDownscaleSkipped", "%s", downscaleErr.Error())
+			}
+		}
+		metadataOnly := isMetadataOnlyChange(pod, box)
+		if metadataOnly {
+			logger.Info("metadata-only change detected, patching pod metadata directly", "sandbox", klog.KObj(box))
+		}
+		// The QoS guard only protects a resize, so it is skipped when the
+		// template resources are already satisfied (e.g. a metadata-only change).
+		if len(inplaceupdate.DefaultBuildResizeContainers(opts)) > 0 {
+			if orig, target, changed := inplaceupdate.CheckResizeQoSChange(box, pod); changed {
+				return inplaceUpdateStepFailed, inplaceupdate.NewError(inplaceupdate.InplaceUpdateResizeRejected,
+					fmt.Sprintf("resource resize would change QoS class from %s to %s, resize rejected", orig, target), nil)
+			}
+		}
+		// The latest target supersedes any earlier round still recorded on the pod.
+		patchCtx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerPatchPod)
+		patched, err := control.Update(patchCtx, opts)
+		tracing.EndSpan(patchCtx, span, err)
+		if err != nil {
+			return inplaceUpdateStepInProgress, inplaceupdate.NewError(inplaceupdate.InplaceUpdateFailed, "cannot deliver in-place update", err)
+		}
+		// Nothing needed writing: the pod already matches the target, so there is
+		// no later observation to wait for.
+		if patched == nil {
+			return inplaceUpdateStepSucceeded, nil
+		}
+		// Register the final written version based on this update's intent, not prior state retained by a metadata-only update.
+		if !metadataOnly {
+			ResourceVersionExpectations.Expect(patched)
+		}
+		// Observe the delivered pod with the same check used once the hash
+		// matches. A metadata-only write keeps the state of an earlier round, so
+		// an unfinished resize still reports InProgress.
+		patched.DeepCopyInto(pod)
+		if state, err = inplaceupdate.GetPodInPlaceUpdateState(pod); err != nil {
+			return inplaceUpdateStepFailed, inplaceupdate.NewError(inplaceupdate.InplaceUpdateInvalidPodState, "cannot determine in-place update progress", err)
 		}
 	}
-	// 直接下发新目标，保留现有底层更新模式及 metadata 快速路径。
-	opts := inplaceupdate.InPlaceUpdateOptions{
-		Pod:      pod,
-		Box:      box,
-		Revision: targetRevision,
-	}
-	patchCtx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerPatchPod)
-	changed, err := control.Update(patchCtx, opts)
-	tracing.EndSpan(patchCtx, span, err)
-	if err != nil {
-		return inplaceUpdateStepPatchDelivered, wrapInplaceError(inplaceClassUpdateFailed, "cannot deliver in-place update", err)
-	}
-	// Nothing needed writing: the pod already matches the target, so there is
-	// no later observation to wait for.
-	if !changed || (metadataOnly && !previousPending) {
-		return inplaceUpdateStepSucceeded, nil
-	}
-	return inplaceUpdateStepPatchDelivered, nil
-}
 
-func observeInplaceUpdate(ctx context.Context, pod *corev1.Pod, state *inplaceupdate.InPlaceUpdateState) (inplaceUpdateStepResult, error) {
 	completed, err := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod, state)
 	if err != nil {
-		return inplaceUpdateStepPatchDelivered, wrapInplaceError(inplaceClassUpdateFailed, "in-place pod update failed", err)
+		return inplaceUpdateStepFailed, err
 	}
 	if completed {
 		return inplaceUpdateStepSucceeded, nil
 	}
-	return inplaceUpdateStepPatchDelivered, nil
+	return inplaceUpdateStepInProgress, nil
 }
 
 // describeInplaceWaitReason reports, from pod status facts only, why an

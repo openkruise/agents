@@ -19,6 +19,7 @@ package inplaceupdate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync/atomic"
 
@@ -54,11 +55,56 @@ func (e *ResizeNotSupportedError) Unwrap() error {
 	return e.Err
 }
 
-// ResizeInfeasibleError preserves the structured fact that resources cannot be realized,
-// so callers can classify it without parsing Message.
-type ResizeInfeasibleError struct{ Message string }
+// ErrorClass identifies the cause of an in-place update failure; callers own terminal policy and readiness.
+type ErrorClass int
 
-func (e *ResizeInfeasibleError) Error() string { return e.Message }
+const (
+	InplaceUpdateFailed ErrorClass = iota
+	// InplaceUpdateInvalidPodState indicates a missing template-hash label or an unparseable in-place update state.
+	InplaceUpdateInvalidPodState
+	InplaceUpdateUnsupportedChange
+	// InplaceUpdateResizeRejected indicates rejection before writing, including QoS changes and memory downscaling.
+	InplaceUpdateResizeRejected
+	// InplaceUpdateResizeFailed indicates that kubelet cannot apply a resize, including Infeasible, Deferred, and Error.
+	InplaceUpdateResizeFailed
+)
+
+// Error carries the classification, message, and underlying cause of an in-place update failure.
+// The underlying cause is accessible through Unwrap, errors.Is, and errors.As.
+type Error struct {
+	Class ErrorClass
+	Cause error
+	msg   string
+}
+
+func (e *Error) Error() string {
+	switch {
+	case e.msg != "" && e.Cause != nil:
+		return e.msg + ": " + e.Cause.Error()
+	case e.msg != "":
+		return e.msg
+	case e.Cause != nil:
+		return e.Cause.Error()
+	}
+	return "in-place update failed"
+}
+
+func (e *Error) Unwrap() error { return e.Cause }
+
+// NewError creates a classified error; cause is nil when there is no underlying cause.
+// An empty msg preserves the underlying cause's original message.
+func NewError(class ErrorClass, msg string, cause error) *Error {
+	return &Error{Class: class, msg: msg, Cause: cause}
+}
+
+// ClassifyError extracts the classification; callers handle unclassified errors as InplaceUpdateFailed.
+func ClassifyError(err error) ErrorClass {
+	var ie *Error
+	if errors.As(err, &ie) {
+		return ie.Class
+	}
+	return InplaceUpdateFailed
+}
 
 const (
 	// PodAnnotationInPlaceUpdateStateKey records the state of inplace-update.
@@ -165,10 +211,10 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) (string, error) {
 		obj := box.Spec.Template.Spec.Containers[i]
 		originContainers[obj.Name] = obj
 	}
-	// container.name -> imageId
-	originStatus := map[string]string{}
+	// Container status records new image baselines and preserves unfinished observations of earlier image updates.
+	originStatus := map[string]corev1.ContainerStatus{}
 	for _, status := range pod.Status.ContainerStatuses {
-		originStatus[status.Name] = status.ImageID
+		originStatus[status.Name] = status
 	}
 
 	if box.Spec.Template != nil {
@@ -201,12 +247,34 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) (string, error) {
 		patchSpec.Containers = append(patchSpec.Containers, patchContainer)
 		state.UpdateImages = true
 		state.LastContainerStatuses[container.Name] = InPlaceUpdateContainerStatus{
-			ImageID:     originStatus[container.Name],
+			ImageID:     originStatus[container.Name].ImageID,
 			TargetImage: origin.Image,
 		}
 	}
 	annotationsPatch := map[string]string{}
 	if state.UpdateImages || state.UpdateResources {
+		previous, err := GetPodInPlaceUpdateState(pod)
+		if err != nil {
+			return "", err
+		}
+		// A new target replaces only observations rewritten in this round; retain other unapplied changes in the new state.
+		if previous != nil {
+			if previous.UpdateResources && !isPodResourceResizeCompleted(pod) {
+				state.UpdateResources = true
+			}
+			if previous.UpdateImages {
+				for name, before := range previous.LastContainerStatuses {
+					if _, replaced := state.LastContainerStatuses[name]; replaced {
+						continue
+					}
+					current, found := originStatus[name]
+					if !found || !isContainerImageUpdateCompleted(current, before) {
+						state.LastContainerStatuses[name] = before
+						state.UpdateImages = true
+					}
+				}
+			}
+		}
 		annotationsPatch[PodAnnotationInPlaceUpdateStateKey] = utils.DumpJson(state)
 	}
 	for k, v := range extensionAnnotations {
@@ -457,15 +525,14 @@ func computeQoSClass(pod *corev1.Pod) corev1.PodQOSClass {
 	return corev1.PodQOSBurstable
 }
 
-func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOptions) (bool, error) {
+// Update delivers the target to the pod and returns the pod as last written, so
+// the caller can observe completion against what was actually delivered. It
+// returns nil when nothing needed writing.
+func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOptions) (*corev1.Pod, error) {
 	box, pod, revision := opts.Box, opts.Pod, opts.Revision
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 
 	current := pod.DeepCopy()
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-
 	// Step 1: perform resize (resource adjustment)
 	resizeContainers := c.buildResizeContainers(InPlaceUpdateOptions{
 		Box: box,
@@ -474,9 +541,6 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 	resourceUpdateRequired := len(resizeContainers) > 0
 	if len(resizeContainers) > 0 {
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
 			err := c.resizeContainers(ctx, logger, current, resizeContainers)
 			if !apierrors.IsConflict(err) {
 				return err
@@ -497,33 +561,31 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 			logger.V(5).Info("inplace update pod resize conflict, retrying with latest resourceVersion", "resourceVersion", current.ResourceVersion)
 			return err
 		}); err != nil {
-			return false, err
+			return nil, err
 		}
-	}
-	if err := ctx.Err(); err != nil {
-		return false, err
 	}
 
 	// Step 2: perform patch (image + metadata finalization)
 	patchOpts := opts
 	patchOpts.Pod = current
-	patchOpts.ResourceUpdateRequired = resourceUpdateRequired
+	// After a successful resize but a failed state write, retries have no resource write diff; restore resource observation nonetheless.
+	patchOpts.ResourceUpdateRequired = resourceUpdateRequired || hasPendingResourceResize(current)
 	patchBody, err := c.generatePatchBody(patchOpts)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if patchBody != "" {
 		if err := c.Patch(ctx, current, client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
 			logger.Error(err, "inplace update pod patch failed")
-			return false, err
+			return nil, err
 		}
 	}
 
 	if patchBody == "" && len(resizeContainers) == 0 {
-		return false, nil
+		return nil, nil
 	}
 	logger.Info("inplace update pod success", "revision", revision, "patchBody", patchBody, "hasResizeContainers", len(resizeContainers) > 0)
-	return true, nil
+	return current, nil
 }
 
 // resizeContainers applies a resource resize to the pod. It patches the pods/resize subresource
@@ -570,6 +632,10 @@ func (c *InPlaceUpdateControl) patchPodResources(ctx context.Context, logger klo
 func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod, state *InPlaceUpdateState) (bool, error) {
 	logger := logf.FromContext(ctx).WithValues("pod", klog.KObj(pod))
 
+	// State may be nil for new pods already at the target revision or metadata-only
+	// updates without prior in-place state. No image or resource update needs to be
+	// observed; this does not imply Pod Ready. Annotation parse errors are handled
+	// by the caller before checking completion.
 	if state == nil {
 		return true, nil
 	}
@@ -594,20 +660,18 @@ func isPodImageUpdateCompleted(pod *corev1.Pod, state *InPlaceUpdateState) bool 
 	}
 	for name, previous := range state.LastContainerStatuses {
 		current, ok := statuses[name]
-		if !ok {
-			return false
-		}
-		if previous.TargetImage != "" {
-			if current.State.Running == nil || !sameImageReference(current.Image, previous.TargetImage) {
-				return false
-			}
-			continue
-		}
-		if current.ImageID == previous.ImageID {
+		if !ok || !isContainerImageUpdateCompleted(current, previous) {
 			return false
 		}
 	}
 	return true
+}
+
+func isContainerImageUpdateCompleted(current corev1.ContainerStatus, previous InPlaceUpdateContainerStatus) bool {
+	if previous.TargetImage != "" {
+		return current.State.Running != nil && sameImageReference(current.Image, previous.TargetImage)
+	}
+	return current.ImageID != previous.ImageID
 }
 
 func sameImageReference(a, b string) bool {
@@ -641,10 +705,31 @@ func isPodResourceResizeCompleted(pod *corev1.Pod) bool {
 	return true
 }
 
-func checkPodResizeInfeasible(pod *corev1.Pod) error {
-	failure := func(message string) error {
-		return &ResizeInfeasibleError{Message: message}
+// hasPendingResourceResize restores resource observation from kubelet status when state is missing.
+// Missing Resources alone does not imply a resize; avoid blocking metadata-only updates when resource status reporting is unsupported.
+func hasPendingResourceResize(pod *corev1.Pod) bool {
+	if isPodResourceResizeCompleted(pod) {
+		return false
 	}
+	if pod.Status.Resize != "" {
+		return true
+	}
+	for _, cond := range pod.Status.Conditions {
+		if cond.Status == corev1.ConditionTrue && (cond.Type == corev1.PodResizePending || cond.Type == corev1.PodResizeInProgress) {
+			return true
+		}
+	}
+	for _, container := range pod.Spec.Containers {
+		for _, status := range pod.Status.ContainerStatuses {
+			if status.Name == container.Name && status.Resources != nil && !IsResourceSatisfied(container.Resources, *status.Resources) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func checkPodResizeInfeasible(pod *corev1.Pod) error {
 	for _, cond := range pod.Status.Conditions {
 		if cond.Status != corev1.ConditionTrue {
 			continue
@@ -652,24 +737,24 @@ func checkPodResizeInfeasible(pod *corev1.Pod) error {
 		switch cond.Type {
 		case corev1.PodResizePending:
 			if cond.Reason == corev1.PodReasonInfeasible {
-				return failure(fmt.Sprintf("pod resize is infeasible: %s", cond.Message))
+				return NewError(InplaceUpdateResizeFailed, fmt.Sprintf("pod resize is infeasible: %s", cond.Message), nil)
 			}
 			if cond.Reason == corev1.PodReasonDeferred {
-				return failure(fmt.Sprintf("pod resize is deferred: %s", cond.Message))
+				return NewError(InplaceUpdateResizeFailed, fmt.Sprintf("pod resize is deferred: %s", cond.Message), nil)
 			}
 		case corev1.PodResizeInProgress:
 			if cond.Reason == corev1.PodReasonError {
-				return failure(fmt.Sprintf("pod resize error: %s", cond.Message))
+				return NewError(InplaceUpdateResizeFailed, fmt.Sprintf("pod resize error: %s", cond.Message), nil)
 			}
 		}
 	}
 	// Fallback compatibility check for older clusters (K8s 1.27-1.32) that still rely on the
 	// deprecated pod.Status.Resize field.
 	if pod.Status.Resize == corev1.PodResizeStatusInfeasible {
-		return failure("pod resize is infeasible (status.resize)")
+		return NewError(InplaceUpdateResizeFailed, "pod resize is infeasible (status.resize)", nil)
 	}
 	if pod.Status.Resize == corev1.PodResizeStatusDeferred {
-		return failure("pod resize is deferred (status.resize)")
+		return NewError(InplaceUpdateResizeFailed, "pod resize is deferred (status.resize)", nil)
 	}
 	return nil
 }

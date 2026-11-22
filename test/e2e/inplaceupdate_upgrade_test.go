@@ -272,6 +272,9 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
 			waitSandboxRunning(sbx)
 
+			originalPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, originalPod)).To(Succeed())
+
 			By("Creating SandboxUpdateOps with InplaceUpdate strategy to update image")
 			ops := newInplaceOps(
 				fmt.Sprintf("ops-inplace-img-%d", time.Now().UnixNano()),
@@ -293,9 +296,8 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 			By("Verifying pod image was updated in place (same pod name)")
 			waitPodImage(sbx, updateImage, 2*time.Minute)
 
-			By("Verifying pod was not recreated (same creation timestamp)")
-			pod := &corev1.Pod{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
+			By("Verifying that the Pod with the same UID actually runs the target image")
+			pod := waitInplacePodObserved(ctx, sbx, originalPod.UID, map[string]string{"test-container": updateImage}, nil)
 			Expect(pod.Status.Phase).To(Equal(corev1.PodRunning))
 		})
 
@@ -309,6 +311,9 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 			}
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
 			waitSandboxRunning(sbx)
+
+			originalPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, originalPod)).To(Succeed())
 
 			By("Creating SandboxUpdateOps to update image + resize CPU to 1/1 (still Burstable)")
 			ops := newInplaceOps(
@@ -331,22 +336,131 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 				return sbx.Status.Phase
 			}, 2*time.Minute, time.Second).Should(Equal(agentsv1alpha1.SandboxRunning))
 
-			By("Verifying pod image and CPU were updated in place")
-			pod := &corev1.Pod{}
-			Eventually(func() bool {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod); err != nil {
-					return false
-				}
-				if len(pod.Spec.Containers) == 0 || pod.Spec.Containers[0].Image != updateImage {
-					return false
-				}
-				req := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
-				lim := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
-				return req.MilliValue() == 1000 && lim.MilliValue() == 1000
-			}, 2*time.Minute, time.Second).Should(BeTrue())
+			By("Verifying that kubelet applied the image and CPU changes without recreating the Pod")
+			pod := waitInplacePodObserved(ctx, sbx, originalPod.UID,
+				map[string]string{"test-container": updateImage},
+				map[string]corev1.ResourceRequirements{"test-container": {
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+				}})
 
 			By("Verifying QoS class remains Burstable")
 			Expect(pod.Status.QOSClass).To(Equal(corev1.PodQOSBurstable))
+		})
+
+		It("should complete successive SUO image, resource, and metadata upgrades on the same Pod", func() {
+			labelValue := fmt.Sprintf("inplace-rounds-%d", time.Now().UnixNano())
+			sbx := newInplaceSandbox(labelValue, labelValue)
+			initialResources := corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+			}
+			targetResources := corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+			}
+			sbx.Spec.Template.Spec.Containers[0].Resources = initialResources
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
+			uid := pod.UID
+			rounds := []struct {
+				name      string
+				patch     runtime.RawExtension
+				resources corev1.ResourceRequirements
+			}{
+				{"image", patchImage(updateImage), initialResources},
+				{"resources", patchImageAndResources(updateImage, targetResources.Requests, targetResources.Limits), targetResources},
+				{"metadata", mustMarshalPatch(corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{"e2e-suo-round": "metadata"},
+				}}), targetResources},
+			}
+			for _, round := range rounds {
+				By("Starting the next SUO after the previous round completes: " + round.name)
+				ops := newInplaceOps(fmt.Sprintf("ops-round-%s-%d", round.name, time.Now().UnixNano()), labelValue,
+					agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate, round.patch)
+				Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+				waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, 5*time.Minute)
+				Expect(ops.Status.UpdatedReplicas).To(Equal(int32(1)))
+				Expect(ops.Status.FailedReplicas).To(BeZero())
+				waitSandboxRunning(sbx)
+				pod = waitInplacePodObserved(ctx, sbx, uid, map[string]string{"test-container": updateImage},
+					map[string]corev1.ResourceRequirements{"test-container": round.resources})
+				Expect(pod.Status.QOSClass).To(Equal(corev1.PodQOSBurstable))
+			}
+			Expect(pod.Annotations["e2e-suo-round"]).To(Equal("metadata"))
+		})
+
+		It("should complete an in-place upgrade with PreUpgrade/PostUpgrade on the same Pod", func() {
+			labelValue := fmt.Sprintf("inplace-hooks-ok-%d", time.Now().UnixNano())
+			sbx := newInplaceSandbox(labelValue, labelValue)
+			// emptyDir survives an in-place upgrade: PreUpgrade writes a marker and PostUpgrade checks it,
+			// verifying hook execution order and that the Pod was not replaced.
+			sbx.Spec.Template.Spec.Volumes = append(sbx.Spec.Template.Spec.Volumes, corev1.Volume{
+				Name:         "upgrade-marker",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			})
+			sbx.Spec.Template.Spec.Containers[0].VolumeMounts = append(sbx.Spec.Template.Spec.Containers[0].VolumeMounts,
+				corev1.VolumeMount{Name: "upgrade-marker", MountPath: "/mnt/upgrade-marker"})
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+
+			originalPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, originalPod)).To(Succeed())
+
+			By("Creating an InplaceUpdate SUO with upgrade hooks to update the image")
+			ops := newInplaceOps(
+				fmt.Sprintf("ops-inplace-hooks-%d", time.Now().UnixNano()),
+				labelValue,
+				agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+				patchImage(updateImage),
+			)
+			ops.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{
+				PreUpgrade: &agentsv1alpha1.UpgradeAction{
+					Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "touch /mnt/upgrade-marker/pre-done"}},
+					TimeoutSeconds: 30,
+				},
+				PostUpgrade: &agentsv1alpha1.UpgradeAction{
+					Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "test -f /mnt/upgrade-marker/pre-done"}},
+					TimeoutSeconds: 30,
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+
+			By("Waiting for SUO completion")
+			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, 5*time.Minute)
+			Expect(ops.Status.UpdatedReplicas).To(Equal(int32(1)))
+			Expect(ops.Status.FailedReplicas).To(BeZero())
+
+			By("Verifying that the Sandbox returns to Running with Upgrading=Succeeded and Ready=True")
+			waitSandboxRunning(sbx)
+			upgradeCond := getUpgradingCondition(sbx)
+			Expect(upgradeCond).NotTo(BeNil())
+			Expect(upgradeCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(upgradeCond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonSucceeded))
+			var readyCond *metav1.Condition
+			for i := range sbx.Status.Conditions {
+				if sbx.Status.Conditions[i].Type == string(agentsv1alpha1.SandboxConditionReady) {
+					readyCond = &sbx.Status.Conditions[i]
+				}
+			}
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+
+			By("Verifying that the Pod with the same UID actually runs the target image and SandboxIp matches the Pod IP")
+			pod := waitInplacePodObserved(ctx, sbx, originalPod.UID, map[string]string{"test-container": updateImage}, nil)
+			Expect(sbx.Status.SandboxIp).To(Equal(pod.Status.PodIP))
+
+			By("Verifying in-place update and upgrade success events without replacement or hook failure events")
+			Eventually(func(g Gomega) {
+				reasons := sandboxEventReasons(ctx, g, sbx)
+				g.Expect(reasons).To(HaveKey("UpgradePodInplaceUpdate"))
+				g.Expect(reasons).To(HaveKey("UpgradeSucceeded"))
+				g.Expect(reasons).NotTo(HaveKey("UpgradePodReplaced"))
+				g.Expect(reasons).NotTo(HaveKey("PreUpgradeFailed"))
+				g.Expect(reasons).NotTo(HaveKey("PostUpgradeFailed"))
+			}, 30*time.Second, time.Second).Should(Succeed())
 		})
 	})
 
@@ -635,14 +749,14 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
 			waitSandboxRunning(sbx)
 
-			By("Step 1: creating SUO with QoS-changing resize to trigger terminal failure")
+			By("Using an upscale that requires resizing to trigger Guaranteed -> Burstable rejection")
 			opsFail := newInplaceOps(
 				fmt.Sprintf("ops-rlb-qos-1-%d", time.Now().UnixNano()),
 				labelValue,
 				agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
 				patchImageAndResources(initialImage,
-					corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
-					corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+					corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("512Mi")},
+					corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("512Mi")},
 				),
 			)
 			Expect(k8sClient.Create(ctx, opsFail)).To(Succeed())

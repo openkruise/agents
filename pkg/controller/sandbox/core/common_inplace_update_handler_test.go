@@ -19,6 +19,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 
@@ -75,7 +76,6 @@ func assertInplaceConditions(t *testing.T, status *agentsv1alpha1.SandboxStatus,
 	require.Equal(t, reason, update.Reason)
 	if reason == agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded {
 		require.Equal(t, metav1.ConditionTrue, update.Status)
-		require.Empty(t, update.Message)
 	} else {
 		require.Equal(t, metav1.ConditionFalse, update.Status)
 	}
@@ -85,7 +85,12 @@ func assertInplaceConditions(t *testing.T, status *agentsv1alpha1.SandboxStatus,
 		require.Equal(t, metav1.ConditionTrue, condition.Status)
 	} else {
 		require.Equal(t, metav1.ConditionFalse, condition.Status)
-		require.Equal(t, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, condition.Reason)
+		if reason == agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
+			require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonFailed, condition.Reason)
+			require.Equal(t, update.Message, condition.Message)
+		} else {
+			require.Equal(t, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, condition.Reason)
+		}
 	}
 }
 
@@ -492,6 +497,7 @@ func TestHandleInPlaceUpdateCommon_QoSChangeRejected(t *testing.T) {
 	if !result {
 		t.Error("Expected result true (done, no requeue), got false")
 	}
+	assertInplaceConditions(t, newStatus, false, agentsv1alpha1.SandboxInplaceUpdateReasonFailed)
 
 	// Verify InplaceUpdate condition is set to Failed
 	var found bool
@@ -603,7 +609,7 @@ func TestHandleInPlaceUpdateCommon_MemoryDownscaleSkippedAdvisory(t *testing.T) 
 	}
 }
 
-func TestHandleInPlaceUpdateCommon_UnsupportedResizeReason(t *testing.T) {
+func TestHandleInPlaceUpdateCommon_UnsupportedResizeRetried(t *testing.T) {
 	ctx := context.Background()
 
 	scheme := runtime.NewScheme()
@@ -644,6 +650,9 @@ func TestHandleInPlaceUpdateCommon_UnsupportedResizeReason(t *testing.T) {
 	box := buildMatchingHashBox("test-sandbox", "default", newPodSpec)
 
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	injected := apierrors.NewBadRequest("InPlacePodVerticalScaling feature gate disabled")
+	failWrites := true
+	resourcePatches := 0
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
 			patch client.Patch, opts ...client.SubResourcePatchOption) error {
@@ -654,9 +663,13 @@ func TestHandleInPlaceUpdateCommon_UnsupportedResizeReason(t *testing.T) {
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
 			opts ...client.PatchOption) error {
-			data, _ := patch.Data(obj)
+			data, err := patch.Data(obj)
+			require.NoError(t, err)
 			if !strings.Contains(string(data), `"metadata"`) {
-				return apierrors.NewBadRequest("InPlacePodVerticalScaling feature gate disabled")
+				resourcePatches++
+				if failWrites {
+					return injected
+				}
 			}
 			return c.Patch(ctx, obj, patch, opts...)
 		},
@@ -669,30 +682,53 @@ func TestHandleInPlaceUpdateCommon_UnsupportedResizeReason(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := runClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if !result {
-		t.Fatal("Expected result true (unsupported resize is terminal), got false")
+	for attempt := 1; attempt <= 2; attempt++ {
+		before := newStatus.DeepCopy()
+		injected = apierrors.NewBadRequest(fmt.Sprintf("InPlacePodVerticalScaling feature gate disabled, attempt %d", attempt))
+		done, err := runClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
+		require.ErrorIs(t, err, injected)
+		var resizeErr *inplaceupdate.ResizeNotSupportedError
+		require.ErrorAs(t, err, &resizeErr)
+		require.False(t, done)
+		assertInplaceConditions(t, newStatus, false, agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating)
+		require.False(t, isInplaceUpdateTerminal(newStatus))
+		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+		require.Equal(t, "cannot deliver in-place update: in-place pod resize not supported: BadRequest (HTTP 400)", cond.Message)
+		require.Len(t, handler.recorder.(*record.FakeRecorder).Events, 1)
+		if attempt > 1 {
+			require.Equal(t, before, newStatus)
+		}
+		require.Equal(t, attempt, resourcePatches)
 	}
 
-	var cond *metav1.Condition
-	for i := range newStatus.Conditions {
-		if newStatus.Conditions[i].Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
-			cond = &newStatus.Conditions[i]
-			break
-		}
-	}
-	if cond == nil {
-		t.Fatal("InplaceUpdate condition not found in status")
-	}
-	if cond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize {
-		t.Errorf("Expected reason %s, got %s", agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize, cond.Reason)
-	}
-	if !strings.Contains(cond.Message, "in-place pod resize not supported") {
-		t.Errorf("Expected unsupported resize message, got %q", cond.Message)
-	}
+	current := &corev1.Pod{}
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(pod), current))
+	require.Equal(t, "old-revision", current.Labels[agentsv1alpha1.PodLabelTemplateHash])
+	require.Equal(t, oldPodSpec, current.Spec)
+
+	failWrites = false
+	done, err := runClaimInplaceUpdate(ctx, handler, current, box, newStatus)
+	require.NoError(t, err)
+	require.False(t, done)
+	assertInplaceConditions(t, newStatus, false, agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating)
+	require.Equal(t, 3, resourcePatches)
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(pod), current))
+	require.Equal(t, "new-revision", current.Labels[agentsv1alpha1.PodLabelTemplateHash])
+	require.Equal(t, newPodSpec, current.Spec)
+	state, err := inplaceupdate.GetPodInPlaceUpdateState(current)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.True(t, state.UpdateResources)
+
+	current.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "main", Resources: current.Spec.Containers[0].Resources.DeepCopy(),
+	}}
+	done, err = runClaimInplaceUpdate(ctx, handler, current, box, newStatus)
+	require.NoError(t, err)
+	require.True(t, done)
+	// The adapter leaves Ready to syncStatusFromPod, so the gate stays closed here.
+	assertInplaceConditions(t, newStatus, false, agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded)
+	require.Equal(t, 3, resourcePatches)
 }
 
 func TestHandleInPlaceUpdateCommon_ResizeInfeasibleFailFast(t *testing.T) {
@@ -778,6 +814,7 @@ func TestHandleInPlaceUpdateCommon_ResizeInfeasibleFailFast(t *testing.T) {
 	if !result {
 		t.Fatal("Expected result true (done, fail-fast), got false")
 	}
+	assertInplaceConditions(t, newStatus, false, agentsv1alpha1.SandboxInplaceUpdateReasonFailed)
 
 	var found bool
 	for _, cond := range newStatus.Conditions {
@@ -1205,12 +1242,13 @@ func TestHandleInPlaceUpdateCommon_GetPodInPlaceUpdateStateError(t *testing.T) {
 	}
 
 	result, err := runClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
-	if err == nil {
-		t.Fatal("Expected error from malformed annotation, got nil")
-	}
-	if result {
-		t.Error("Expected result false on error, got true")
-	}
+	require.NoError(t, err)
+	require.True(t, result, "corrupt in-place update state must fail terminally without retries")
+	condition := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+	require.NotNil(t, condition)
+	require.Equal(t, metav1.ConditionFalse, condition.Status)
+	require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonFailed, condition.Reason)
+	require.Contains(t, condition.Message, "cannot determine in-place update progress")
 }
 
 func TestHandleInPlaceUpdateCommon_StateNotNilCompleted(t *testing.T) {
@@ -1269,8 +1307,9 @@ func TestHandleInPlaceUpdateCommon_StateNotNilCompleted(t *testing.T) {
 }
 
 func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing.T) {
-	// A new target supersedes an infeasible earlier resize by delivering its
-	// revision instead of waiting forever on the previous state.
+	// A metadata-only target is delivered on top of an infeasible earlier
+	// resize. The write keeps the earlier state, so observing the delivered pod
+	// reports the infeasible resize as a terminal failure instead of success.
 	ctx := context.Background()
 
 	podSpec := corev1.PodSpec{
@@ -1328,15 +1367,21 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	if !result {
-		t.Error("Expected result true after replacing the previous target, got false")
+		t.Error("Expected result true (terminal failure), got false")
 	}
+	update := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+	require.NotNil(t, update)
+	require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonFailed, update.Reason)
+	require.Contains(t, update.Message, "insufficient cpu")
 	stored := &corev1.Pod{}
 	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(pod), stored))
 	require.Equal(t, "new-revision", stored.Labels[agentsv1alpha1.PodLabelTemplateHash])
 }
 
 func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedNoTerminalErr(t *testing.T) {
-	// A new target also supersedes an earlier nonterminal resize.
+	// A metadata-only target is delivered on top of an earlier resize that has
+	// not completed yet. The write keeps the earlier state, so the round stays
+	// in progress and Ready is gated instead of reporting completion.
 	ctx := context.Background()
 
 	podSpec := corev1.PodSpec{
@@ -1395,9 +1440,10 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedNoTerminalErr(t *testi
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	if !result {
-		t.Error("Expected result true after replacing the previous target, got false")
+	if result {
+		t.Error("Expected result false while the earlier resize is in progress, got true")
 	}
+	assertInplaceConditions(t, newStatus, false, agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating)
 	stored := &corev1.Pod{}
 	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(pod), stored))
 	require.Equal(t, "new-revision", stored.Labels[agentsv1alpha1.PodLabelTemplateHash])
@@ -1516,6 +1562,10 @@ func TestHandleInPlaceUpdateCommon_NoChangeReturnsTrue(t *testing.T) {
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
 		UpdateRevision: "new-revision",
+		Conditions: []metav1.Condition{{
+			Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse,
+			Reason: agentsv1alpha1.SandboxReadyReasonInplaceUpdating, Message: "inplace update is incompleted", LastTransitionTime: metav1.Now(),
+		}},
 	}
 
 	// Use a custom patchBodyFunc that returns empty (no changes)
@@ -1536,11 +1586,16 @@ func TestHandleInPlaceUpdateCommon_NoChangeReturnsTrue(t *testing.T) {
 	if !result {
 		t.Error("Expected result true (no changes), got false")
 	}
+	// The adapter leaves Ready to syncStatusFromPod, so the gate stays closed here.
+	assertInplaceConditions(t, newStatus, false, agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded)
+	update := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+	require.Equal(t, "in-place update completed successfully", update.Message)
+	ready := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
+	require.Equal(t, "inplace update is incompleted", ready.Message)
 }
 
 func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
-	// Same image and resources, only labels differ → isMetadataOnlyChange returns true
-	// → controller patches pod metadata directly without setting InplaceUpdate condition
+	// A completed metadata-only write records success without touching Ready.
 	ctx := context.Background()
 
 	scheme := runtime.NewScheme()
@@ -1596,12 +1651,13 @@ func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
 		t.Error("Expected result true (metadata patched directly), got false")
 	}
 
-	// Verify NO InplaceUpdate condition was set
-	for _, cond := range newStatus.Conditions {
-		if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
-			t.Errorf("InplaceUpdate condition should not be set for metadata-only change, got: %s/%s", cond.Reason, cond.Status)
-		}
-	}
+	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+	require.NotNil(t, cond)
+	require.Equal(t, metav1.ConditionTrue, cond.Status)
+	require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded, cond.Reason)
+	require.Equal(t, "in-place update completed successfully", cond.Message)
+	// Ready is owned by syncStatusFromPod, not by the adapter.
+	require.Nil(t, utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady)))
 
 	// Verify the pod was actually patched: template hash label should match new revision
 	updatedPod := &corev1.Pod{}
@@ -1613,6 +1669,158 @@ func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
 	}
 	if updatedPod.Labels["app"] != "test-app" {
 		t.Errorf("Expected pod label app=test-app, got %s", updatedPod.Labels["app"])
+	}
+}
+
+func TestHandleInPlaceUpdateCommon_MetadataOnlyChangeWriteFailed(t *testing.T) {
+	// Metadata-only write failures also record conditions, gate Ready, and return the full error for retries.
+	invalid := func(detail string, fields ...string) error {
+		status := metav1.Status{Reason: metav1.StatusReasonInvalid, Code: 422, Message: detail,
+			Details: &metav1.StatusDetails{}}
+		for _, name := range fields {
+			status.Details.Causes = append(status.Details.Causes, metav1.StatusCause{
+				Type: metav1.CauseTypeFieldValueInvalid, Field: name, Message: detail,
+			})
+		}
+		return &apierrors.StatusError{ErrStatus: status}
+	}
+	conflict := func(detail string) error {
+		return apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, "test-pod", fmt.Errorf("%s", detail))
+	}
+	forbidden := func(detail string) error {
+		return apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "test-pod", fmt.Errorf("%s", detail))
+	}
+	networkError := func(detail string, timeout bool) error {
+		return &net.OpError{Op: "write", Net: "tcp", Err: &net.DNSError{Err: detail, Name: detail, IsTimeout: timeout}}
+	}
+	const prefix = "cannot deliver in-place update: "
+	tests := []struct {
+		name                 string
+		first, second        error
+		message, nextMessage string
+	}{
+		{name: "conflict ignores resourceVersion", first: conflict("resourceVersion=1"), second: conflict("resourceVersion=2"), message: prefix + "Conflict (HTTP 409)"},
+		{name: "forbidden ignores dynamic details", first: forbidden("diff at time=1"), second: forbidden("diff at time=2"), message: prefix + "Forbidden (HTTP 403)"},
+		{name: "unauthorized", first: apierrors.NewUnauthorized("request=1"), second: apierrors.NewUnauthorized("request=2"), message: prefix + "Unauthorized (HTTP 401)"},
+		{name: "bad request", first: apierrors.NewBadRequest("diff=1"), second: apierrors.NewBadRequest("diff=2"), message: prefix + "BadRequest (HTTP 400)"},
+		{name: "invalid sorts and deduplicates fields", first: invalid("PodSpec diff=1", "spec.volumes", "spec.containers", "spec.volumes"), second: invalid("PodSpec diff=2", "spec.containers", "spec.volumes"), message: prefix + "Invalid (HTTP 422); fields: spec.containers, spec.volumes"},
+		{name: "throttling ignores retryAfter", first: apierrors.NewTooManyRequests("request=1", 1), second: apierrors.NewTooManyRequests("request=2", 30), message: prefix + "TooManyRequests (HTTP 429)"},
+		{name: "wrapped resize failure", first: fmt.Errorf("request=1: %w", &inplaceupdate.ResizeNotSupportedError{Err: forbidden("diff=1")}), second: fmt.Errorf("request=2: %w", &inplaceupdate.ResizeNotSupportedError{Err: forbidden("diff=2")}), message: prefix + "in-place pod resize not supported: Forbidden (HTTP 403)"},
+		{name: "timeout preserves error chain", first: context.DeadlineExceeded, second: fmt.Errorf("request=2: %w", context.DeadlineExceeded), message: prefix + "timeout"},
+		{name: "canceled preserves error chain", first: context.Canceled, second: fmt.Errorf("request=2: %w", context.Canceled), message: prefix + "context canceled"},
+		{name: "network timeout ignores endpoints", first: networkError("endpoint=1", true), second: networkError("endpoint=2", true), message: prefix + "network timeout"},
+		{name: "network error ignores endpoints", first: networkError("endpoint=1", false), second: networkError("endpoint=2", false), message: prefix + "network error"},
+		{name: "unknown error never copies raw message", first: fmt.Errorf("unexpected diff=1"), second: fmt.Errorf("unexpected diff=2"), message: prefix + "unexpected error (see controller logs for details)"},
+		{name: "API status without reason or code", first: &apierrors.StatusError{ErrStatus: metav1.Status{Message: "diff=1"}}, second: &apierrors.StatusError{ErrStatus: metav1.Status{Message: "diff=2"}}, message: prefix + "API error"},
+		{name: "changed error category emits again", first: conflict("resourceVersion=1"), second: forbidden("diff=2"), message: prefix + "Conflict (HTTP 409)", nextMessage: prefix + "Forbidden (HTTP 403)"},
+		{name: "changed field emits again", first: invalid("diff=1", "spec.containers"), second: invalid("diff=2", "spec.volumes"), message: prefix + "Invalid (HTTP 422); fields: spec.containers", nextMessage: prefix + "Invalid (HTTP 422); fields: spec.volumes"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, clientgoscheme.AddToScheme(scheme))
+			require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+			podSpec := corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:latest"}}}
+			box := buildMatchingHashBox("test-sandbox", "default", podSpec)
+			box.Spec.Template.Labels = map[string]string{"app": "test-app"}
+			hash, _ := HashSandbox(box)
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-pod", Namespace: "default",
+					Labels: map[string]string{agentsv1alpha1.PodLabelTemplateHash: "old-revision"},
+					// Retain an unfinished image record so a recovered write remains InProgress.
+					Annotations: map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"old-revision","updateImages":true,"lastContainerStatuses":{"main":{"targetImage":"nginx:latest"}}}`},
+				},
+				Spec: podSpec,
+			}
+			var patchErr error
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if patchErr != nil {
+							return patchErr
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				}).Build()
+			newStatus := &agentsv1alpha1.SandboxStatus{UpdateRevision: hash}
+			fakeRecorder := record.NewFakeRecorder(10)
+			handler := &MockInPlaceUpdateHandler{
+				control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				recorder: fakeRecorder, logger: logr.Discard(),
+			}
+
+			for attempt, cause := range []error{tt.first, tt.second} {
+				// Start each round from a copy of the persisted status to verify deduplication across reconciles.
+				if attempt > 0 {
+					box.Status = *newStatus.DeepCopy()
+					newStatus = box.Status.DeepCopy()
+				}
+				before := newStatus.DeepCopy()
+				patchErr = cause
+				done, err := runClaimInplaceUpdate(t.Context(), handler, pod, box, newStatus)
+				require.ErrorIs(t, err, cause)
+				require.ErrorContains(t, err, cause.Error())
+				require.False(t, done)
+				assertInplaceConditions(t, newStatus, false, agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating)
+				require.False(t, isInplaceUpdateTerminal(newStatus))
+				cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+				message := tt.message
+				if attempt > 0 && tt.nextMessage != "" {
+					message = tt.nextMessage
+				}
+				require.Equal(t, message, cond.Message)
+				ready := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
+				require.Equal(t, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, ready.Reason)
+				if attempt == 0 || tt.nextMessage != "" {
+					require.Len(t, fakeRecorder.Events, 1)
+					require.Contains(t, <-fakeRecorder.Events, "Warning InplaceUpdateFailed "+message)
+				} else {
+					require.Equal(t, before, newStatus, "identical summaries must not produce a status patch difference")
+					require.Empty(t, fakeRecorder.Events)
+				}
+				if attempt > 0 {
+					previous := utils.GetSandboxCondition(before, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+					require.Equal(t, previous.LastTransitionTime, cond.LastTransitionTime)
+				}
+			}
+
+			// Clear the summary after recovery; report the same error category again if it recurs.
+			patchErr = nil
+			done, err := runClaimInplaceUpdate(t.Context(), handler, pod, box, newStatus)
+			require.NoError(t, err)
+			require.False(t, done)
+			require.Empty(t, utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate)).Message)
+			require.Empty(t, fakeRecorder.Events)
+			box.Status = *newStatus.DeepCopy()
+			newStatus = box.Status.DeepCopy()
+			patchErr = tt.first
+			done, err = runClaimInplaceUpdate(t.Context(), handler, pod, box, newStatus)
+			// The delivered revision only observes progress; it must not retry the successful write.
+			require.NoError(t, err)
+			require.False(t, done)
+			require.Empty(t, fakeRecorder.Events)
+			box.Spec.Template.Labels["app"] = "retry-app"
+			newStatus.UpdateRevision, _ = HashSandbox(box)
+			done, err = runClaimInplaceUpdate(t.Context(), handler, pod, box, newStatus)
+			require.ErrorIs(t, err, patchErr)
+			require.False(t, done)
+			require.Len(t, fakeRecorder.Events, 1)
+			require.Contains(t, <-fakeRecorder.Events, tt.message)
+
+			// Simulate calculateStatus clearing the condition for a new revision; the old Box.Status must not suppress the first event.
+			box.Status = *newStatus.DeepCopy()
+			newStatus = box.Status.DeepCopy()
+			box.Spec.Template.Labels["app"] = "next-app"
+			newStatus.UpdateRevision, _ = HashSandbox(box)
+			require.NotEqual(t, box.Status.UpdateRevision, newStatus.UpdateRevision)
+			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+			done, err = runClaimInplaceUpdate(t.Context(), handler, pod, box, newStatus)
+			require.ErrorIs(t, err, patchErr)
+			require.False(t, done)
+			require.Len(t, fakeRecorder.Events, 1)
+			require.Contains(t, <-fakeRecorder.Events, tt.message)
+		})
 	}
 }
 
@@ -1912,9 +2120,9 @@ func TestInplaceEngine_ImagePullFailureAcceptsCorrectedTarget(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	control := inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc)
 
-	step, err := handleInPlaceUpdateCommon(ctx, control, pod, box, "new-revision")
+	step, err := handleInPlaceUpdateCommon(ctx, control, nil, pod, box, "new-revision")
 	require.NoError(t, err)
-	require.Equal(t, inplaceUpdateStepPatchDelivered, step)
+	require.Equal(t, inplaceUpdateStepInProgress, step)
 
 	updated := &corev1.Pod{}
 	require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test-pod"}, updated))
@@ -1961,9 +2169,9 @@ func TestInplaceEngine_ClaimAcceptsRepeatedUpdate(t *testing.T) {
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 			control := inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc)
 
-			step, err := handleInPlaceUpdateCommon(ctx, control, pod, box, "new-revision")
+			step, err := handleInPlaceUpdateCommon(ctx, control, nil, pod, box, "new-revision")
 			require.NoError(t, err)
-			require.Equal(t, inplaceUpdateStepPatchDelivered, step)
+			require.Equal(t, inplaceUpdateStepInProgress, step)
 
 			stored := &corev1.Pod{}
 			require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(pod), stored))
@@ -1977,34 +2185,48 @@ func TestInplaceEngineSteps(t *testing.T) {
 	tests := []struct {
 		name, kind, writeError string
 		step                   inplaceUpdateStepResult
-		class                  inplaceErrorClass
+		class                  inplaceupdate.ErrorClass
 		hasError, terminal     bool
+		expectPodVersion       bool
+		readyAfterPatch        corev1.ConditionStatus
 	}{
-		{name: "untracked", kind: "untracked", step: inplaceUpdateStepInProgress, class: inplaceClassUntrackedPod, hasError: true, terminal: true},
+		{name: "metadata success", kind: "metadata", step: inplaceUpdateStepSucceeded},
+		{name: "metadata returns newly unready pod", kind: "metadata", readyAfterPatch: corev1.ConditionFalse, step: inplaceUpdateStepSucceeded},
+		{name: "metadata returns newly ready pod", kind: "metadata", readyAfterPatch: corev1.ConditionTrue, step: inplaceUpdateStepSucceeded},
+		{name: "pending image returns newly unready pod", kind: "image", readyAfterPatch: corev1.ConditionFalse, step: inplaceUpdateStepInProgress, expectPodVersion: true},
+		{name: "no write needed", kind: "noop", step: inplaceUpdateStepSucceeded},
+		{name: "image delivered", kind: "image", step: inplaceUpdateStepInProgress, expectPodVersion: true},
+		{name: "image already applied after write", kind: "image-applied", step: inplaceUpdateStepSucceeded, expectPodVersion: true},
+		{name: "resize delivered", kind: "resize", step: inplaceUpdateStepInProgress, expectPodVersion: true},
+		{name: "resources and image delivered", kind: "combined", step: inplaceUpdateStepInProgress, expectPodVersion: true},
+		{name: "resize fails observation after write", kind: "resize-written-infeasible", step: inplaceUpdateStepFailed, class: inplaceupdate.InplaceUpdateResizeFailed, hasError: true, terminal: true, expectPodVersion: true},
+		{name: "metadata with pending image keeps observing", kind: "metadata-pending-image", step: inplaceUpdateStepInProgress},
+		{name: "metadata with pending resources and image keeps observing", kind: "metadata-pending-combined", step: inplaceUpdateStepInProgress},
+		{name: "untracked", kind: "untracked", step: inplaceUpdateStepFailed, class: inplaceupdate.InplaceUpdateInvalidPodState, hasError: true, terminal: true},
 		{name: "injected init container unchanged", kind: "init-injected", step: inplaceUpdateStepSucceeded},
-		{name: "unsupported", kind: "unsupported", step: inplaceUpdateStepInProgress, class: inplaceClassUnsupportedChange, hasError: true, terminal: true},
-		{name: "corrupted matching revision", kind: "corrupted", step: inplaceUpdateStepInProgress, class: inplaceClassStateCorrupted, hasError: true, terminal: true},
-		{name: "corrupted old revision", kind: "corrupted-old", step: inplaceUpdateStepInProgress, class: inplaceClassStateCorrupted, hasError: true, terminal: true},
-		{name: "C1 QoS rejection", kind: "qos", step: inplaceUpdateStepInProgress, class: inplaceClassQoSRejected, hasError: true, terminal: true},
-		{name: "C2 resize conflict", kind: "resize", writeError: "resize-conflict", step: inplaceUpdateStepPatchDelivered, class: inplaceClassUpdateFailed, hasError: true},
-		{name: "C3 resize success patch conflict", kind: "resize", writeError: "conflict", step: inplaceUpdateStepPatchDelivered, class: inplaceClassUpdateFailed, hasError: true},
-		{name: "C4 resource wait", kind: "resource-wait", step: inplaceUpdateStepPatchDelivered},
-		{name: "C5 image wait", kind: "image-wait", step: inplaceUpdateStepPatchDelivered},
+		{name: "unsupported", kind: "unsupported", step: inplaceUpdateStepFailed, class: inplaceupdate.InplaceUpdateUnsupportedChange, hasError: true, terminal: true},
+		{name: "corrupted matching revision", kind: "corrupted", step: inplaceUpdateStepFailed, class: inplaceupdate.InplaceUpdateInvalidPodState, hasError: true, terminal: true},
+		{name: "corrupted old revision", kind: "corrupted-old", step: inplaceUpdateStepFailed, class: inplaceupdate.InplaceUpdateInvalidPodState, hasError: true, terminal: true},
+		{name: "C1 QoS rejection", kind: "qos", step: inplaceUpdateStepFailed, class: inplaceupdate.InplaceUpdateResizeRejected, hasError: true, terminal: true},
+		{name: "C2 resize conflict", kind: "resize", writeError: "resize-conflict", step: inplaceUpdateStepInProgress, class: inplaceupdate.InplaceUpdateFailed, hasError: true},
+		{name: "C3 resize success patch conflict", kind: "resize", writeError: "conflict", step: inplaceUpdateStepInProgress, class: inplaceupdate.InplaceUpdateFailed, hasError: true},
+		{name: "C4 resource wait", kind: "resource-wait", step: inplaceUpdateStepInProgress},
+		{name: "C5 image wait", kind: "image-wait", step: inplaceUpdateStepInProgress},
 		{name: "C6 applied not ready", kind: "not-ready", step: inplaceUpdateStepSucceeded},
 		{name: "C7 applied and ready", kind: "ready", step: inplaceUpdateStepSucceeded},
-		{name: "metadata conflict", kind: "metadata", writeError: "conflict", step: inplaceUpdateStepPatchDelivered, class: inplaceClassUpdateFailed, hasError: true},
-		{name: "metadata timeout", kind: "metadata", writeError: "timeout", step: inplaceUpdateStepPatchDelivered, class: inplaceClassUpdateFailed, hasError: true},
-		{name: "metadata unknown error", kind: "metadata", writeError: "unknown", step: inplaceUpdateStepPatchDelivered, class: inplaceClassUpdateFailed, hasError: true},
-		{name: "metadata forbidden", kind: "metadata", writeError: "forbidden", step: inplaceUpdateStepPatchDelivered, class: inplaceClassUpdateFailed, hasError: true, terminal: true},
-		{name: "image patch forbidden", kind: "image", writeError: "forbidden", step: inplaceUpdateStepPatchDelivered, class: inplaceClassUpdateFailed, hasError: true, terminal: true},
-		{name: "resize unsupported", kind: "resize", writeError: "resize-unsupported", step: inplaceUpdateStepPatchDelivered, class: inplaceClassUpdateFailed, hasError: true, terminal: true},
-		{name: "resize infeasible", kind: "resize-infeasible", step: inplaceUpdateStepPatchDelivered, class: inplaceClassUpdateFailed, hasError: true, terminal: true},
-		{name: "resize deferred", kind: "resize-deferred", step: inplaceUpdateStepPatchDelivered, class: inplaceClassUpdateFailed, hasError: true, terminal: true},
-		{name: "resize apply error", kind: "resize-error", step: inplaceUpdateStepPatchDelivered, class: inplaceClassUpdateFailed, hasError: true, terminal: true},
-		{name: "apply failure", kind: "apply-failure", step: inplaceUpdateStepPatchDelivered},
+		{name: "metadata conflict", kind: "metadata", writeError: "conflict", step: inplaceUpdateStepInProgress, class: inplaceupdate.InplaceUpdateFailed, hasError: true},
+		{name: "metadata timeout", kind: "metadata", writeError: "timeout", step: inplaceUpdateStepInProgress, class: inplaceupdate.InplaceUpdateFailed, hasError: true},
+		{name: "metadata unknown error", kind: "metadata", writeError: "unknown", step: inplaceUpdateStepInProgress, class: inplaceupdate.InplaceUpdateFailed, hasError: true},
+		{name: "metadata forbidden", kind: "metadata", writeError: "forbidden", step: inplaceUpdateStepInProgress, class: inplaceupdate.InplaceUpdateFailed, hasError: true, terminal: true},
+		{name: "image patch forbidden", kind: "image", writeError: "forbidden", step: inplaceUpdateStepInProgress, class: inplaceupdate.InplaceUpdateFailed, hasError: true, terminal: true},
+		{name: "resize unsupported", kind: "resize", writeError: "resize-unsupported", step: inplaceUpdateStepInProgress, class: inplaceupdate.InplaceUpdateFailed, hasError: true, terminal: true},
+		{name: "resize infeasible", kind: "resize-infeasible", step: inplaceUpdateStepFailed, class: inplaceupdate.InplaceUpdateResizeFailed, hasError: true, terminal: true},
+		{name: "resize deferred", kind: "resize-deferred", step: inplaceUpdateStepFailed, class: inplaceupdate.InplaceUpdateResizeFailed, hasError: true, terminal: true},
+		{name: "resize apply error", kind: "resize-error", step: inplaceUpdateStepFailed, class: inplaceupdate.InplaceUpdateResizeFailed, hasError: true, terminal: true},
+		{name: "apply failure", kind: "apply-failure", step: inplaceUpdateStepInProgress},
 		// A metadata-only write on top of an unfinished resize must not report
 		// success before the earlier round is observed complete.
-		{name: "metadata with pending resize keeps observing", kind: "metadata-pending", step: inplaceUpdateStepPatchDelivered},
+		{name: "metadata with pending resize keeps observing", kind: "metadata-pending", step: inplaceUpdateStepInProgress},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2036,18 +2258,35 @@ func TestInplaceEngineSteps(t *testing.T) {
 			case "qos":
 				pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old"
 				box.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU] = resource.MustParse("500m")
-			case "resize":
+			case "resize", "combined", "resize-written-infeasible":
 				box.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU] = resource.MustParse("200m")
 				pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old"
-			case "metadata", "metadata-pending":
+				if tt.kind == "combined" {
+					box.Spec.Template.Spec.Containers[0].Image = "nginx:2"
+				} else if tt.kind == "resize-written-infeasible" {
+					pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+						Type: corev1.PodResizePending, Status: corev1.ConditionTrue, Reason: corev1.PodReasonInfeasible,
+					})
+				}
+			case "metadata", "metadata-pending", "metadata-pending-image", "metadata-pending-combined", "noop":
 				pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old"
-				if tt.kind == "metadata-pending" {
+				if tt.kind == "metadata-pending" || tt.kind == "metadata-pending-combined" {
 					pod.Annotations = map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"old","updateResources":true}`}
 					pod.Status.ContainerStatuses[0].Resources.Requests[corev1.ResourceCPU] = resource.MustParse("50m")
 				}
-			case "image":
+				if tt.kind == "metadata-pending-image" || tt.kind == "metadata-pending-combined" {
+					pod.Annotations = map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"old","updateImages":true,"lastContainerStatuses":{"main":{"targetImage":"nginx:1"}}}`}
+					if tt.kind == "metadata-pending-combined" {
+						pod.Annotations[inplaceupdate.PodAnnotationInPlaceUpdateStateKey] = `{"revision":"old","updateImages":true,"updateResources":true,"lastContainerStatuses":{"main":{"targetImage":"nginx:1"}}}`
+					}
+					pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}
+				}
+			case "image", "image-applied":
 				pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old"
 				box.Spec.Template.Spec.Containers[0].Image = "nginx:2"
+				if tt.kind == "image-applied" {
+					pod.Status.ContainerStatuses[0].Image = "nginx:2"
+				}
 			case "not-ready":
 				pod.Status.Conditions[0].Status = corev1.ConditionFalse
 			case "image-wait", "apply-failure":
@@ -2071,11 +2310,18 @@ func TestInplaceEngineSteps(t *testing.T) {
 					pod.Status.Conditions = append(pod.Status.Conditions, condition)
 				}
 			}
+			if tt.readyAfterPatch == corev1.ConditionTrue {
+				pod.Status.Conditions[0].Status = corev1.ConditionFalse
+			}
 			scheme := runtime.NewScheme()
 			require.NoError(t, clientgoscheme.AddToScheme(scheme))
-			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+			base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).WithObjects(pod).Build()
 			require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
 			original := pod.DeepCopy()
+			originalAlias := *pod
+			ResourceVersionExpectations.Delete(pod)
+			t.Cleanup(func() { ResourceVersionExpectations.Delete(pod) })
+			var beforeFinalPatch, writtenPod *corev1.Pod
 			var injected error
 			if tt.writeError != "" {
 				injected = apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, pod.Name, fmt.Errorf("version changed"))
@@ -2095,10 +2341,22 @@ func TestInplaceEngineSteps(t *testing.T) {
 			wrapped := interceptor.NewClient(base, interceptor.Funcs{
 				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 					patches++
+					beforeFinalPatch = obj.(*corev1.Pod).DeepCopy()
 					if failWrites && injected != nil && tt.writeError != "resize-conflict" && patch.Type() == types.StrategicMergePatchType {
 						return injected
 					}
-					return c.Patch(ctx, obj, patch, opts...)
+					if tt.readyAfterPatch != "" {
+						latest := &corev1.Pod{}
+						require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(obj), latest))
+						latest.Status.Conditions[0].Status = tt.readyAfterPatch
+						latest.Status.PodIP = "10.0.0.2"
+						require.NoError(t, c.Status().Update(ctx, latest))
+					}
+					if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+						return err
+					}
+					writtenPod = obj.(*corev1.Pod)
+					return nil
 				},
 				SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
 					require.Equal(t, "resize", sub)
@@ -2111,20 +2369,49 @@ func TestInplaceEngineSteps(t *testing.T) {
 					return c.Patch(ctx, obj, patch)
 				},
 			})
-			control := inplaceupdate.NewInPlaceUpdateControl(wrapped, inplaceupdate.DefaultGeneratePatchBodyFunc)
+			patchFunc := inplaceupdate.DefaultGeneratePatchBodyFunc
+			if tt.kind == "noop" {
+				patchFunc = func(inplaceupdate.InPlaceUpdateOptions) (string, error) { return "", nil }
+			}
+			control := inplaceupdate.NewInPlaceUpdateControl(wrapped, patchFunc)
 			before := box.DeepCopy()
-			step, err := handleInPlaceUpdateCommon(t.Context(), control, pod, box, "target")
+			step, err := handleInPlaceUpdateCommon(t.Context(), control, nil, pod, box, "target")
 			require.Equal(t, before, box, "the engine must not read or write Sandbox conditions")
 			require.Equal(t, tt.step, step)
 			if tt.hasError {
 				require.Error(t, err)
-				require.Equal(t, tt.class, classifyInplaceError(err))
+				require.Equal(t, tt.class, inplaceupdate.ClassifyError(err))
 				require.Equal(t, tt.terminal, isTerminalInplaceError(err))
 				if injected != nil {
 					require.ErrorIs(t, err, injected)
 				}
 			} else {
 				require.NoError(t, err)
+			}
+			if writtenPod != nil {
+				require.Equal(t, writtenPod, pod, "callers must receive the final written Pod even when observation fails or remains in progress")
+				written := writtenPod.DeepCopy()
+				writtenPod.Labels["response-only"] = "changed"
+				writtenPod.Status.Conditions[0].Message = "response-only"
+				require.Equal(t, written, pod, "the updated object must not share nested fields with the write response")
+			} else {
+				require.Equal(t, original, pod, "do not update the caller object when the write did not complete successfully")
+			}
+			require.Equal(t, original, &originalAlias, "updating the caller object must not mutate nested fields in the original object")
+			if tt.readyAfterPatch != "" {
+				require.Equal(t, tt.readyAfterPatch, utils.GetPodCondition(&pod.Status, corev1.PodReady).Status)
+				require.Equal(t, "10.0.0.2", pod.Status.PodIP)
+			}
+			isSatisfied, _ := ResourceVersionExpectations.IsSatisfied(original)
+			require.Equal(t, !tt.expectPodVersion, isSatisfied)
+			if tt.expectPodVersion {
+				require.NotNil(t, beforeFinalPatch)
+				isSatisfied, _ = ResourceVersionExpectations.IsSatisfied(beforeFinalPatch)
+				require.False(t, isSatisfied, "wait for the final written version, not the intermediate resize version")
+				delivered := &corev1.Pod{}
+				require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(pod), delivered))
+				isSatisfied, _ = ResourceVersionExpectations.IsSatisfied(delivered)
+				require.True(t, isSatisfied, "the final written version must satisfy the expectation")
 			}
 			if tt.kind == "resize" && tt.writeError == "conflict" {
 				// The resize took effect on the spec but the finishing patch failed; the
@@ -2135,26 +2422,73 @@ func TestInplaceEngineSteps(t *testing.T) {
 				require.Equal(t, original.Status, current.Status)
 				require.Equal(t, "old", current.Labels[agentsv1alpha1.PodLabelTemplateHash])
 				failWrites = false
-				step, err := handleInPlaceUpdateCommon(t.Context(), control, current, box, "target")
+				step, err := handleInPlaceUpdateCommon(t.Context(), control, nil, current, box, "target")
 				require.NoError(t, err)
-				require.Equal(t, inplaceUpdateStepSucceeded, step)
+				require.Equal(t, inplaceUpdateStepInProgress, step)
 				require.Equal(t, 1, resizes)
 				require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(pod), current))
 				require.Equal(t, "target", current.Labels[agentsv1alpha1.PodLabelTemplateHash])
 				require.Equal(t, original.Status, current.Status)
+				state, stateErr := inplaceupdate.GetPodInPlaceUpdateState(current)
+				require.NoError(t, stateErr)
+				require.NotNil(t, state)
+				require.True(t, state.UpdateResources)
+				// Metadata/state repair is not completion until kubelet applies the resources.
+				current.Status.ContainerStatuses[0].Resources = current.Spec.Containers[0].Resources.DeepCopy()
+				require.NoError(t, base.Status().Update(t.Context(), current))
+				step, err = handleInPlaceUpdateCommon(t.Context(), control, nil, current, box, "target")
+				require.NoError(t, err)
+				require.Equal(t, inplaceUpdateStepSucceeded, step)
+				require.Equal(t, 1, resizes)
+				require.Equal(t, 2, patches)
 			}
-			require.Equal(t, original, pod)
-			if tt.step == inplaceUpdateStepInProgress {
+			switch tt.kind {
+			case "untracked", "unsupported", "corrupted", "corrupted-old", "qos":
 				require.Zero(t, patches)
 				require.Zero(t, resizes)
 			}
-			if tt.kind == "metadata-pending" {
+			if strings.HasPrefix(tt.kind, "metadata-pending") {
 				require.Equal(t, 1, patches)
 				require.Zero(t, resizes)
 			}
 			stored := &corev1.Pod{}
 			require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(pod), stored))
 			require.Equal(t, original.UID, stored.UID)
+			if strings.HasPrefix(tt.kind, "metadata-pending") {
+				previous, stateErr := inplaceupdate.GetPodInPlaceUpdateState(original)
+				require.NoError(t, stateErr)
+				require.NotNil(t, previous)
+				state, stateErr := inplaceupdate.GetPodInPlaceUpdateState(stored)
+				require.NoError(t, stateErr)
+				require.NotNil(t, state)
+				// Recovery may rewrite the revision and timestamp but must retain unfinished observations.
+				require.Equal(t, previous.UpdateImages, state.UpdateImages)
+				require.Equal(t, previous.UpdateResources, state.UpdateResources)
+				if previous.UpdateImages {
+					require.Equal(t, previous.LastContainerStatuses, state.LastContainerStatuses)
+				} else {
+					require.Empty(t, state.LastContainerStatuses)
+				}
+				if previous.UpdateResources {
+					require.Equal(t, "target", state.Revision)
+					require.False(t, state.UpdateTimestamp.IsZero())
+				} else {
+					require.Equal(t, previous.Revision, state.Revision)
+				}
+			}
+			if tt.kind == "combined" {
+				state, stateErr := inplaceupdate.GetPodInPlaceUpdateState(stored)
+				require.NoError(t, stateErr)
+				require.NotNil(t, state)
+				require.True(t, state.UpdateImages)
+				require.True(t, state.UpdateResources)
+				stored.Status.ContainerStatuses[0].Resources = stored.Spec.Containers[0].Resources.DeepCopy()
+				step, err = handleInPlaceUpdateCommon(t.Context(), control, nil, stored, box, "target")
+				require.NoError(t, err)
+				require.Equal(t, inplaceUpdateStepInProgress, step, "keep waiting when resources are applied but the image update remains incomplete")
+				require.Equal(t, 1, patches)
+				require.Equal(t, 1, resizes)
+			}
 		})
 	}
 }
@@ -2163,25 +2497,31 @@ func TestInplaceErrorPolicy(t *testing.T) {
 	tests := []struct {
 		name     string
 		cause    error
+		class    inplaceupdate.ErrorClass
 		terminal bool
 	}{
-		{"conflict", apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, "pod", fmt.Errorf("changed")), false},
-		{"throttled", apierrors.NewTooManyRequests("slow down", 1), false},
-		{"timeout", context.DeadlineExceeded, false},
-		{"unknown", fmt.Errorf("unknown write result"), false},
-		{"unauthorized", apierrors.NewUnauthorized("denied"), true},
-		{"bad request", apierrors.NewBadRequest("invalid request"), true},
-		{"unsupported", apierrors.NewMethodNotSupported(schema.GroupResource{Resource: "pods"}, "patch"), true},
-		{"invalid", apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, "pod", nil), true},
-		{"resize unsupported", &inplaceupdate.ResizeNotSupportedError{Err: fmt.Errorf("unsupported")}, true},
-		{"resize infeasible", &inplaceupdate.ResizeInfeasibleError{Message: "infeasible"}, true},
+		{"conflict", apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, "pod", fmt.Errorf("changed")), inplaceupdate.InplaceUpdateFailed, false},
+		{"throttled", apierrors.NewTooManyRequests("slow down", 1), inplaceupdate.InplaceUpdateFailed, false},
+		{"timeout", context.DeadlineExceeded, inplaceupdate.InplaceUpdateFailed, false},
+		{"unknown", fmt.Errorf("unknown write result"), inplaceupdate.InplaceUpdateFailed, false},
+		{"unauthorized", apierrors.NewUnauthorized("denied"), inplaceupdate.InplaceUpdateFailed, true},
+		{"bad request", apierrors.NewBadRequest("invalid request"), inplaceupdate.InplaceUpdateFailed, true},
+		{"unsupported", apierrors.NewMethodNotSupported(schema.GroupResource{Resource: "pods"}, "patch"), inplaceupdate.InplaceUpdateFailed, true},
+		{"invalid", apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, "pod", nil), inplaceupdate.InplaceUpdateFailed, true},
+		{"resize unsupported", &inplaceupdate.ResizeNotSupportedError{Err: fmt.Errorf("unsupported")}, inplaceupdate.InplaceUpdateFailed, true},
+		{"resize infeasible", inplaceupdate.NewError(inplaceupdate.InplaceUpdateResizeFailed, "infeasible", nil), inplaceupdate.InplaceUpdateResizeFailed, true},
+		{"resize failure with unsupported text", inplaceupdate.NewError(inplaceupdate.InplaceUpdateResizeFailed, "in-place pod resize not supported", nil), inplaceupdate.InplaceUpdateResizeFailed, true},
+		{"invalid pod state", inplaceupdate.NewError(inplaceupdate.InplaceUpdateInvalidPodState, "invalid state", nil), inplaceupdate.InplaceUpdateInvalidPodState, true},
+		{"unsupported change", inplaceupdate.NewError(inplaceupdate.InplaceUpdateUnsupportedChange, "immutable change", nil), inplaceupdate.InplaceUpdateUnsupportedChange, true},
+		{"QoS rejected", inplaceupdate.NewError(inplaceupdate.InplaceUpdateResizeRejected, "QoS changed", nil), inplaceupdate.InplaceUpdateResizeRejected, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := fmt.Errorf("outer context: %w", wrapInplaceError(inplaceClassUpdateFailed, "delivery", tt.cause))
+			err := fmt.Errorf("outer context: %w", inplaceupdate.NewError(inplaceupdate.ClassifyError(tt.cause), "delivery", tt.cause))
 			require.ErrorIs(t, err, tt.cause)
-			require.Equal(t, inplaceClassUpdateFailed, classifyInplaceError(err))
+			require.Equal(t, tt.class, inplaceupdate.ClassifyError(err))
 			require.Equal(t, tt.terminal, isTerminalInplaceError(err))
+			require.Equal(t, tt.cause, inplaceUnderlyingError(err))
 		})
 	}
 }
