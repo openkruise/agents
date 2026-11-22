@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -205,11 +206,9 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 	// waitSandboxStaysUpgrading asserts the sandbox remains in Upgrading for
 	// the given duration, confirming a transient (non-terminal) failure.
 	//
-	// In K8s 1.32, when a running container's image is patched in-place to
-	// an unpullable image, the kubelet keeps the old container running while
-	// retrying the pull. The pod may never enter ImagePullBackOff because
-	// the old container stays Running. The sandbox stays Upgrading because
-	// IsInplaceUpdateCompleted sees the ImageID hasn't changed.
+	// Image pull failure remains transient when the Pod's restart policy
+	// permits retries after the old container stops. Completion requires
+	// the target image to be Running, not merely present in the Pod spec.
 	waitSandboxStaysUpgrading := func(sbx *agentsv1alpha1.Sandbox, duration time.Duration) {
 		Consistently(func() agentsv1alpha1.SandboxPhase {
 			_ = k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, sbx)
@@ -474,6 +473,9 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 			sbx := newInplaceSandbox(fmt.Sprintf("inplace-cmd-fail-%d", time.Now().UnixNano()), labelValue)
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
 			waitSandboxRunning(sbx)
+			originalSpec := sbx.Spec.DeepCopy()
+			originalPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, originalPod)).To(Succeed())
 
 			By("Creating SandboxUpdateOps to change command (hash-immutable field)")
 			ops := newInplaceOps(
@@ -493,18 +495,28 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 				return sbx.Status.Phase
 			}, 30*time.Second, time.Second).Should(Equal(agentsv1alpha1.SandboxRunning))
 
-			By("Verifying sandbox has upgrade-failed label")
-			Eventually(func() bool {
-				_ = k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, sbx)
-				_, ok := sbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed]
-				return ok
-			}, 30*time.Second, time.Second).Should(BeTrue(), "sandbox should have upgrade-failed label")
+			By("Verifying pre-validation failure is reported on the SUO without claiming or changing the Sandbox")
+			Expect(ops.Status.ObservedGeneration).To(Equal(ops.Generation))
+			Expect(ops.Status.Replicas).To(Equal(int32(1)))
+			Expect(ops.Status.FailedReplicas).To(Equal(int32(1)))
+			Expect(ops.Status.UpdatedReplicas).To(BeZero())
+			Expect(sbx.Spec).To(Equal(*originalSpec))
+			Expect(sbx.Labels).NotTo(HaveKey(agentsv1alpha1.LabelSandboxUpdateOps))
+			Expect(sbx.Labels).NotTo(HaveKey(agentsv1alpha1.LabelSandboxUpgradeFailed))
+			Expect(getUpgradingCondition(sbx)).To(BeNil())
+			Eventually(func(g Gomega) {
+				events := &corev1.EventList{}
+				g.Expect(k8sClient.List(ctx, events, client.InNamespace(namespace),
+					client.MatchingFields{"involvedObject.uid": string(ops.UID)})).To(Succeed())
+				g.Expect(events.Items).To(ContainElement(And(
+					HaveField("Type", corev1.EventTypeWarning), HaveField("Reason", "ValidationFailed"))))
+			}, 30*time.Second, time.Second).Should(Succeed())
 
 			By("Verifying pod command was NOT changed (patch rejected before delivery)")
 			pod := &corev1.Pod{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
-			Expect(pod.Spec.Containers[0].Command).To(Equal([]string{"/bin/bash", "-c", "sleep infinity"}),
-				"pod command should remain original")
+			Expect(pod.UID).To(Equal(originalPod.UID), "pre-validation must not recreate the Pod")
+			Expect(pod.Spec).To(Equal(originalPod.Spec), "pre-validation must not change the Pod spec")
 		})
 
 		It("should complete when the pod resources cover the requested target", func() {
@@ -571,6 +583,8 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 		It("should stay upgrading when image pull fails (no terminal failure)", func() {
 			labelValue := fmt.Sprintf("inplace-badimg-%d", time.Now().UnixNano())
 			sbx := newInplaceSandbox(fmt.Sprintf("inplace-badimg-%d", time.Now().UnixNano()), labelValue)
+			// Keep retrying the image pull instead of terminating a Never-restart Pod.
+			sbx.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyAlways
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
 			waitSandboxRunning(sbx)
 
@@ -615,6 +629,7 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 		It("should recover from transient bad image by switching to Recreate", func() {
 			labelValue := fmt.Sprintf("inplace-recover-badimg-%d", time.Now().UnixNano())
 			sbx := newInplaceSandbox(fmt.Sprintf("inplace-rcv-bad-%d", time.Now().UnixNano()), labelValue)
+			sbx.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyAlways
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
 			waitSandboxRunning(sbx)
 
@@ -704,22 +719,10 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 			waitPodImage(sbx, updateImage, 2*time.Minute)
 		})
 
-		// NOT SUPPORTED: recovering from a bad-image InplaceUpdate failure with
-		// another InplaceUpdate SUO (delete the stuck SUO, create a new one that
-		// rolls back or fixes the image). Every variant deadlocks in Upgrading:
-		//   1. Rolling back to the SAME image (centos:7→bad→centos:7): the
-		//      container never left the old image, so its ImageID never changes
-		//      and isPodImageUpdateCompleted always returns false.
-		//   2. Fixing to a DIFFERENT pullable image (centos:7→bad→centos:8): the
-		//      kubelet does not restart a container stuck in ImagePullBackOff
-		//      just because spec.image changed again (verified on K8s 1.32 by a
-		//      CI run of exactly this scenario: the pod spec was patched to
-		//      centos:8 but the container kept running centos:7 and the SUO
-		//      stayed in Updating until timeout).
-		// The ONLY recovery path from a bad-image in-place failure is a pod
-		// replacement strategy (Recreate / CheckpointRestore), covered by the
-		// "switching to Recreate" scenario above. Do not add an InplaceUpdate
-		// corrective/rollback scenario here.
+		// These SUO recovery scenarios exercise replacement through Recreate.
+		// Same-Pod image recovery requires a restart policy that permits retries:
+		// with Never, a failed replacement image pull can leave the old container
+		// terminated and the Pod terminal, even after spec.image is corrected.
 
 		It("should recover from terminal QoS failure by rolling back resources", func() {
 			labelValue := fmt.Sprintf("inplace-rollback-qos-%d", time.Now().UnixNano())

@@ -679,6 +679,8 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 	Context("Transient failure recovery", func() {
 		It("should deliver when a corrected image supersedes a failed target", func() {
 			sbx := newClaimSandbox(fmt.Sprintf("claim-badimg-%d", time.Now().UnixNano()))
+			// Retry after the old container stops and the replacement image fails to pull.
+			sbx.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyAlways
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
 			waitSandboxRunning(sbx)
 			originalPod := &corev1.Pod{}
@@ -740,6 +742,7 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 	Context("Successive upgrades preserve unfinished observations", func() {
 		DescribeTable("should not succeed a new target while a bad image update remains unfinished", func(resize, completedRound bool) {
 			sbx := newClaimSandbox(fmt.Sprintf("claim-rounds-%d", time.Now().UnixNano()))
+			sbx.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyAlways
 			// Resize an independent healthy container so image pull failures do not prevent resource verification.
 			sbx.Spec.Template.Spec.Containers = append(sbx.Spec.Template.Spec.Containers, corev1.Container{
 				Name: "worker", Image: initialImage, Command: []string{"/bin/bash", "-c", "sleep infinity"},
@@ -836,6 +839,7 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 
 		It("should preserve another unfinished container when rewriting one container image target", func() {
 			sbx := newClaimSandbox(fmt.Sprintf("claim-multi-rounds-%d", time.Now().UnixNano()))
+			sbx.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyAlways
 			sbx.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
 				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},

@@ -804,8 +804,10 @@ var _ = Describe("SandboxClaim", func() {
 			}, time.Minute, 2*time.Second).Should(BeTrue())
 		})
 
-		It("should still claim sandbox when CPU resize is infeasible but image update succeeds", func() {
+		It("should not deliver a sandbox when CPU resize is infeasible even if the image update succeeds", func() {
 			const targetImage = "nginx:stable-alpine3.20"
+			originalPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: warmSandboxName, Namespace: namespace}, originalPod)).To(Succeed())
 			By("Creating a SandboxClaim with valid image and infeasible CPU resize target")
 			sandboxClaim = &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
@@ -813,10 +815,11 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName:    sandboxSet.Name,
-					Replicas:        ptr.To(int32(1)),
-					SkipInitRuntime: true,
-					ClaimTimeout:    &metav1.Duration{Duration: 45 * time.Second},
+					TemplateName:         sandboxSet.Name,
+					Replicas:             ptr.To(int32(1)),
+					SkipInitRuntime:      true,
+					ReserveFailedSandbox: true, // Preserve the failed attempt for assertions before namespace cleanup.
+					ClaimTimeout:         &metav1.Duration{Duration: 45 * time.Second},
 					WaitReadyTimeout: &metav1.Duration{
 						Duration: 3 * time.Minute,
 					},
@@ -831,15 +834,18 @@ var _ = Describe("SandboxClaim", func() {
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
 
-			By("Verifying claim completes and one sandbox is claimed")
-			Eventually(func() agentsv1alpha1.SandboxClaimPhase {
-				_ = k8sClient.Get(ctx, types.NamespacedName{
+			By("Verifying claim times out without delivering the failed update")
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
 					Name:      sandboxClaim.Name,
 					Namespace: sandboxClaim.Namespace,
-				}, sandboxClaim)
-				return sandboxClaim.Status.Phase
-			}, time.Minute*4, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
-			Expect(sandboxClaim.Status.ClaimedReplicas).To(Equal(int32(1)))
+				}, sandboxClaim)).To(Succeed())
+				g.Expect(sandboxClaim.Status.Phase).To(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+			}, time.Minute*4, time.Second).Should(Succeed())
+			Expect(sandboxClaim.Status.ClaimedReplicas).To(BeZero())
+			Expect(sandboxClaim.Status.Conditions).To(ContainElement(And(
+				HaveField("Type", string(agentsv1alpha1.SandboxClaimConditionTimedOut)),
+				HaveField("Status", metav1.ConditionTrue), HaveField("Reason", "ClaimTimeoutReached"))))
 
 			By("Verifying Sandbox InplaceUpdate condition reports infeasible CPU resize failure")
 			Eventually(func() string {
@@ -859,21 +865,21 @@ var _ = Describe("SandboxClaim", func() {
 				return ""
 			}, time.Minute*4, time.Second).Should(ContainSubstring("infeasible"))
 
-			By("Verifying image update target is reflected in pod spec")
-			Eventually(func() bool {
-				pod := &corev1.Pod{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      warmSandboxName,
-					Namespace: namespace,
-				}, pod); err != nil || len(pod.Spec.Containers) == 0 {
-					return false
-				}
-				if pod.Spec.Containers[0].Image != targetImage {
-					return false
-				}
-				req := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
-				return req.MilliValue() == int64(999000)
-			}, time.Minute*4, time.Second).Should(BeTrue())
+			By("Verifying the same Pod runs the target image while the accepted CPU target remains unapplied")
+			sbx := &agentsv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: warmSandboxName, Namespace: namespace}, sbx)).To(Succeed())
+			pod := waitInplacePodObserved(ctx, sbx, originalPod.UID, map[string]string{"test-container": targetImage}, nil)
+			req := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+			Expect(req.MilliValue()).To(Equal(int64(999000)))
+			Expect(pod.Status.ContainerStatuses[0].Resources).NotTo(BeNil())
+			actual := pod.Status.ContainerStatuses[0].Resources.Requests[corev1.ResourceCPU]
+			Expect(actual.Cmp(req)).To(BeNumerically("<", 0), "kubelet must not report the infeasible CPU target as applied")
+			Consistently(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: warmSandboxName, Namespace: namespace}, sbx)).To(Succeed())
+				g.Expect(sbx.Status.Conditions).To(ContainElement(And(
+					HaveField("Type", string(agentsv1alpha1.SandboxConditionReady)),
+					HaveField("Status", metav1.ConditionFalse), HaveField("Reason", agentsv1alpha1.SandboxInplaceUpdateReasonFailed))))
+			}, 5*time.Second, time.Second).Should(Succeed())
 		})
 
 		It("should fail fast when CPU resize is infeasible (exceeds node capacity)", func() {
