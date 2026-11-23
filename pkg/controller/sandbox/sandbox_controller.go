@@ -45,6 +45,7 @@ import (
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/pausedretention"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -136,7 +137,8 @@ type Enqueuer interface {
 // Add registers the sandbox controller. runtimeTLSBundle is the client TLS
 // bundle for reaching TLS-capable agent-runtimes; nil disables runtime TLS
 // for this controller (all sandboxes are served over the legacy paths).
-func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtimeclient.TLSBundle) error {
+// syncRouteWithPeers is an optional active route sync callback; nil disables sync.
+func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtimeclient.TLSBundle, syncRouteWithPeers func(context.Context, sandboxroute.Route) error) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxGate) || !discovery.DiscoverGVK(sandboxControllerKind) {
 		return nil
 	}
@@ -190,10 +192,11 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 				CSIResetSignalFileName: csiResetSignalFileName,
 			},
 		}),
-		rateLimiter:    rateLimiter,
-		lifecycleHooks: lifecycleHooks,
-		metricsCleanup: metricsCleanup,
-		recorder:       recorder,
+		rateLimiter:        rateLimiter,
+		lifecycleHooks:     lifecycleHooks,
+		metricsCleanup:     metricsCleanup,
+		recorder:           recorder,
+		syncRouteWithPeers: syncRouteWithPeers,
 	}).SetupWithManager(mgr)
 	if err != nil {
 		return err
@@ -205,14 +208,15 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
-	Scheme            *runtime.Scheme
-	controls          map[string]core.SandboxControl
-	rateLimiter       *core.RateLimiter
-	lifecycleHooks    *core.LifecycleHookManager
-	checkpointControl *core.CheckpointControl
-	metricsCleanup    Enqueuer
-	recorder          record.EventRecorder
-	messageRegexCache compiledMessageRegexCache
+	Scheme             *runtime.Scheme
+	controls           map[string]core.SandboxControl
+	rateLimiter        *core.RateLimiter
+	lifecycleHooks     *core.LifecycleHookManager
+	checkpointControl  *core.CheckpointControl
+	metricsCleanup     Enqueuer
+	recorder           record.EventRecorder
+	messageRegexCache  compiledMessageRegexCache
+	syncRouteWithPeers func(context.Context, sandboxroute.Route) error
 }
 
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -715,6 +719,11 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 		return nil
 	}
 	oldPhase := box.Status.Phase
+	var oldRoute sandboxroute.Route
+	var oldRouteErr error
+	if r.syncRouteWithPeers != nil {
+		oldRoute, oldRouteErr = sandboxroute.RouteFromSandbox(box)
+	}
 
 	// phase.after records the phase this status patch writes. It has
 	// independent value on the shouldRequeue early-return path, where the
@@ -734,13 +743,23 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	// The UID precondition keeps a same-name replacement from receiving this
 	// status or reporting its completion. Completion counting is best-effort
 	// under concurrent writers because the cached old status is not CAS-guarded.
+	// Explicitly serialize an empty PodIP so omitempty does not preserve the old address in a merge patch.
+	type podInfoPatch struct {
+		agentsv1alpha1.PodInfo
+		PodIP string `json:"podIP"`
+	}
 	patchBytes, err := json.Marshal(map[string]interface{}{
 		"metadata": map[string]interface{}{"uid": box.UID},
 		"status": struct {
 			agentsv1alpha1.SandboxStatus
 			// Explicit null removes abandoned conditions despite omitempty on SandboxStatus.
 			Conditions []metav1.Condition `json:"conditions"`
-		}{SandboxStatus: newStatus, Conditions: newStatus.Conditions},
+			PodInfo    podInfoPatch       `json:"podInfo"`
+		}{
+			SandboxStatus: newStatus,
+			Conditions:    newStatus.Conditions,
+			PodInfo:       podInfoPatch{PodInfo: newStatus.PodInfo, PodIP: newStatus.PodInfo.PodIP},
+		},
 	})
 	if err != nil {
 		tracing.EndSpan(ctx, span, err)
@@ -765,6 +784,20 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	r.recordSandboxPhaseEvent(box, oldPhase, newStatus)
 	// Update metrics after status change (pod=nil: container metrics already recorded in Reconcile)
 	recordSandboxMetrics(box, nil)
+	if r.syncRouteWithPeers != nil {
+		newRoute, routeErr := sandboxroute.RouteFromSandbox(rcvObject)
+		if routeErr := cmp.Or(oldRouteErr, routeErr); routeErr != nil {
+			klog.FromContext(ctx).Error(routeErr, "failed to project Sandbox route, skipping peer sync", "sandbox", klog.KObj(box))
+		} else if oldRoute.CanRouteTraffic() != newRoute.CanRouteTraffic() {
+			// Status is already persisted; peer sync is best-effort acceleration, while informers ensure eventual convergence.
+			if err := r.syncRouteWithPeers(ctx, newRoute); err != nil {
+				klog.FromContext(ctx).Error(err, "failed to sync Sandbox route with peers", "sandbox", klog.KObj(box))
+			} else {
+				klog.FromContext(ctx).Info("synced Sandbox route with peers", "sandbox", klog.KObj(box),
+					"canRouteTraffic", newRoute.CanRouteTraffic(), "resourceVersion", newRoute.ResourceVersion)
+			}
+		}
+	}
 	return nil
 }
 

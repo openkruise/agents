@@ -4,7 +4,7 @@ authors:
   - "@AiRanthem"
 reviewers: []
 creation-date: 2026-08-24
-last-updated: 2026-09-09
+last-updated: 2026-11-23
 status: implementable
 ---
 
@@ -101,6 +101,57 @@ flowchart LR
   flag; that pairing is a deployment configuration error.
 - Both listeners bind synchronously during startup. A bind failure of either
   enabled listener fails startup before the process serves requests.
+
+### Controller 主动路由同步
+
+Sandbox controller 在 Sandbox status Patch 成功后，对比更新前后
+`Route.CanRouteTraffic()`。仅当该布尔值发生变化时，向 memberlist 中的
+manager/gateway 推送一次更新后的 route；调用内部继续使用既有的并行发送、
+超时与重试策略。投影统一使用 `sandboxroute.RouteFromSandbox`，推送携带
+API server 返回对象的 UID、resourceVersion 和完整路由属性，避免发送写入前的版本。
+status merge patch 显式写入 `podInfo.podIP`（包括空字符串），防止 `omitempty`
+在地址清空时仍保留已存储的旧 IP；其余 PodInfo 字段沿用现有序列化规则。
+
+- 同步是尽力加速。Patch 失败、NotFound 或 status 未改变时不发送；路由投影
+  或发送失败只记录错误，不回滚 status，也不以该错误重试 reconcile。
+  manager/gateway 的 Sandbox informer 仍负责最终收敛。
+- 触发条件不是 phase、IP 或整个 route 的任意变化。两个不同的非空 IP、
+  message 或 resourceVersion 变化，只要 `CanRouteTraffic()` 不变就不推送。
+  spec、Ready condition、池归属等仍由统一投影决定流量可路由性。
+- controller 用 `sc-<pod-name>` 加入 memberlist，参与 TCP/UDP gossip，
+  但不启动 `:7789/refresh`。所有成员的 `GetPeers()` 排除 `sc-` 前缀，
+  `GetAllMembers()` 仍保留这些节点用于观察成员关系。controller 不加入
+  manager/gateway 的 seed Pod labels。
+- controller 仅提供 `--peer-selector`，默认为空，关闭功能且不启动 peer listener。
+  启用后固定在 `sandbox-system` 发现 peers，memberlist TCP/UDP 端口固定为 7946。
+  ACK 部署的 selector 为
+  `agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager`。
+  `POD_NAME` 决定节点名（未设置时使用 hostname），`POD_IP` 决定绑定地址。
+- controller 新增独立 Pod informer，仅 watch `sandbox-system` 中符合 selector 的 Pods。
+  它不复用可能开启 Sandbox Pod 标签过滤的主缓存，也不使用 APIReader List。
+  不加载或 watch peer Secrets，不新增 Secrets RBAC 权限。
+- controller 使用明文 memberlist 和 HTTP refresh，适用于未启用 peer 加密的部署。
+  manager/gateway 既有的 gossip 加密和 peer mTLS 能力不变；启用这些安全能力的
+  部署不能使用当前 controller 主动同步通道。
+- manager 生命周期先启动并同步 peer cache，随后启动 controllers；发送回调
+  等待 outbound client 发布，避免与组件启动竞态。退出时取消发现、
+  完成 memberlist Leave/Shutdown，并关闭 idle HTTP connections。
+
+发送实现 `SyncRouteWithPeers` 和 `PeerOutbound` 从 `pkg/proxy` 迁至中立的
+`pkg/sandboxroute/refresh`。proxy 保留实例方法包装，gateway 与 controller
+共享同一发送实现；本次新增同步链路的依赖闭包不包含 API 或 sandbox-manager。
+已有 `sandbox_peers`、`sandbox_peer_outbound_tls_errors_total` 随实现迁移，
+未新增指标名称；controller 进程也会注册这些既有指标。
+
+部署编排需提供 `POD_NAME`/`POD_IP`，允许 controller 与 peers 双向 TCP/UDP 7946，
+并允许 controller 向接收方发起 TCP 7789。启用功能前必须先更新接收方的
+`sc-` 过滤逻辑；旧版本接收方会把 controller 误当作 refresh 目标。
+`config/manager/manager.yaml` 保留可选启用参数示例，不自动启用该能力，
+无需为 controller 添加 refresh Service，也不改变既有 probe 配置。
+
+验证覆盖：布尔值双向变化、Ready/IP/phase 组合、布尔值不变、发送失败、
+Patch 失败/NotFound、回传 resourceVersion、功能关闭、配置校验、startup 取消、
+以及 memberlist 发送方过滤。普通开发验证不执行集群部署或 E2E。
 
 ### Bounded peer listing
 

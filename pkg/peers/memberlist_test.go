@@ -52,6 +52,7 @@ func interceptList(list func(context.Context, ctrlclient.ObjectList, ...ctrlclie
 type fakeMemberlistHandle struct {
 	join     func([]string) (int, error)
 	leaveErr error
+	members  []*memberlist.Node
 	mu       sync.Mutex
 	calls    []string
 }
@@ -74,7 +75,7 @@ func (f *fakeMemberlistHandle) Shutdown() error {
 	return nil
 }
 
-func (*fakeMemberlistHandle) Members() []*memberlist.Node { return nil }
+func (f *fakeMemberlistHandle) Members() []*memberlist.Node { return f.members }
 
 func (*fakeMemberlistHandle) LocalNode() *memberlist.Node {
 	return &memberlist.Node{Addr: net.ParseIP("127.0.0.1")}
@@ -284,6 +285,34 @@ func TestMemberlistPeers_GetPeers_NotStarted(t *testing.T) {
 	assert.Nil(t, peer.GetAllMembers())
 	assert.Nil(t, peer.LocalAddr())
 	assert.Equal(t, 0, peer.LocalPort())
+}
+
+func TestMemberlistPeers_GetPeersFiltersMembers(t *testing.T) {
+	node := func(name, ip string, state memberlist.NodeStateType) *memberlist.Node {
+		return &memberlist.Node{Name: name, Addr: net.ParseIP(ip), State: state}
+	}
+	handle := &fakeMemberlistHandle{
+		join: func([]string) (int, error) { return 1, nil },
+		members: []*memberlist.Node{
+			node("test-node", "10.0.0.1", memberlist.StateAlive),
+			node(NodePrefixSandboxManager+"a", "10.0.0.2", memberlist.StateAlive),
+			node(NodePrefixSandboxGateway+"b", "10.0.0.3", memberlist.StateAlive),
+			node(NodePrefixSandboxController+"c", "10.0.0.4", memberlist.StateAlive),
+			node(NodePrefixSandboxGateway+"dead", "10.0.0.5", memberlist.StateDead),
+		},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	peer := startFakeLifecycle(ctx, fake.NewClientBuilder().Build(), handle, time.Hour)
+	t.Cleanup(func() {
+		cancel()
+		_ = peer.Stop(context.Background())
+	})
+
+	assert.Equal(t, []Peer{
+		{IP: "10.0.0.2", Name: NodePrefixSandboxManager + "a"},
+		{IP: "10.0.0.3", Name: NodePrefixSandboxGateway + "b"},
+	}, peer.GetPeers())
+	assert.Len(t, peer.GetAllMembers(), 5)
 }
 
 // TestMemberlistPeers_GettersRaceWithStart fails under -race when a getter

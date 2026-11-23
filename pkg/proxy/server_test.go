@@ -153,7 +153,7 @@ func TestRunWrapsPeerTLSListener(t *testing.T) {
 	require.NoError(t, server.Run())
 	require.Same(t, tlsConfig, server.peerServerTLS)
 	require.NotNil(t, server.peerOutbound)
-	assert.Equal(t, "https", server.peerOutbound.scheme)
+	assert.Equal(t, "https", server.peerOutbound.Scheme())
 
 	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(refresh.DefaultPort)))
 	require.NoError(t, err)

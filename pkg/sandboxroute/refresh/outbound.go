@@ -14,23 +14,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package proxy
+package refresh
 
 import (
 	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"k8s.io/apimachinery/pkg/util/wait"
+
+	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
 const (
@@ -69,6 +73,12 @@ func NewPeerOutbound(clientTLS *tls.Config) *PeerOutbound {
 	}
 }
 
+// NewTestPeerOutbound builds a plaintext outbound peer client over the given
+// HTTP client. It exists for tests that must redirect the fixed refresh port.
+func NewTestPeerOutbound(client *http.Client) *PeerOutbound {
+	return &PeerOutbound{scheme: "http", client: client}
+}
+
 func newPeerHTTPClient(clientTLS *tls.Config) *http.Client {
 	transport := &http.Transport{
 		// Peer refreshes dial fixed IPs directly, never a proxy.
@@ -95,12 +105,66 @@ func newPeerHTTPClient(clientTLS *tls.Config) *http.Client {
 	}
 }
 
+// Scheme returns the URL scheme used for peer requests.
+func (o *PeerOutbound) Scheme() string {
+	if o == nil {
+		return ""
+	}
+	return o.scheme
+}
+
 // CloseIdleConnections drops idle outbound peer connections.
 func (o *PeerOutbound) CloseIdleConnections() {
 	if o == nil || o.client == nil {
 		return
 	}
 	o.client.CloseIdleConnections()
+}
+
+// SyncRouteWithPeers sends a route update to all peer gateways via HTTP POST /refresh.
+// outbound is this process's peer-owner client. Callers must not construct a
+// second client with an independent security decision.
+func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route sandboxroute.Route, outbound *PeerOutbound) error {
+	body, err := json.Marshal(route)
+	if err != nil {
+		return err
+	}
+
+	// Get peers from Peers - no manual locking needed
+	var peerList []peers.Peer
+	if peersManager != nil {
+		peerList = peersManager.GetPeers()
+	}
+
+	peerCount.Set(float64(len(peerList)))
+
+	if len(peerList) == 0 {
+		return nil
+	}
+	if outbound == nil {
+		return fmt.Errorf("peer outbound client is not configured")
+	}
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		peerErrs []error
+	)
+
+	for _, peer := range peerList {
+		wg.Add(1)
+		go func(peerIP string) {
+			defer wg.Done()
+			if requestErr := outbound.requestWithRetry(ctx, http.MethodPost, peerIP, Path, body); requestErr != nil {
+				mu.Lock()
+				peerErrs = append(peerErrs, requestErr)
+				mu.Unlock()
+			}
+		}(peer.IP)
+	}
+	wg.Wait()
+
+	return errors.Join(peerErrs...)
 }
 
 func (o *PeerOutbound) request(ctx context.Context, method, ip, path string, body []byte) error {
@@ -115,7 +179,7 @@ func (o *PeerOutbound) request(ctx context.Context, method, ip, path string, bod
 	if len(body) > 0 {
 		buf = bytes.NewReader(body)
 	}
-	url := o.scheme + "://" + net.JoinHostPort(parsed.String(), strconv.Itoa(refresh.DefaultPort)) + path
+	url := o.scheme + "://" + net.JoinHostPort(parsed.String(), strconv.Itoa(DefaultPort)) + path
 	request, err := http.NewRequestWithContext(ctx, method, url, buf)
 	if err != nil {
 		return err

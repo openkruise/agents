@@ -48,6 +48,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -106,7 +107,7 @@ func TestAdd_FeatureGateDisabled(t *testing.T) {
 		_ = utilfeature.DefaultMutableFeatureGate.Set("Sandbox=true")
 	}()
 
-	err := Add(nil, nil, nil) // manager and enqueuer are nil, but should never be accessed
+	err := Add(nil, nil, nil, nil) // manager and enqueuer are nil, but should never be accessed
 	if err != nil {
 		t.Errorf("Add() error = %v, expected nil when feature gate is disabled", err)
 	}
@@ -121,7 +122,7 @@ func TestAdd_GVKNotDiscovered(t *testing.T) {
 	}()
 
 	// client.GetGenericClient() returns nil in test, so DiscoverGVK returns false
-	err := Add(nil, nil, nil) // manager and enqueuer are nil, but should never be accessed
+	err := Add(nil, nil, nil, nil) // manager and enqueuer are nil, but should never be accessed
 	if err != nil {
 		t.Errorf("Add() error = %v, expected nil when GVK is not discovered", err)
 	}
@@ -848,48 +849,133 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 
 func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = agentsv1alpha1.AddToScheme(scheme)
-
-	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).Build()
-	reconciler := &SandboxReconciler{
-		Client: client,
-		Scheme: scheme,
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	status := func(phase agentsv1alpha1.SandboxPhase, ip string, ready bool) agentsv1alpha1.SandboxStatus {
+		result := agentsv1alpha1.SandboxStatus{Phase: phase, PodInfo: agentsv1alpha1.PodInfo{PodIP: ip}}
+		if ready {
+			result.Conditions = []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}}
+		}
+		return result
 	}
-
-	originalSandbox := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-		},
-		Status: agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxPending,
-		},
+	running := status(agentsv1alpha1.SandboxRunning, "10.0.0.1", true)
+	pending := status(agentsv1alpha1.SandboxPending, "10.0.0.1", false)
+	messageChanged := *running.DeepCopy()
+	messageChanged.Message = "still running"
+	withPodMetadata := *running.DeepCopy()
+	withPodMetadata.PodInfo.NodeName = "worker-1"
+	withPodMetadata.PodInfo.Labels = map[string]string{"app": "sandbox"}
+	withPodMetadata.PodInfo.Annotations = map[string]string{"example.com/key": "value"}
+	clearedIPWithMetadata := *withPodMetadata.DeepCopy()
+	clearedIPWithMetadata.PodInfo.PodIP = ""
+	tests := []struct {
+		name       string
+		oldStatus  agentsv1alpha1.SandboxStatus
+		newStatus  agentsv1alpha1.SandboxStatus
+		wantSync   bool
+		disabled   bool
+		paused     bool
+		pool       bool
+		invalidUID bool
+		patchErr   error
+		syncErr    error
+	}{
+		{name: "原有无地址状态更新", oldStatus: status(agentsv1alpha1.SandboxPending, "", false), newStatus: status(agentsv1alpha1.SandboxRunning, "", false)},
+		{name: "启动后可路由", oldStatus: pending, newStatus: running, wantSync: true},
+		{name: "Ready 变为真", oldStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.1", false), newStatus: running, wantSync: true},
+		{name: "Ready 变为假", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.1", false), wantSync: true},
+		{name: "首次获得地址", oldStatus: status(agentsv1alpha1.SandboxRunning, "", true), newStatus: running, wantSync: true},
+		{name: "失去地址", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "", true), wantSync: true},
+		{name: "清空地址保留 Pod 元信息", oldStatus: withPodMetadata, newStatus: clearedIPWithMetadata, wantSync: true},
+		{name: "关闭同步仍清空地址", oldStatus: withPodMetadata, newStatus: clearedIPWithMetadata, disabled: true},
+		{name: "两个非空地址不触发", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.2", true)},
+		{name: "进入暂停", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true), wantSync: true},
+		{name: "恢复完成", oldStatus: status(agentsv1alpha1.SandboxResuming, "10.0.0.1", true), newStatus: running, wantSync: true},
+		{name: "升级开始", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxUpgrading, "10.0.0.1", true), wantSync: true},
+		{name: "终态不可路由", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxFailed, "10.0.0.1", false), wantSync: true},
+		{name: "不可路由状态之间不触发", oldStatus: pending, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", false)},
+		{name: "仅消息改变不触发", oldStatus: running, newStatus: messageChanged},
+		{name: "相同状态不 Patch", oldStatus: running, newStatus: running},
+		{name: "spec 已暂停时不触发", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true), paused: true},
+		{name: "未交付池实例不触发", oldStatus: pending, newStatus: running, pool: true},
+		{name: "关闭主动同步", oldStatus: pending, newStatus: running, disabled: true},
+		{name: "投影无效不影响状态写入", oldStatus: pending, newStatus: running, invalidUID: true},
+		{name: "发送失败不影响状态写入", oldStatus: pending, newStatus: running, wantSync: true, syncErr: fmt.Errorf("peer unavailable")},
+		{name: "Patch NotFound 不发送", oldStatus: pending, newStatus: running, patchErr: apierrors.NewNotFound(agentsv1alpha1.Resource("sandboxes"), "test-sandbox")},
+		{name: "Patch 失败不发送", oldStatus: pending, newStatus: running, patchErr: apierrors.NewForbidden(agentsv1alpha1.Resource("sandboxes"), "test-sandbox", fmt.Errorf("denied"))},
 	}
-
-	// Add the sandbox to the client
-	err := client.Create(context.TODO(), originalSandbox)
-	if err != nil {
-		t.Fatalf("Failed to create sandbox: %v", err)
-	}
-
-	newStatus := agentsv1alpha1.SandboxStatus{
-		Phase: agentsv1alpha1.SandboxRunning,
-	}
-
-	err = reconciler.updateSandboxStatus(context.Background(), newStatus, originalSandbox)
-	if err != nil {
-		t.Errorf("updateSandboxStatus() error = %v", err)
-		return
-	}
-
-	// Verify the status was updated
-	updatedSandbox := &agentsv1alpha1.Sandbox{}
-	err = client.Get(context.TODO(), types.NamespacedName{Name: originalSandbox.Name, Namespace: originalSandbox.Namespace}, updatedSandbox)
-	if err != nil {
-		t.Errorf("Failed to get updated sandbox: %v", err)
-	} else if updatedSandbox.Status.Phase != agentsv1alpha1.SandboxRunning {
-		t.Errorf("Expected sandbox phase %v, got %v", agentsv1alpha1.SandboxRunning, updatedSandbox.Status.Phase)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-sandbox", Namespace: "default", UID: "uid-sandbox", ResourceVersion: "10",
+					Labels:      map[string]string{agentsv1alpha1.LabelSandboxID: "opaque-sandbox-id"},
+					Annotations: map[string]string{agentsv1alpha1.AnnotationRuntimeAccessToken: "test-token"},
+				},
+				Status: tt.oldStatus,
+			}
+			box.Spec.Paused = tt.paused
+			if tt.pool {
+				box.OwnerReferences = []metav1.OwnerReference{{APIVersion: agentsv1alpha1.GroupVersion.String(), Kind: "SandboxSet", Name: "pool", UID: "pool-uid", Controller: ptr.To(true)}}
+			}
+			if tt.invalidUID {
+				box.UID = ""
+			}
+			core.ResourceVersionExpectations.Delete(box)
+			t.Cleanup(func() { core.ResourceVersionExpectations.Delete(box) })
+			patches := 0
+			fc := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(box).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+						patches++
+						if tt.patchErr != nil {
+							return tt.patchErr
+						}
+						return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+					},
+				}).Build()
+			r := &SandboxReconciler{Client: fc, Scheme: scheme}
+			var sent []sandboxroute.Route
+			if !tt.disabled {
+				r.syncRouteWithPeers = func(ctx context.Context, route sandboxroute.Route) error {
+					persisted := &agentsv1alpha1.Sandbox{}
+					require.NoError(t, fc.Get(ctx, client.ObjectKeyFromObject(box), persisted))
+					expected, err := sandboxroute.RouteFromSandbox(persisted)
+					require.NoError(t, err)
+					assert.Equal(t, expected, route, "must send the full route persisted by the API server")
+					assert.NotEqual(t, "10", route.ResourceVersion)
+					assert.Equal(t, persisted.ResourceVersion, box.ResourceVersion)
+					assert.Equal(t, tt.newStatus, box.Status, "local status must be updated before invoking the callback")
+					sent = append(sent, route)
+					return tt.syncErr
+				}
+			}
+			err := r.updateSandboxStatus(t.Context(), tt.newStatus, box)
+			if tt.patchErr != nil && !apierrors.IsNotFound(tt.patchErr) {
+				require.ErrorIs(t, err, tt.patchErr)
+			} else {
+				require.NoError(t, err)
+			}
+			wantCount := 0
+			if tt.wantSync {
+				wantCount = 1
+			}
+			assert.Len(t, sent, wantCount)
+			if tt.oldStatus.Phase == tt.newStatus.Phase && tt.name == "相同状态不 Patch" {
+				assert.Zero(t, patches)
+			} else {
+				assert.Equal(t, 1, patches)
+			}
+			persisted := &agentsv1alpha1.Sandbox{}
+			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(box), persisted))
+			if tt.patchErr != nil {
+				assert.Equal(t, tt.oldStatus, box.Status)
+				assert.Equal(t, "10", box.ResourceVersion)
+				assert.Equal(t, tt.oldStatus, persisted.Status)
+			} else {
+				assert.Equal(t, tt.newStatus, persisted.Status)
+			}
+		})
 	}
 }
 

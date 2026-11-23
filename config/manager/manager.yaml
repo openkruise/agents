@@ -79,6 +79,9 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
           - --webhook-cert-path=/home/nonroot/sandbox-controller-webhook-certs
+          # Optional: actively sync routes to manager/gateway; an empty selector disables sync.
+          # ACK deployment example: discover peers in sandbox-system on memberlist port 7946.
+          # - --peer-selector=agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager
           # OpenTelemetry tracing (uncomment to enable).
           # The bundled demo Collector (config/otel-collector) serves plaintext
           # gRPC without TLS, hence insecure=true; switch to false only after
@@ -94,7 +97,21 @@ spec:
             value: commit-job:latest
           - name: CLUSTER_ID
             value: "e2e-cluster"
-        ports: []
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+        ports:
+          - name: memberlist-tcp
+            containerPort: 7946
+            protocol: TCP
+          - name: memberlist-udp
+            containerPort: 7946
+            protocol: UDP
         securityContext:
           readOnlyRootFilesystem: false
           allowPrivilegeEscalation: false

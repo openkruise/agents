@@ -18,7 +18,6 @@ package proxy
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -288,10 +287,9 @@ func (rp *recordingPeer) getReceived() []sandboxroute.Route {
 // for the test's lifetime.
 func overridePeerTransport(t *testing.T, s *Server, routes map[string]string, timeout time.Duration) {
 	t.Helper()
-	s.peerOutbound = &PeerOutbound{
-		scheme: "http",
-		client: &http.Client{Timeout: timeout, Transport: &muxRoundTripper{routes: routes}},
-	}
+	s.peerOutbound = refresh.NewTestPeerOutbound(
+		&http.Client{Timeout: timeout, Transport: &muxRoundTripper{routes: routes}},
+	)
 }
 
 func peerAddr(ip string) string {
@@ -564,27 +562,4 @@ func newMemberlistPeerForTest(t *testing.T, c client.Client, name string) *membe
 		peer: peer,
 		port: port,
 	}
-}
-
-func TestRequestPeerAddressAndTransport(t *testing.T) {
-	t.Run("invalid IP", func(t *testing.T) {
-		err := NewPeerOutbound(nil).request(t.Context(), http.MethodPost, "not-an-ip", refresh.Path, nil)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid peer IP")
-	})
-
-	t.Run("plaintext disables proxy and redirects", func(t *testing.T) {
-		out := NewPeerOutbound(nil)
-		assert.Equal(t, "http", out.scheme)
-		transport, ok := out.client.Transport.(*http.Transport)
-		require.True(t, ok)
-		assert.Nil(t, transport.Proxy)
-		assert.ErrorIs(t, out.client.CheckRedirect(&http.Request{}, []*http.Request{{}}), errPeerRedirect)
-		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
-		out = NewPeerOutbound(tlsConfig)
-		assert.Equal(t, "https", out.scheme)
-		transport, ok = out.client.Transport.(*http.Transport)
-		require.True(t, ok)
-		assert.Same(t, tlsConfig, transport.TLSClientConfig)
-	})
 }

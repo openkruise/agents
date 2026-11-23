@@ -34,7 +34,6 @@ import (
 
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/peersecurity"
-	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
@@ -71,7 +70,7 @@ type ReadinessCheck func() error
 var (
 	globalPeerRuntimeMu sync.RWMutex
 	globalPeerManager   peers.Peers
-	globalPeerOutbound  *proxy.PeerOutbound
+	globalPeerOutbound  *refresh.PeerOutbound
 
 	// processServer is stored by Start on a Go goroutine and loaded by
 	// StopProcess from Envoy's main thread, so it must stay atomic.
@@ -81,7 +80,7 @@ var (
 	processStop = defaultProcessStop
 )
 
-func setPeerRuntime(pm peers.Peers, outbound *proxy.PeerOutbound) {
+func setPeerRuntime(pm peers.Peers, outbound *refresh.PeerOutbound) {
 	globalPeerRuntimeMu.Lock()
 	defer globalPeerRuntimeMu.Unlock()
 	globalPeerManager = pm
@@ -98,7 +97,7 @@ func GetPeerManager() peers.Peers {
 
 // GetPeerOutbound returns this process's outbound peer client for use by the
 // wake package. Returns nil if the server has not been started yet.
-func GetPeerOutbound() *proxy.PeerOutbound {
+func GetPeerOutbound() *refresh.PeerOutbound {
 	globalPeerRuntimeMu.RLock()
 	defer globalPeerRuntimeMu.RUnlock()
 	return globalPeerOutbound
@@ -224,7 +223,7 @@ type Server struct {
 	registry           *registry.Registry
 	readinessCheck     ReadinessCheck
 	peerServerTLS      *tls.Config
-	peerOutbound       *proxy.PeerOutbound
+	peerOutbound       *refresh.PeerOutbound
 }
 
 // NewServer creates a new peer server
@@ -304,7 +303,7 @@ func (s *Server) Start(ctx context.Context) error {
 		cfg.ClientAuth = tls.VerifyClientCertIfGiven
 		s.peerServerTLS = cfg
 	}
-	s.peerOutbound = proxy.NewPeerOutbound(clientTLS)
+	s.peerOutbound = refresh.NewPeerOutbound(clientTLS)
 	s.httpServer.Handler = s.newServeMux(s.peerServerTLS != nil)
 
 	lis, err := net.Listen("tcp", s.httpServer.Addr)

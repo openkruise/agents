@@ -24,6 +24,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -384,7 +385,8 @@ func (m *MemberlistPeers) Stop(ctx context.Context) error {
 	}
 }
 
-// GetPeers returns the current list of alive peers (excluding self)
+// GetPeers returns the current list of alive peers (excluding self and
+// sender-only members, which serve no route refreshes)
 func (m *MemberlistPeers) GetPeers() []Peer {
 	if !m.started.Load() {
 		return nil
@@ -392,7 +394,7 @@ func (m *MemberlistPeers) GetPeers() []Peer {
 
 	peers := make([]Peer, 0, len(m.list.Members()))
 	for _, member := range m.list.Members() {
-		if member.Name == m.localName {
+		if member.Name == m.localName || strings.HasPrefix(member.Name, NodePrefixSandboxController) {
 			continue
 		}
 		if member.State == memberlist.StateAlive {

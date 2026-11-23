@@ -18,11 +18,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"net/http"
-	"sync"
 
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandboxroute"
@@ -36,54 +31,8 @@ func (s *Server) SetRoute(route sandboxroute.Route) sandboxroute.MutationResult 
 	return result
 }
 
-// SyncRouteWithPeers sends a route update to all peer gateways via HTTP POST /refresh.
-// outbound is this process's peer-owner client. Callers must not construct a
-// second client with an independent security decision.
-func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route sandboxroute.Route, outbound *PeerOutbound) error {
-	body, err := json.Marshal(route)
-	if err != nil {
-		return err
-	}
-
-	// Get peers from Peers - no manual locking needed
-	var peerList []peers.Peer
-	if peersManager != nil {
-		peerList = peersManager.GetPeers()
-	}
-
-	peerCount.Set(float64(len(peerList)))
-
-	if len(peerList) == 0 {
-		return nil
-	}
-	if outbound == nil {
-		return fmt.Errorf("peer outbound client is not configured")
-	}
-
-	var (
-		wg       sync.WaitGroup
-		mu       sync.Mutex
-		peerErrs []error
-	)
-
-	for _, peer := range peerList {
-		wg.Add(1)
-		go func(peerIP string) {
-			defer wg.Done()
-			if requestErr := outbound.requestWithRetry(ctx, http.MethodPost, peerIP, refresh.Path, body); requestErr != nil {
-				mu.Lock()
-				peerErrs = append(peerErrs, requestErr)
-				mu.Unlock()
-			}
-		}(peer.IP)
-	}
-	wg.Wait()
-
-	return errors.Join(peerErrs...)
-}
-
 func (s *Server) SyncRouteWithPeers(ctx context.Context, route sandboxroute.Route) error {
-	return SyncRouteWithPeers(ctx, s.peersManager, route, s.peerOutbound)
+	return refresh.SyncRouteWithPeers(ctx, s.peersManager, route, s.peerOutbound)
 }
 
 func (s *Server) LoadRoute(id string) (sandboxroute.Route, bool) {

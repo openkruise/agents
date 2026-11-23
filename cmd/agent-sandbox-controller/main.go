@@ -92,6 +92,7 @@ func main() {
 	var clientBurst int
 	var defaultPersistentContents string
 	var runtimeClientCertDir string
+	var peerSelector string
 
 	// New variables for pprof
 	var enablePprof bool
@@ -135,6 +136,8 @@ func main() {
 			"When set, the controller reaches TLS-capable agent-runtimes over HTTPS and advertises the runtime "+
 			"HTTPS capability on newly created sandboxes; empty disables both. Set it only after the sidecar "+
 			"injection template already serves HTTPS, since the capability annotation is write-once.")
+
+	flag.StringVar(&peerSelector, "peer-selector", "", "Label selector of memberlist seed Pods in sandbox-system; empty disables controller route sync.")
 
 	var metricsAsyncWorkers int
 	var metricsAsyncQueueCap int
@@ -363,13 +366,20 @@ func main() {
 		setupLog.Info("runtime client TLS disabled, using legacy plaintext runtime paths")
 	}
 
+	routeSync, err := sandboxctrl.SetupRouteSync(mgr, peerSelector)
+	if err != nil {
+		setupLog.Error(err, "unable to setup controller route sync")
+		os.Exit(1)
+	}
+	deps := controller.Deps{MetricsCleanup: metricsGC, RuntimeTLSBundle: runtimeTLSBundle}
+	if routeSync != nil {
+		deps.SyncRouteWithPeers = routeSync.SyncRouteWithPeers
+	}
 	setupLog.Info("setup controllers",
 		"metricsAsyncWorkers", metricsAsyncWorkers,
-		"metricsAsyncQueueCap", metricsAsyncQueueCap)
-	if err = controller.SetupWithManager(mgr, controller.Deps{
-		MetricsCleanup:   metricsGC,
-		RuntimeTLSBundle: runtimeTLSBundle,
-	}); err != nil {
+		"metricsAsyncQueueCap", metricsAsyncQueueCap,
+		"routeSyncEnabled", routeSync != nil)
+	if err = controller.SetupWithManager(mgr, deps); err != nil {
 		setupLog.Error(err, "unable to setup controllers")
 		os.Exit(1)
 	}
