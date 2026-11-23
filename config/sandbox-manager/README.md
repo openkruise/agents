@@ -27,13 +27,31 @@ If deploying to a real K8s cluster, please modify to an appropriate tag and push
 
 ## E2B network policy with Agentio
 
-Start sandbox-manager with `--e2b-network-annotation=true` to store the network
-configuration of newly delivered E2B sandboxes in `agents.kruise.io/e2b-network`.
-The Agentio deployment needs Sandbox policy discovery and must route controlled
-outbound traffic through its native egress gateway. Existing E2B sandboxes keep
-using their current TrafficPolicy. Deploy this version to all sandbox-manager
-replicas before enabling the flag, as the annotation selects the policy source
-for subsequent updates and reads.
+By default, sandbox-manager stores E2B outbound allow and deny lists in a
+`TrafficPolicy`. To enable annotation mode, upgrade all sandbox-manager replicas,
+then start them with `--e2b-network-annotation=true`. Enable Sandbox policy
+discovery in Agentio and route managed outbound traffic through its egress gateway.
+New pool claims and snapshot clones store E2B network settings in the
+`agents.kruise.io/e2b-network` annotation. Existing sandboxes continue to
+use the backend selected at creation.
+
+For a sandbox created with `allow_internet_access` set to `false` and
+`network.allowOut` set to `["192.0.2.10"]`, read the annotation using the
+Sandbox's Kubernetes namespace and object name.
+
+```shell
+kubectl get sandboxes.agents.kruise.io "$SANDBOX_NAME" -n "$NAMESPACE" \
+  -o go-template='{{index .metadata.annotations "agents.kruise.io/e2b-network"}}{{"\n"}}'
+```
+
+In annotation mode, the command prints the following JSON.
+
+```json
+{"allowInternetAccess":false,"network":{"allowOut":["192.0.2.10"]}}
+```
+
+The proposal includes a create request, the resulting Sandbox YAML, and the
+fields to send when updating a policy. [E2B network annotation](../../docs/proposals/20261121-e2b-inline-security-profile.md#e2b-network-annotation)
 
 ## API Key Quota
 

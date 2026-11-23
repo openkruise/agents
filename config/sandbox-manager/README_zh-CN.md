@@ -25,10 +25,28 @@ docker build -t sandbox-manager:latest .
 
 ## 使用 Agentio 管理 E2B 出口策略
 
-启动 sandbox-manager 时设置 `--e2b-network-annotation=true`，将新交付 E2B 沙箱的网络配置写入
-`agents.kruise.io/e2b-network`。Agentio 需要启用 Sandbox 策略发现，并通过原生出口网关转发受管出站流量。
-存量 E2B 沙箱继续使用原有 TrafficPolicy。先升级所有 sandbox-manager 副本再启用参数，后续策略读写会根据
-Sandbox 上是否有该注解选择策略来源。
+默认情况下，sandbox-manager 使用 `TrafficPolicy` 保存 E2B 出口网络的允许和拒绝列表。
+要启用注解模式，请先升级所有 sandbox-manager 副本，再使用 `--e2b-network-annotation=true` 启动。
+在 Agentio 中启用 Sandbox 策略发现，并将受管出站流量路由到其出口网关。
+此后，从池中领取或从快照克隆的新沙箱将 E2B 网络配置保存在 `agents.kruise.io/e2b-network` 注解中。
+已有沙箱继续使用创建时选定的策略存储方式。
+
+例如，创建沙箱时将 `allow_internet_access` 设为 `false`，将 `network.allowOut` 设为
+`["192.0.2.10"]`。用 Sandbox 在 Kubernetes 中的命名空间和资源名称读取注解。
+
+```shell
+kubectl get sandboxes.agents.kruise.io "$SANDBOX_NAME" -n "$NAMESPACE" \
+  -o go-template='{{index .metadata.annotations "agents.kruise.io/e2b-network"}}{{"\n"}}'
+```
+
+注解模式下，该命令输出以下 JSON。
+
+```json
+{"allowInternetAccess":false,"network":{"allowOut":["192.0.2.10"]}}
+```
+
+完整的创建请求、生成的 Sandbox YAML，以及更新策略时需要传入的字段，见
+[E2B 网络注解说明](../../docs/proposals/20261121-e2b-inline-security-profile.md#e2b-network-annotation)。
 
 ## API Key Quota
 

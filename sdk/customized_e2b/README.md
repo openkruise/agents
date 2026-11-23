@@ -42,6 +42,11 @@ if __name__ == "__main__":
         sbx.run_code("print('hello world')")
 ```
 
+For outbound network policy, supply `allow_internet_access` and `network` in
+the E2B create request. With annotation mode enabled, sandbox-manager writes
+these settings to `agents.kruise.io/e2b-network` on the delivered Sandbox.
+[Example request and resulting Sandbox annotation](../../docs/proposals/20261121-e2b-inline-security-profile.md#e2b-network-annotation)
+
 ## Traffic JWT Refresh
 
 Traffic JWT refresh is an independent, opt-in monkey patch. It requires Python
