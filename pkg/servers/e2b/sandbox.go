@@ -44,13 +44,14 @@ var (
 		sandboxstate.Running, sandboxstate.Paused,
 		sandboxstate.Provisioning, sandboxstate.Expired, sandboxstate.Dead,
 	}
-	// Describe and delete admit provisioning instances. Expired and terminal
-	// instances are treated as missing.
+	// List and Describe include provisioning instances.
 	managedSandboxStates = []string{
 		sandboxstate.Running, sandboxstate.Paused,
 		sandboxstate.Provisioning,
 	}
 	liveSandboxStates = []string{sandboxstate.Running, sandboxstate.Paused}
+	// Owners can also kill an expired instance while it awaits reclamation.
+	deletableSandboxStates = append([]string{sandboxstate.Expired}, managedSandboxStates...)
 )
 
 func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string, expectedStates []string) (infra.Sandbox, *web.ApiError) {

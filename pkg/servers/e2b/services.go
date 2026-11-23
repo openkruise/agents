@@ -78,7 +78,7 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		}
 	}
 
-	sbx, apiError := sc.getSandboxOfUser(r.Context(), id, managedSandboxStates)
+	sbx, apiError := sc.getSandboxOfUser(r.Context(), id, deletableSandboxStates)
 	if apiError != nil {
 		if apiError.Code == http.StatusNotFound {
 			log.Info("sandbox not found, just return success", "id", id)

@@ -19,8 +19,12 @@ claim replicas counts creating, available, running and paused instances.
 
 E2B List, Describe and Delete admit running, paused and provisioning
 instances. List and Describe present provisioning instances as running.
-Other states are omitted from lists, Describe returns 404, and Delete
-returns 204 without deleting the resource. Manual Pause returns 409 if
+List omits other states and Describe returns 404 for them. Owners can
+also delete an expired instance. Once deletion is accepted, the manager
+removes its route and requests quota release. Expiry alone leaves the
+instance counted until deletion or termination is observed. Delete returns
+204 for an absent instance or one outside the deletable states.
+Manual Pause returns 409 if
 the instance is marked for deletion or its shutdown deadline has passed,
 even when it is still running and ready. Such a request cannot extend
 the instance's retention. Traffic forwarding requires a running

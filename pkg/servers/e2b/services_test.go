@@ -1997,40 +1997,51 @@ func TestDeleteSandbox(t *testing.T) {
 }
 
 func TestDeleteSandbox_ReleasesQuotaAfterAcceptedDelete(t *testing.T) {
-	fakeQuota := &fakeQuotaManager{}
-	controller, _, teardown := SetupWithQuota(t, fakeQuota)
-	defer teardown()
+	for _, state := range []string{sandboxstate.Running, sandboxstate.Expired} {
+		t.Run(state, func(t *testing.T) {
+			fakeQuota := &fakeQuotaManager{}
+			controller, fc, teardown := SetupWithQuota(t, fakeQuota)
+			defer teardown()
 
-	user := &models.CreatedTeamAPIKey{
-		ID:        uuid.New(),
-		Key:       InitKey,
-		Name:      "admin",
-		Team:      models.AdminTeam(),
-		QuotaSpec: quotaSpecForAPIKeyTest(2),
+			user := &models.CreatedTeamAPIKey{
+				ID:        uuid.New(),
+				Key:       InitKey,
+				Name:      "admin",
+				Team:      models.AdminTeam(),
+				QuotaSpec: quotaSpecForAPIKeyTest(2),
+			}
+
+			cleanup := CreateSandboxPool(t, controller, "test-template", 1)
+			_ = cleanup
+
+			createResp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+				},
+			}, nil, user))
+			require.Nil(t, apiErr)
+			require.NotNil(t, createResp.Body)
+
+			sandboxID := createResp.Body.SandboxID
+			sandbox := GetSandbox(t, sandboxID, fc)
+			if state == sandboxstate.Expired {
+				expired := metav1.NewTime(time.Now().Add(-time.Minute))
+				sandbox.Spec.ShutdownTime = &expired
+				require.NoError(t, fc.Update(t.Context(), sandbox))
+				waitForSandboxState(t, controller, sandboxID, user, state)
+			}
+			deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{"sandboxID": sandboxID}, user))
+
+			require.Nil(t, apiErr)
+			assert.Equal(t, http.StatusNoContent, deleteResp.Code)
+			assert.Equal(t, int64(1), fakeQuota.releaseCalls.Load())
+			assert.True(t, fakeQuota.releaseHasDeadline.Load())
+			assert.Equal(t, user.ID.String(), fakeQuota.lastRelease.User)
+			assert.NotEmpty(t, fakeQuota.lastRelease.LockString)
+			assert.True(t, apierrors.IsNotFound(fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sandbox), &v1alpha1.Sandbox{})))
+		})
 	}
-
-	cleanup := CreateSandboxPool(t, controller, "test-template", 1)
-	_ = cleanup
-
-	createResp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
-		TemplateID: "test-template",
-		Metadata: map[string]string{
-			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
-		},
-	}, nil, user))
-	require.Nil(t, apiErr)
-	require.NotNil(t, createResp.Body)
-
-	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
-		"sandboxID": createResp.Body.SandboxID,
-	}, user))
-
-	require.Nil(t, apiErr)
-	assert.Equal(t, http.StatusNoContent, deleteResp.Code)
-	assert.Equal(t, int64(1), fakeQuota.releaseCalls.Load())
-	assert.True(t, fakeQuota.releaseHasDeadline.Load())
-	assert.Equal(t, user.ID.String(), fakeQuota.lastRelease.User)
-	assert.NotEmpty(t, fakeQuota.lastRelease.LockString)
 }
 
 func TestDeleteSandbox_UnlimitedKeyDoesNotReleaseQuota(t *testing.T) {
@@ -2403,7 +2414,7 @@ func TestDeleteSandboxTerminalDeadClaimedSandbox(t *testing.T) {
 	assert.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, &v1alpha1.Sandbox{}))
 }
 
-// When the lookup resolves a state outside managedSandboxStates
+// When the lookup resolves a state outside deletableSandboxStates
 // (here "creating" from a Pending phase), the
 // manager rejects the lookup and the handler reports success without
 // performing a deletion; the CR stays untouched.

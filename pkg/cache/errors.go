@@ -16,7 +16,12 @@ limitations under the License.
 
 package cache
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"k8s.io/apimachinery/pkg/types"
+)
 
 var (
 	ErrSandboxNotFound = errors.New("sandbox not found in cache")
@@ -29,3 +34,13 @@ var (
 	// contract (for example duplicated reserved labels written out of band).
 	ErrSandboxIDAmbiguous = errors.New("multiple claimed sandboxes match sandbox ID")
 )
+
+// SandboxPauseConflictError reports an observation that prevents pausing a sandbox.
+type SandboxPauseConflictError struct {
+	Sandbox types.NamespacedName
+	Reason  string
+}
+
+func (e *SandboxPauseConflictError) Error() string {
+	return fmt.Sprintf("sandbox %s is not pausable, reason: %s", e.Sandbox, e.Reason)
+}

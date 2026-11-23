@@ -694,6 +694,72 @@ func TestSandbox_PauseRetryRejectsExpiredDeadline(t *testing.T) {
 	assertTimePtrEqual(t, timePtrOrNil(expired.ShutdownTime), stored.Spec.ShutdownTime, "concurrent deadline")
 }
 
+func TestSandbox_PauseWaitRejectsLifecycleConflict(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(context.Context, ctrl.Client, *v1alpha1.Sandbox) error
+		reason string
+	}{
+		{
+			name: "expired",
+			change: func(ctx context.Context, client ctrl.Client, sandbox *v1alpha1.Sandbox) error {
+				sandbox.Spec.ShutdownTime = timePtrOrNil(time.Now().Add(-time.Minute))
+				return client.Update(ctx, sandbox)
+			},
+			reason: "ShutdownTimeReached",
+		},
+		{
+			name: "deletion started",
+			change: func(ctx context.Context, client ctrl.Client, sandbox *v1alpha1.Sandbox) error {
+				return client.Delete(ctx, sandbox)
+			},
+			reason: "SandboxIsTerminating",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			sandbox := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "pause-wait-conflict",
+					Namespace:  "default",
+					Finalizers: []string{"agents.kruise.io/test"},
+				},
+				Spec:   v1alpha1.SandboxSpec{ShutdownTime: timePtrOrNil(time.Now().Add(time.Hour))},
+				Status: v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxRunning},
+			}
+			SetSandboxCondition(sandbox, string(v1alpha1.SandboxConditionReady), metav1.ConditionTrue, "Ready", "")
+			CreateSandboxWithStatus(t, fc, sandbox)
+
+			writeCompleted := false
+			client := interceptor.NewClient(cache.GetClient().(ctrl.WithWatch), interceptor.Funcs{
+				Update: func(ctx context.Context, c ctrl.WithWatch, obj ctrl.Object, opts ...ctrl.UpdateOption) error {
+					if err := c.Update(ctx, obj, opts...); err != nil {
+						return err
+					}
+					writeCompleted = true
+					require.NoError(t, tt.change(ctx, fc, obj.(*v1alpha1.Sandbox).DeepCopy()))
+					return nil
+				},
+			})
+			s := AsSandbox(sandbox, &apiReaderOverrideCache{Provider: cache, client: client})
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			err = s.Pause(ctx, infra.PauseOptions{})
+			require.True(t, writeCompleted)
+			require.ErrorContains(t, err, tt.reason)
+			require.Equal(t, managererrors.ErrorConflict, managererrors.GetErrCode(err))
+			var conflict *cachepkg.SandboxPauseConflictError
+			require.ErrorAs(t, err, &conflict)
+			assert.Equal(t, tt.reason, conflict.Reason)
+			var stored v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), ctrl.ObjectKeyFromObject(sandbox), &stored))
+			assert.True(t, stored.Spec.Paused)
+		})
+	}
+}
+
 func TestSandbox_PauseRefreshesBeforePreconditionChecks(t *testing.T) {
 	tests := []struct {
 		name string

@@ -244,11 +244,8 @@ func SetNowFuncForTesting(fn func() time.Time) func() {
 	return func() { nowFunc = prev }
 }
 
-// Diagnostic reasons reported alongside the neutral lifecycle states. Each
-// value identifies the exact branch of evaluateSandboxLifecycle that produced a
-// state, so it stays unique and easy to search when debugging conditions. The
-// vocabulary is internal to this mapping: the neutral contract transports a
-// reason as opaque text, and callers outside this package must not branch on it.
+// GetSandboxState returns these reasons to identify the branch that produced
+// each state. Callers outside this package treat the reason as opaque text.
 const (
 	sandboxStateReasonResourceDeleted     = "ResourceDeleted"
 	sandboxStateReasonShutdownTimeReached = "ShutdownTimeReached"

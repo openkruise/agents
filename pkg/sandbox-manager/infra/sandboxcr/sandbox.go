@@ -18,6 +18,7 @@ package sandboxcr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,7 +35,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
 	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
-	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/sandboxroute"
@@ -518,7 +519,7 @@ func (s *Sandbox) Request(ctx context.Context, method, path string, port int, bo
 
 func validatePause(sbx *agentsv1alpha1.Sandbox) error {
 	if pausable, reason := utils.IsSandboxPausable(sbx); !pausable {
-		return errors.NewError(errors.ErrorConflict, "sandbox is not pausable, reason: %s", reason)
+		return managererrors.NewError(managererrors.ErrorConflict, "sandbox is not pausable, reason: %s", reason)
 	}
 	return nil
 }
@@ -582,6 +583,10 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error
 	log.Info("waiting sandbox pause")
 	start := time.Now()
 	if err = pauseTask.Wait(pauseWaitMaxTimeout); err != nil {
+		var conflict *cache.SandboxPauseConflictError
+		if errors.As(err, &conflict) {
+			err = managererrors.WrapError(managererrors.ErrorConflict, err, "%s", conflict)
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			log.Info("stop waiting sandbox pause: request canceled by client (disconnected or client-side timeout)",
 				"err", err, "ctxErr", ctxErr)
@@ -620,7 +625,7 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) (err err
 	}
 
 	if resumable, reason := utils.IsSandboxResumable(s.Sandbox); !resumable {
-		return errors.NewError(errors.ErrorConflict, "sandbox is not resumable, reason: %s", reason)
+		return managererrors.NewError(managererrors.ErrorConflict, "sandbox is not resumable, reason: %s", reason)
 	}
 	resumeTask, err := s.Cache.NewSandboxResumeTask(ctx, s.Sandbox)
 	if err != nil {
