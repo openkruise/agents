@@ -38,6 +38,19 @@ init-runtime-request annotation. The runtime does not learn a credential merely
 because the control plane persists it or a client sends its header. For a fresh,
 uninitialized runtime, this credential protects the gateway boundary only.
 
+## Clone credentials
+
+A clone whose checkpoint has an init-runtime request keeps that request and its
+token unchanged. This preserves the existing runtime credential, including when
+runtime memory is restored; ordinary clones from the same checkpoint continue
+to share that UUID.
+
+When no init-runtime request exists, each newly prepared clone receives a fresh
+gateway UUID. It differs from the source credential and from sibling clones.
+The clone still has no initialization request and makes no `/init` call. Neither
+the source Sandbox nor the checkpoint is modified, and the create response
+returns the new credential through the existing token annotation.
+
 ## Gateway admission policy
 
 For routes without JWT enforcement, `enable-auth=true` requires both a nonempty
@@ -65,9 +78,10 @@ their separate verification and fail-closed behavior regardless of this switch.
   for both hops requires a separate design.
 - Existing tokenless Sandboxes are not migrated and are now rejected by gateways
   with UUID authentication enabled. Provision replacement Sandboxes through the
-  updated claim paths before relying on their credentials. Clone behavior is
-  unchanged, but any tokenless clone is likewise rejected by an auth-enabled
-  gateway. This intentionally removes the former empty-token allow policy.
+  updated claim or clone paths before relying on their credentials. Initialized
+  clones retain the checkpoint token; clones without an init request receive a
+  new token. An init request containing an empty token is not repaired by this
+  clone change and is still rejected by an auth-enabled gateway.
 - Direct Pod access is outside this gateway protection boundary.
 
 ## Validation
@@ -85,3 +99,9 @@ authentication and JWT-required route tests retain their existing expectations.
 SandboxClaim option tests require a nonempty outer token in every successful
 case, including skipped initialization and templates without a runtime, while
 retaining their existing nil-init checks and token equality checks when initialized.
+Clone preparation tests create two clones from the same checkpoint and verify
+new UUIDs only when initialization was skipped, unchanged normal-init tokens,
+and an unmodified checkpoint. Snapshot/clone E2E cases cover both paths, including
+workload access through header and Host routing and rejection of source/sibling
+credentials for skipped-init clones. They require `CHECKPOINT_E2E=true` and a
+checkpoint-capable cluster; the current Kind job collects but skips these cases.
