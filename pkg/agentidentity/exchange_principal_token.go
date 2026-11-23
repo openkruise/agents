@@ -48,7 +48,7 @@ import (
 // issuer is ever deployed behind such a prefix, this path would need the same
 // treatment; it is not given it here because nothing in this phase deploys
 // one.
-const ExchangePrincipalTokenPath = "/oauth2/exchange-principal-token"
+const ExchangePrincipalTokenPath = "/oauth2/exchange-principal-token" // #nosec G101 -- a URL path, not a credential
 
 // maxExchangeRequestBodySize bounds the request body ExchangePrincipalToken
 // will read. The body carries exactly one ID Token; even a large one is a few

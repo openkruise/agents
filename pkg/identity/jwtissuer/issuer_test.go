@@ -819,6 +819,58 @@ func TestVerifyAgentToken(t *testing.T) {
 			},
 			expectError: "missing sandbox_uid",
 		},
+		{
+			name:        "empty token",
+			rawJWT:      func() string { return "" },
+			expectError: "must not be empty",
+		},
+		{
+			name: "oversized token",
+			rawJWT: func() string {
+				return strings.Repeat("a", maxAgentTokenSize+1)
+			},
+			expectError: "exceeds maximum size",
+		},
+		{
+			name:        "unparsable token",
+			rawJWT:      func() string { return "not-a-jwt-at-all" },
+			expectError: "parse agent token",
+		},
+		{
+			name: "missing kid header",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				return signAgentTokenWith(t, activeKey, "", claims)
+			},
+			expectError: "must contain a kid",
+		},
+		{
+			name: "missing exp claim",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				claims.Expiry = nil
+				return signAgentTokenWith(t, activeKey, activeKeyID, claims)
+			},
+			expectError: "missing exp claim",
+		},
+		{
+			name: "missing iat claim",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				claims.IssuedAt = nil
+				return signAgentTokenWith(t, activeKey, activeKeyID, claims)
+			},
+			expectError: "missing iat claim",
+		},
+		{
+			name: "missing nbf claim",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				claims.NotBefore = nil
+				return signAgentTokenWith(t, activeKey, activeKeyID, claims)
+			},
+			expectError: "missing nbf claim",
+		},
 	}
 
 	for _, tt := range tests {
