@@ -268,8 +268,9 @@ type SandboxManager struct {
 	peerSecurity       peersecurity.Inputs
 	peerReader         client.Reader
 
-	infra infra.Infrastructure
-	proxy *proxy.Server
+	infra             infra.Infrastructure
+	proxy             *proxy.Server
+	transportsStarted bool
 
 	routeSource infra.SandboxRouteSource
 
@@ -440,16 +441,11 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 
 	// Local peer credentials are validated before the route listener binds so
 	// a misconfigured replica never advertises itself.
-	if err := m.applyPeerSecurity(ctx); err != nil {
+	if err := m.StartTransports(ctx); err != nil {
 		return err
 	}
-
-	// The peer route listener must accept refreshes before memberlist
-	// advertises this replica; peers start syncing routes as soon as the
-	// background join succeeds.
-	klog.InfoS("starting proxy")
-	if err := m.proxy.Run(); err != nil {
-		return fmt.Errorf("failed to start proxy: %w", err)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if m.peersManager != nil {
 		if err := m.peersManager.Start(ctx, m.bindAddress, m.memberlistBindPort); err != nil {
@@ -463,6 +459,32 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	if m.quotaAntiDrift != nil {
 		m.quotaAntiDrift.Run(ctx)
 	}
+	return nil
+}
+
+// StartTransports starts controlled listeners without starting business workers
+// or advertising membership. Startup is serialized by the Controller; Run reuses
+// these listeners after initial configuration and route synchronization.
+func (m *SandboxManager) StartTransports(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if m.transportsStarted {
+		return nil
+	}
+	if err := m.applyPeerSecurity(ctx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// The route listener accepts refreshes before memberlist advertises this
+	// replica; peers start syncing as soon as the background join succeeds.
+	klog.InfoS("starting proxy")
+	if err := m.proxy.Run(); err != nil {
+		return fmt.Errorf("failed to start proxy: %w", err)
+	}
+	m.transportsStarted = true
 	return nil
 }
 
@@ -529,7 +551,7 @@ func (m *SandboxManager) Stop(ctx context.Context) {
 	}
 	// Stop quota anti-drift before closing the Redis client
 	if m.quotaAntiDrift != nil {
-		m.quotaAntiDrift.Stop()
+		m.quotaAntiDrift.Stop(ctx)
 	}
 	// Close through the backend: ReloadQuota may have replaced the connection.
 	if m.quotaRedisBackend != nil {

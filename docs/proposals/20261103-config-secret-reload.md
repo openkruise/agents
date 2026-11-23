@@ -42,18 +42,24 @@ granularity is expressed by splitting a component, not by widening the result
 contract.
 
 Invalid shape, deletion and temporary read failure preserve all live components.
-Before the first usable configuration, startup waits without opening business
-listeners. Configuration corrections resume startup in the same process;
-termination cancels startup without waiting for normal runtime cleanup. The
-existing startup probe controls the container's startup budget.
+By default, sandbox-manager waits for the first usable configuration before
+opening business listeners. With `--ready-before-config` and `--secret-config`,
+the pod can become Ready and rolling replacement can proceed while the Secret
+is still missing or invalid. The control API rejects business requests until
+configuration, runtime initialization and initial route delivery finish.
+Health and metrics remain available. Envoy forwards Sandbox traffic whenever
+it has a route.
+
+The pod can stay Ready indefinitely while waiting. Correcting the Secret lets
+the same process serve business requests without restarting. On termination,
+the process closes admission and stops the listeners it started.
 
 API-key storage keeps one stable public object. Configured administrator-key
 intent is separate from store observation: direct store edits are not overwritten
 by unrelated configuration updates. Secret storage retains its bootstrap read
-boundary and informer refresh protocol. The dispatcher is the sole configuration
-readiness gate: startup waits for every component's first confirmation before
-starting Manager and HTTP. It selects directly on the dispatcher's one-shot
-initialization signal, alongside cancellation and premature source exit.
+boundary and informer refresh protocol. The dispatcher signals readiness after
+every component confirms its initial configuration. Manager business workers
+wait for this signal, and startup stops if canceled or if the source exits early.
 The API controller requires a configuration source;
 the entrypoint supplies either the Secret observer or static flag/env input.
 Empty increments leave store observation to the informer. MySQL prepares candidate connections
