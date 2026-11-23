@@ -69,6 +69,14 @@ type initAPI struct {
 // reached the runtime over HTTPS/mTLS or plaintext HTTP, without turning on the
 // V(DebugLogLevel) per-attempt logs of the shared transport.
 func (i *initAPI) Init(ctx context.Context, opts config.InitRuntimeOptions) error {
+	for _, port := range opts.AdditionalInitPorts {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("invalid additional runtime init port %d", port)
+		}
+	}
+	if len(opts.AdditionalInitPorts) > 0 && i.r.tlsEnabled {
+		return fmt.Errorf("additional runtime initialization requires a configured HTTP runtime; TLS runtime bridging is not supported")
+	}
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(i.r.sbx))
 	transport := i.r.transportLogValues(i.r.sbx)
 	log.Info("init runtime starting", append(transport, "reInit", opts.ReInit)...)
@@ -83,7 +91,7 @@ func (i *initAPI) Init(ctx context.Context, opts config.InitRuntimeOptions) erro
 	if opts.ReInit && errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
 		log.Info("init runtime returned 401, treated as success because ReInit is true",
 			append(transport, "cost", time.Since(start))...)
-		return nil
+		err = nil
 	}
 	if err != nil {
 		// Logged here (in addition to the caller's own error handling) because
@@ -91,6 +99,13 @@ func (i *initAPI) Init(ctx context.Context, opts config.InitRuntimeOptions) erro
 		// which is the first thing to check on a runtime connectivity failure.
 		log.Error(err, "init runtime failed", append(transport, "cost", time.Since(start))...)
 		return err
+	}
+	for _, port := range opts.AdditionalInitPorts {
+		additional := *i.r
+		additional.initPort = port
+		if err := additional.call(ctx, http.MethodPost, initPath, opts, nil); err != nil {
+			return fmt.Errorf("initialize additional runtime port %d: %w", port, err)
+		}
 	}
 	log.Info("init runtime completed", append(transport, "cost", time.Since(start))...)
 	return nil

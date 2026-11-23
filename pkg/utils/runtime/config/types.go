@@ -27,8 +27,11 @@ import (
 type InitRuntimeOptions struct {
 	EnvVars     map[string]string `json:"envVars,omitempty"`
 	AccessToken string            `json:"accessToken,omitempty"`
-	ReInit      bool              `json:"-"`
-	SkipRefresh bool              `json:"skipRefresh,omitempty"`
+	// AdditionalInitPorts receive the same native initialization credential
+	// after envd accepts it. Empty preserves the existing initialization path.
+	AdditionalInitPorts []int `json:"additionalInitPorts,omitempty"`
+	ReInit              bool  `json:"-"`
+	SkipRefresh         bool  `json:"skipRefresh,omitempty"`
 }
 
 // NewDefaultAccessToken generates a default access token using UUID.

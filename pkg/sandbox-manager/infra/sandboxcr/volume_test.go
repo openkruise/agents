@@ -29,8 +29,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestCreateVolume(t *testing.T) {
@@ -484,4 +487,103 @@ func TestListVolumes(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, volumes, 0)
 	})
+}
+
+func TestResolveExistingCSIMounts(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		mutate    func(*corev1.PersistentVolumeClaim, *corev1.PersistentVolume)
+		input     infra.ExistingVolumeMount
+		wantError string
+	}{
+		{name: "existing bound PVC maps to native CSI", input: infra.ExistingVolumeMount{Name: "data", VolumeName: "shared", MountPath: "/mnt/data", SubPath: "child", ReadOnly: true}},
+		{name: "missing claim", input: infra.ExistingVolumeMount{Name: "data", VolumeName: "missing", MountPath: "/mnt/data"}, wantError: "does not exist"},
+		{name: "namespace isolation", mutate: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.PersistentVolume) { pvc.Namespace = "other" }, wantError: "does not exist"},
+		{name: "unbound claim", mutate: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.PersistentVolume) {
+			pvc.Status.Phase = corev1.ClaimPending
+		}, wantError: "must already be bound"},
+		{name: "foreign PV binding", mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
+			pv.Spec.ClaimRef.UID = "foreign-uid"
+		}, wantError: "not bound to the requested PVC"},
+		{name: "unsupported driver", mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
+			pv.Spec.CSI.Driver = "unsupported.example.com"
+		}, wantError: "not supported"},
+		{name: "non CSI PV", mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) { pv.Spec.CSI = nil }, wantError: "no found csi"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, c := NewTestInfra(t)
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: "default", UID: "claim-uid"}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "shared-pv"}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+			pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "shared-pv"}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Name: pvc.Name, Namespace: pvc.Namespace, UID: pvc.UID}, PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "test.example.com", VolumeAttributes: map[string]string{"path": "/base"}}}}}
+			if tt.mutate != nil {
+				tt.mutate(pvc, pv)
+			}
+			require.NoError(t, c.Create(t.Context(), pvc))
+			require.NoError(t, c.Create(t.Context(), pv))
+			beforePVC, beforePV := pvc.DeepCopy(), pv.DeepCopy()
+			box := AsSandbox(&agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "delivery", Namespace: "default", Annotations: map[string]string{agentsv1alpha1.AnnotationCSIVolumeConfig: "inherited"}}}, backend.Cache)
+			box.storageRegistry.RegisterProvider("test.example.com", &storages.MountProvider{})
+			input := tt.input
+			if input.Name == "" {
+				input = infra.ExistingVolumeMount{Name: "data", VolumeName: "shared", MountPath: "/mnt/data"}
+			}
+			opts, err := box.resolveExistingCSIMounts(t.Context(), []infra.ExistingVolumeMount{input})
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				assert.Nil(t, opts)
+				assert.Equal(t, "inherited", box.Annotations[agentsv1alpha1.AnnotationCSIVolumeConfig])
+			} else {
+				require.NoError(t, err)
+				require.Len(t, opts.MountOptionList, 1)
+				assert.Equal(t, config.DefaultCSIMountConcurrency, opts.Concurrency)
+				mount := opts.MountOptionList[0]
+				assert.Equal(t, "test.example.com", mount.Driver)
+				assert.Equal(t, "/mnt/data", mount.PublishRequest.TargetPath)
+				assert.True(t, mount.PublishRequest.Readonly)
+				assert.Equal(t, "/base/child", mount.PublishRequest.VolumeContext["path"])
+				assert.JSONEq(t, `[{"pvName":"shared-pv","mountPath":"/mnt/data","subPath":"child","readOnly":true}]`, opts.MountOptionListRaw)
+				assert.Equal(t, opts.MountOptionListRaw, box.Annotations[agentsv1alpha1.AnnotationCSIVolumeConfig])
+			}
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pvc), pvc))
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pv), pv))
+			assert.Equal(t, beforePVC, pvc)
+			assert.Equal(t, beforePV, pv)
+			var allocated agentsv1alpha1.SandboxList
+			require.NoError(t, c.List(t.Context(), &allocated))
+			assert.Empty(t, allocated.Items)
+		})
+	}
+}
+
+func TestResolveRawCSIMounts(t *testing.T) {
+	for _, tt := range []struct{ name, raw, wantError string }{
+		{"native PV", `[{"pvName":"native-pv","mountPath":"/data","subPath":"child","readOnly":true}]`, ""},
+		{"empty", `[]`, ""}, {"invalid config", `invalid`, "invalid CSI mount configuration"},
+		{"missing PV", `[{"pvName":"missing","mountPath":"/data"}]`, "not found"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, c := NewTestInfra(t)
+			pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "native-pv"}, Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "test.example.com", VolumeAttributes: map[string]string{"path": "/base"}}}}}
+			require.NoError(t, c.Create(t.Context(), pv))
+			before := pv.DeepCopy()
+			box := AsSandbox(&agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "delivery", Namespace: "default"}}, backend.Cache)
+			box.storageRegistry.RegisterProvider("test.example.com", &storages.MountProvider{})
+			opts, err := box.resolveRawCSIMounts(t.Context(), tt.raw)
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				assert.Nil(t, opts)
+			} else {
+				require.NoError(t, err)
+				if tt.name == "empty" {
+					assert.Nil(t, opts)
+				} else {
+					require.Len(t, opts.MountOptionList, 1)
+					assert.Equal(t, "/base/child", opts.MountOptionList[0].PublishRequest.VolumeContext["path"])
+					assert.True(t, opts.MountOptionList[0].PublishRequest.Readonly)
+					assert.JSONEq(t, tt.raw, opts.MountOptionListRaw)
+				}
+			}
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pv), pv))
+			assert.Equal(t, before, pv)
+		})
+	}
 }
