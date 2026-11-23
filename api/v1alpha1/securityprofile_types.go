@@ -741,12 +741,15 @@ type TLSAction struct {
 // and rule-level Audit. Bypass false is equivalent to omission.
 // The following execution order applies only to HTTP rules.
 // Actions run in this order: Bypass, Block, MCPToolPolicy,
-// HeaderManipulation, HTTPCallout, and TokenTransformation. Audit
+// HeaderManipulation, HTTPCallout, TokenTransformation, and Proxy. Audit
 // actions are emitted asynchronously after the request is resolved.
 //
 // Bypass, Block, and a denying MCPToolPolicy stop the remaining actions and
 // rules. Non-terminal actions continue to the next configured action. Every
 // matching rule executes its own actions.
+// +kubebuilder:validation:XValidation:rule="!has(self.proxy) || !has(self.tls)",message="proxy cannot be combined with tls"
+// +kubebuilder:validation:XValidation:rule="!has(self.proxy) || !has(self.block)",message="proxy cannot be combined with block"
+// +kubebuilder:validation:XValidation:rule="!has(self.proxy) || !has(self.bypass) || !self.bypass",message="proxy cannot be combined with enabled bypass"
 type SecurityRuleActions struct {
 	// TLS selects a connection action using visible SNI and the original
 	// destination port. This rule does not participate in HTTP processing.
@@ -793,6 +796,13 @@ type SecurityRuleActions struct {
 	//       failStrategy: Block
 	// +optional
 	HTTPCallout *HTTPCalloutAction `json:"httpCallout,omitempty"`
+	// Proxy selects an unauthenticated upstream proxy for normal HTTP/HTTPS
+	// requests. The first executed Proxy wins without terminating evaluation;
+	// later denials still prevent forwarding. If none executes, existing
+	// forwarding and security semantics apply. Explicit client proxy requests,
+	// client CONNECT tunnels, and Sandbox inline rules are not supported.
+	// +optional
+	Proxy *ProxyAction `json:"proxy,omitempty"`
 	// Audit lists rule-specific audit actions. A non-empty list replaces the
 	// profile-level Audit list for this rule. An empty list inherits the
 	// profile-level list.
@@ -800,6 +810,24 @@ type SecurityRuleActions struct {
 	// +listType=map
 	// +listMapKey=name
 	Audit []AuditAction `json:"audit,omitempty"`
+}
+
+// ProxyAction selects an upstream proxy after authorizing the real target.
+// Proxy failures must not fall back to a direct connection. The proxy resolves
+// target domains; HTTP(S) proxy authorization is never sent or forwarded, and
+// SOCKS5 uses only no-auth. HTTPS targets require gateway TLS termination.
+type ProxyAction struct {
+	// URL is an absolute http, https, or socks5 proxy URL with an explicit
+	// port (1-65535). Hosts may be DNS names, IPv4, or bracketed IPv6.
+	// Userinfo, business paths, queries, and fragments are forbidden; a root
+	// slash is accepted. HTTPS proxies require certificate verification.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// The IPv6 alternatives cover eight groups, compressed groups, and an
+	// IPv4 tail (two groups). A pattern avoids per-rule CEL URL parsing costs
+	// in profiles whose existing rule list is unbounded.
+	// +kubebuilder:validation:Pattern=`^(?i:http|https|socks5)://([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.?|\[(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|::|:(:[0-9a-fA-F]{1,4}){1,7}|([0-9a-fA-F]{1,4}:){1,6}(:[0-9a-fA-F]{1,4}){1}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){5}|([0-9a-fA-F]{1,4}:){1}(:[0-9a-fA-F]{1,4}){6}|(([0-9a-fA-F]{1,4}:){6}|::([0-9a-fA-F]{1,4}:){0,5}|([0-9a-fA-F]{1,4}:){1}:([0-9a-fA-F]{1,4}:){0,4}|([0-9a-fA-F]{1,4}:){2}:([0-9a-fA-F]{1,4}:){0,3}|([0-9a-fA-F]{1,4}:){3}:([0-9a-fA-F]{1,4}:){0,2}|([0-9a-fA-F]{1,4}:){4}:([0-9a-fA-F]{1,4}:){0,1}|([0-9a-fA-F]{1,4}:){5}:([0-9a-fA-F]{1,4}:){0,0})(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3})\]):0*([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])/?$`
+	URL string `json:"url"`
 }
 
 // HeaderManipulationAction sets or removes plaintext request headers on
