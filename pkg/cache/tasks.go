@@ -26,6 +26,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -75,7 +76,10 @@ func (c *Cache) PVCUpdateFunc(ctx context.Context) cacheutils.UpdateFunc[*corev1
 func (c *Cache) NewSandboxPauseTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*cacheutils.WaitTask[*agentsv1alpha1.Sandbox], error) {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
 		if pausable, reason := utils.IsSandboxPausable(s); !pausable {
-			return false, fmt.Errorf("sandbox %s/%s is not pausable, reason: %s", s.Namespace, s.Name, reason)
+			return false, &SandboxPauseConflictError{
+				Sandbox: types.NamespacedName{Namespace: s.Namespace, Name: s.Name},
+				Reason:  reason,
+			}
 		}
 		cond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionPaused))
 		if cond == nil {
@@ -130,7 +134,7 @@ func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1
 			return false, nil
 		}
 		state, _ := utils.GetSandboxState(s)
-		return state == agentsv1alpha1.SandboxStateRunning && s.Status.PodInfo.PodIP != "", nil
+		return state == sandboxstate.Running && s.Status.PodInfo.PodIP != "", nil
 	}
 	return cacheutils.NewWaitTask[*agentsv1alpha1.Sandbox](
 		ctx, c.waitHooks, cacheutils.WaitActionWaitReady, sbx, c.SandboxUpdateFunc(ctx), check,

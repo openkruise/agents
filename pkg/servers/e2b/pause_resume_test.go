@@ -36,6 +36,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
@@ -101,6 +102,8 @@ func TestPauseSandboxManualRetention(t *testing.T) {
 		initialAnnotation *string
 		autoPause         bool
 		neverTimeout      bool
+		expired           bool
+		deleting          bool
 		alreadyPaused     bool
 		expectStatus      int
 		expectMessage     string
@@ -113,6 +116,23 @@ func TestPauseSandboxManualRetention(t *testing.T) {
 			expectShutdown: func(now time.Time) time.Time {
 				return now.Add(timeoututils.ForeverReservePausedSandboxDuration)
 			},
+		},
+		{
+			name:          "expired ready sandbox returns conflict",
+			expired:       true,
+			headerPresent: true,
+			headerValue:   "1h",
+			expectStatus:  http.StatusConflict,
+			expectMessage: "Failed to pause sandbox",
+		},
+		{
+			name:              "deleting ready sandbox returns conflict",
+			deleting:          true,
+			headerPresent:     true,
+			headerValue:       "1h",
+			initialAnnotation: ptr.To("30m"),
+			expectStatus:      http.StatusConflict,
+			expectMessage:     "Failed to pause sandbox",
 		},
 		{
 			name:             "header default uses default and persists default",
@@ -232,6 +252,12 @@ func TestPauseSandboxManualRetention(t *testing.T) {
 			if tt.alreadyPaused {
 				sbx.Spec.Paused = true
 			}
+			if tt.expired {
+				sbx.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(-time.Hour)))
+			}
+			if tt.deleting {
+				sbx.Finalizers = append(sbx.Finalizers, "test.openkruise.io/keep-sandbox")
+			}
 			originalPauseTimeSet := sbx.Spec.PauseTime != nil
 			var originalPauseTime time.Time
 			if originalPauseTimeSet {
@@ -244,6 +270,13 @@ func TestPauseSandboxManualRetention(t *testing.T) {
 			}
 			require.NoError(t, fc.Update(t.Context(), sbx))
 
+			if tt.expired {
+				waitForSandboxState(t, controller, sandboxID, user, sandboxstate.Expired)
+			}
+			if tt.deleting {
+				require.NoError(t, fc.Delete(t.Context(), sbx))
+				waitForSandboxState(t, controller, sandboxID, user, sandboxstate.Dead)
+			}
 			EnableWaitSim(t, controller, sandboxID)
 			if tt.alreadyPaused {
 				UpdateSandboxWhen(t, fc, sandboxID, Immediately,
@@ -258,6 +291,7 @@ func TestPauseSandboxManualRetention(t *testing.T) {
 			if tt.headerPresent {
 				req.Header.Set(models.ExtensionHeaderReservePausedSandboxDuration, tt.headerValue)
 			}
+			before := GetSandbox(t, sandboxID, fc)
 			beforePause := time.Now()
 			pauseResp, apiErr := controller.PauseSandbox(req)
 			if tt.expectStatus != 0 {
@@ -265,6 +299,11 @@ func TestPauseSandboxManualRetention(t *testing.T) {
 				assert.Equal(t, tt.expectStatus, apiErr.Code)
 				assert.Contains(t, apiErr.Message, tt.expectMessage)
 				assert.Contains(t, apiErr.Message, "sandboxResource=")
+				updated := GetSandbox(t, sandboxID, fc)
+				assert.Equal(t, before.Spec.Paused, updated.Spec.Paused)
+				assert.Equal(t, before.Spec.PauseTime, updated.Spec.PauseTime)
+				assert.Equal(t, before.Spec.ShutdownTime, updated.Spec.ShutdownTime)
+				assert.Equal(t, before.Annotations, updated.Annotations)
 				return
 			}
 			require.Nil(t, apiErr)
@@ -1235,7 +1274,7 @@ func TestUpdateConnectTimeout(t *testing.T) {
 			name:            "never-timeout is skipped",
 			initialTimeout:  300,
 			timeoutSeconds:  300,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			preConnectState: sandboxstate.Running,
 			neverTimeout:    true,
 			expectUpdated:   false,
 		},
@@ -1243,35 +1282,35 @@ func TestUpdateConnectTimeout(t *testing.T) {
 			name:            "running sandbox, shorter timeout is skipped",
 			initialTimeout:  600,
 			timeoutSeconds:  300,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			preConnectState: sandboxstate.Running,
 			expectUpdated:   false,
 		},
 		{
 			name:            "running sandbox, longer timeout updates",
 			initialTimeout:  300,
 			timeoutSeconds:  600,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			preConnectState: sandboxstate.Running,
 			expectUpdated:   true,
 		},
 		{
 			name:            "running sandbox, equal timeout updates",
 			initialTimeout:  300,
 			timeoutSeconds:  300,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			preConnectState: sandboxstate.Running,
 			expectUpdated:   true,
 		},
 		{
 			name:            "resumed sandbox (was paused), shorter timeout is skipped (ExtendOnly)",
 			initialTimeout:  600,
 			timeoutSeconds:  300,
-			preConnectState: agentsv1alpha1.SandboxStatePaused,
+			preConnectState: sandboxstate.Paused,
 			expectUpdated:   false,
 		},
 		{
 			name:            "running sandbox with auto-pause, shorter timeout is skipped",
 			initialTimeout:  600,
 			timeoutSeconds:  300,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			preConnectState: sandboxstate.Running,
 			autoPause:       true,
 			expectUpdated:   false,
 		},
@@ -1279,7 +1318,7 @@ func TestUpdateConnectTimeout(t *testing.T) {
 			name:            "running sandbox with auto-pause, longer timeout updates",
 			initialTimeout:  300,
 			timeoutSeconds:  600,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			preConnectState: sandboxstate.Running,
 			autoPause:       true,
 			expectUpdated:   true,
 		},
@@ -1287,7 +1326,7 @@ func TestUpdateConnectTimeout(t *testing.T) {
 			name:              "running sandbox with auto-pause, invalid annotation backfills default on accepted update",
 			initialTimeout:    300,
 			timeoutSeconds:    600,
-			preConnectState:   agentsv1alpha1.SandboxStateRunning,
+			preConnectState:   sandboxstate.Running,
 			autoPause:         true,
 			initialAnnotation: ptr.To("invalid"),
 			expectAnnotation:  timeoututils.ReservePausedSandboxDurationForeverValue,
@@ -1297,7 +1336,7 @@ func TestUpdateConnectTimeout(t *testing.T) {
 			name:            "running sandbox with auto-pause, equal timeout updates",
 			initialTimeout:  300,
 			timeoutSeconds:  300,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			preConnectState: sandboxstate.Running,
 			autoPause:       true,
 			expectUpdated:   true,
 		},

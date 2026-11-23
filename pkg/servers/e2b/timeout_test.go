@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 )
@@ -402,7 +403,7 @@ func TestResumeSandboxExtendOnlyPreventsStaleConnectTimeout(t *testing.T) {
 			wrapped, getErr := controller.getSandboxOfUser(req.Context(), createResp.Body.SandboxID, claimedSandboxStates)
 			require.Nil(t, getErr)
 			errResp := controller.updateConnectTimeout(req.Context(), wrapped, tt.connectTimeoutSeconds,
-				v1alpha1.SandboxStatePaused, false, afterFirstCall.Spec.ShutdownTime.Time)
+				sandboxstate.Paused, false, afterFirstCall.Spec.ShutdownTime.Time)
 			require.Nil(t, errResp)
 
 			afterSecondCall := GetSandbox(t, createResp.Body.SandboxID, fc)

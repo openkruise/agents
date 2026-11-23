@@ -74,6 +74,11 @@ func TestCalculateScalingLimited(t *testing.T) {
 			},
 		}
 	}
+	newWaiting := func(name string, age time.Duration) *agentsv1alpha1.Sandbox {
+		sbx := newFailed(name, agentsv1alpha1.SandboxReadyReasonPodReady)
+		sbx.CreationTimestamp = metav1.NewTime(now.Add(-age))
+		return sbx
+	}
 
 	tests := []struct {
 		name                 string
@@ -150,6 +155,16 @@ func TestCalculateScalingLimited(t *testing.T) {
 			expectReason:         scalingLimitedReasonBudgetExhausted,
 			expectMessage:        "Timeout=1, Failed=0",
 			expectTimedOut:       1,
+		},
+		{
+			name:           "running but not ready does not consume pending budget",
+			maxUnavailable: intOrStringPtr(intstr.FromInt(1)),
+			groups: GroupedSandboxes{Creating: []*agentsv1alpha1.Sandbox{
+				newWaiting("waiting", 61*time.Second),
+			}},
+			expectStatus:  metav1.ConditionFalse,
+			expectReason:  scalingLimitedReasonBudgetAvailable,
+			expectMessage: "Timeout=0, Failed=0",
 		},
 		{
 			name:           "pending before timeout schedules requeue",

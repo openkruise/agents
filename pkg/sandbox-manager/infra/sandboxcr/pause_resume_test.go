@@ -28,6 +28,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,7 +42,9 @@ import (
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 	testutils "github.com/openkruise/agents/test/utils"
@@ -127,7 +130,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 		Status: metav1.ConditionTrue,
 	})
 	state, reason := utils.GetSandboxState(sandbox)
-	assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+	assert.Equal(t, sandboxstate.Paused, state, reason)
 
 	cache, fc, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
@@ -184,7 +187,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	var updatedSbx v1alpha1.Sandbox
 	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &updatedSbx))
 	state, reason = utils.GetSandboxState(&updatedSbx)
-	assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+	assert.Equal(t, sandboxstate.Running, state, reason)
 	assert.False(t, updatedSbx.Spec.Paused)
 }
 
@@ -233,7 +236,7 @@ func TestSandbox_Resume_ContextExpiredAfterWait(t *testing.T) {
 		Status: metav1.ConditionTrue,
 	})
 	state, reason := utils.GetSandboxState(sandbox)
-	assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+	assert.Equal(t, sandboxstate.Paused, state, reason)
 
 	cache, fc, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
@@ -274,7 +277,7 @@ func TestSandbox_Resume_ContextExpiredAfterWait(t *testing.T) {
 	var updatedSbx v1alpha1.Sandbox
 	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &updatedSbx))
 	state, reason = utils.GetSandboxState(&updatedSbx)
-	assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+	assert.Equal(t, sandboxstate.Running, state, reason)
 	assert.False(t, updatedSbx.Spec.Paused)
 	assert.Nil(t, updatedSbx.Spec.ShutdownTime)
 	assert.Nil(t, updatedSbx.Spec.PauseTime)
@@ -302,9 +305,9 @@ func TestSandbox_Pause(t *testing.T) {
 				})
 				sbx.Spec.Paused = false
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+				assert.Equal(t, sandboxstate.Running, state, reason)
 			},
-			expectedState:          v1alpha1.SandboxStatePaused,
+			expectedState:          sandboxstate.Paused,
 			expectError:            "",
 			expectTimeoutUpdate:    true,
 			simulatePauseCompleted: true,
@@ -319,7 +322,7 @@ func TestSandbox_Pause(t *testing.T) {
 				})
 				sbx.Spec.Paused = false
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+				assert.Equal(t, sandboxstate.Running, state, reason)
 			},
 			expectedState:   "",
 			expectError:     "object is not satisfied during double check",
@@ -336,9 +339,9 @@ func TestSandbox_Pause(t *testing.T) {
 				sbx.Spec.Paused = false
 				sbx.OwnerReferences = GetSbsOwnerReference()
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
+				assert.Equal(t, sandboxstate.Available, state, reason)
 			},
-			expectedState: v1alpha1.SandboxStateAvailable,
+			expectedState: sandboxstate.Available,
 			expectError:   "sandbox is not pausable, reason: SandboxStateNotAllowed",
 		},
 		{
@@ -351,9 +354,9 @@ func TestSandbox_Pause(t *testing.T) {
 				})
 				sbx.Spec.Paused = true
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+				assert.Equal(t, sandboxstate.Paused, state, reason)
 			},
-			expectedState: v1alpha1.SandboxStatePaused,
+			expectedState: sandboxstate.Paused,
 			expectError:   "",
 		},
 		{
@@ -362,9 +365,9 @@ func TestSandbox_Pause(t *testing.T) {
 				sbx.Status.Phase = v1alpha1.SandboxTerminating
 				sbx.Spec.Paused = false
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
+				assert.Equal(t, sandboxstate.Dead, state, reason)
 			},
-			expectedState: v1alpha1.SandboxStateDead,
+			expectedState: sandboxstate.Dead,
 			expectError:   "sandbox is not pausable, reason: SandboxPhaseNotAllowed",
 		},
 	}
@@ -650,6 +653,113 @@ func TestSandbox_PauseSkipsSideEffectsWhenLatestAlreadyPaused(t *testing.T) {
 	}
 }
 
+func TestSandbox_PauseRetryRejectsExpiredDeadline(t *testing.T) {
+	cache, fc, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	require.NoError(t, cache.Run(t.Context()))
+	defer cache.Stop(t.Context())
+	sandbox := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "pause-retry", Namespace: "default"},
+		Status:     v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxRunning},
+	}
+	SetSandboxCondition(sandbox, string(v1alpha1.SandboxConditionReady), metav1.ConditionTrue, "Ready", "")
+	CreateSandboxWithStatus(t, fc, sandbox)
+	key := ctrl.ObjectKeyFromObject(sandbox)
+	expired := timeout.Options{ShutdownTime: time.Now().Add(-time.Minute)}
+	cacheClient := cache.GetClient().(ctrl.WithWatch)
+	updateAttempts := 0
+	client := interceptor.NewClient(cacheClient, interceptor.Funcs{
+		Update: func(ctx context.Context, c ctrl.WithWatch, obj ctrl.Object, opts ...ctrl.UpdateOption) error {
+			updateAttempts++
+			if updateAttempts == 1 {
+				// A concurrent deadline update wins the first write.
+				if err := mutateTimeout(ctx, fc, key, expired); err != nil {
+					return err
+				}
+				return apierrors.NewConflict(v1alpha1.GroupVersion.WithResource("sandboxes").GroupResource(), key.Name, fmt.Errorf("deadline changed"))
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+	s := AsSandbox(sandbox, &apiReaderOverrideCache{Provider: cache, client: client})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	err = s.Pause(ctx, infra.PauseOptions{Timeout: &timeout.Options{ShutdownTime: time.Now().Add(time.Hour)}})
+	require.Equal(t, managererrors.ErrorConflict, managererrors.GetErrCode(err))
+	require.ErrorContains(t, err, "ShutdownTimeReached")
+	assert.Equal(t, 1, updateAttempts)
+	var stored v1alpha1.Sandbox
+	require.NoError(t, fc.Get(ctx, key, &stored))
+	assert.False(t, stored.Spec.Paused)
+	assertTimePtrEqual(t, timePtrOrNil(expired.ShutdownTime), stored.Spec.ShutdownTime, "concurrent deadline")
+}
+
+func TestSandbox_PauseWaitRejectsLifecycleConflict(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(context.Context, ctrl.Client, *v1alpha1.Sandbox) error
+		reason string
+	}{
+		{
+			name: "expired",
+			change: func(ctx context.Context, client ctrl.Client, sandbox *v1alpha1.Sandbox) error {
+				sandbox.Spec.ShutdownTime = timePtrOrNil(time.Now().Add(-time.Minute))
+				return client.Update(ctx, sandbox)
+			},
+			reason: "ShutdownTimeReached",
+		},
+		{
+			name: "deletion started",
+			change: func(ctx context.Context, client ctrl.Client, sandbox *v1alpha1.Sandbox) error {
+				return client.Delete(ctx, sandbox)
+			},
+			reason: "SandboxIsTerminating",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			sandbox := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "pause-wait-conflict",
+					Namespace:  "default",
+					Finalizers: []string{"agents.kruise.io/test"},
+				},
+				Spec:   v1alpha1.SandboxSpec{ShutdownTime: timePtrOrNil(time.Now().Add(time.Hour))},
+				Status: v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxRunning},
+			}
+			SetSandboxCondition(sandbox, string(v1alpha1.SandboxConditionReady), metav1.ConditionTrue, "Ready", "")
+			CreateSandboxWithStatus(t, fc, sandbox)
+
+			writeCompleted := false
+			client := interceptor.NewClient(cache.GetClient().(ctrl.WithWatch), interceptor.Funcs{
+				Update: func(ctx context.Context, c ctrl.WithWatch, obj ctrl.Object, opts ...ctrl.UpdateOption) error {
+					if err := c.Update(ctx, obj, opts...); err != nil {
+						return err
+					}
+					writeCompleted = true
+					require.NoError(t, tt.change(ctx, fc, obj.(*v1alpha1.Sandbox).DeepCopy()))
+					return nil
+				},
+			})
+			s := AsSandbox(sandbox, &apiReaderOverrideCache{Provider: cache, client: client})
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			err = s.Pause(ctx, infra.PauseOptions{})
+			require.True(t, writeCompleted)
+			require.ErrorContains(t, err, tt.reason)
+			require.Equal(t, managererrors.ErrorConflict, managererrors.GetErrCode(err))
+			var conflict *cachepkg.SandboxPauseConflictError
+			require.ErrorAs(t, err, &conflict)
+			assert.Equal(t, tt.reason, conflict.Reason)
+			var stored v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), ctrl.ObjectKeyFromObject(sandbox), &stored))
+			assert.True(t, stored.Spec.Paused)
+		})
+	}
+}
+
 func TestSandbox_PauseRefreshesBeforePreconditionChecks(t *testing.T) {
 	tests := []struct {
 		name string
@@ -863,9 +973,9 @@ func TestSandbox_Resume(t *testing.T) {
 				})
 				sbx.Spec.Paused = true
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+				assert.Equal(t, sandboxstate.Paused, state, reason)
 			},
-			expectedState:           v1alpha1.SandboxStateRunning,
+			expectedState:           sandboxstate.Running,
 			expectError:             "",
 			simulateResumeCompleted: true,
 		},
@@ -885,9 +995,9 @@ func TestSandbox_Resume(t *testing.T) {
 					TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "wake-template"},
 				}
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+				assert.Equal(t, sandboxstate.Paused, state, reason)
 			},
-			expectedState:           v1alpha1.SandboxStateRunning,
+			expectedState:           sandboxstate.Running,
 			expectError:             "",
 			simulateResumeCompleted: true,
 			withEmbeddedTemplate:    true,
@@ -902,7 +1012,7 @@ func TestSandbox_Resume(t *testing.T) {
 				})
 				sbx.Spec.Paused = true
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+				assert.Equal(t, sandboxstate.Paused, state, reason)
 			},
 			expectedState:   "",
 			expectError:     "object is not satisfied during double check",
@@ -918,9 +1028,9 @@ func TestSandbox_Resume(t *testing.T) {
 				})
 				sbx.Spec.Paused = true
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+				assert.Equal(t, sandboxstate.Paused, state, reason)
 			},
-			expectedState:           v1alpha1.SandboxStateRunning,
+			expectedState:           sandboxstate.Running,
 			expectError:             "",
 			initErrCode:             0,
 			withInitRuntime:         true,
@@ -936,9 +1046,9 @@ func TestSandbox_Resume(t *testing.T) {
 				})
 				sbx.Spec.Paused = true
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+				assert.Equal(t, sandboxstate.Paused, state, reason)
 			},
-			expectedState:           v1alpha1.SandboxStateRunning,
+			expectedState:           sandboxstate.Running,
 			expectError:             "",
 			initErrCode:             401,
 			withInitRuntime:         true,
@@ -954,7 +1064,7 @@ func TestSandbox_Resume(t *testing.T) {
 				})
 				sbx.Spec.Paused = true
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+				assert.Equal(t, sandboxstate.Paused, state, reason)
 			},
 			// When controller's Initialize fails (e.g. runtime returns 500), it sets
 			// PostResumeInit=False and does NOT set Ready=True. E2B Resume times out
@@ -975,7 +1085,7 @@ func TestSandbox_Resume(t *testing.T) {
 				})
 				sbx.Spec.Paused = true
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+				assert.Equal(t, sandboxstate.Paused, state, reason)
 			},
 			expectedState: "",
 			expectError:   "sandbox is not resumable, reason: SandboxIsPausing",
@@ -989,9 +1099,9 @@ func TestSandbox_Resume(t *testing.T) {
 					Status: metav1.ConditionTrue,
 				})
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+				assert.Equal(t, sandboxstate.Running, state, reason)
 			},
-			expectedState: v1alpha1.SandboxStateRunning,
+			expectedState: sandboxstate.Running,
 			expectError:   "",
 		},
 		{
@@ -1000,7 +1110,7 @@ func TestSandbox_Resume(t *testing.T) {
 				sbx.Status.Phase = v1alpha1.SandboxTerminating
 				sbx.Spec.Paused = true
 				state, reason := utils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
+				assert.Equal(t, sandboxstate.Dead, state, reason)
 			},
 			expectedState: "",
 			expectError:   "sandbox is not resumable, reason: SandboxPhaseNotAllowed",
@@ -1333,7 +1443,7 @@ func TestSandbox_ResumeRefreshesBeforePreconditionChecksAndUpdatesLatest(t *test
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: latest.Namespace, Name: latest.Name}, &updatedSbx))
 			assert.False(t, updatedSbx.Spec.Paused)
 			state, reason := utils.GetSandboxState(&updatedSbx)
-			assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+			assert.Equal(t, sandboxstate.Running, state, reason)
 		})
 	}
 }
@@ -1400,7 +1510,7 @@ func TestSandbox_ResumeAllowsAlreadyResumedLatestForStalePausedWrapper(t *testin
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: latest.Namespace, Name: latest.Name}, &updatedSbx))
 			assert.False(t, updatedSbx.Spec.Paused)
 			state, reason := utils.GetSandboxState(&updatedSbx)
-			assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+			assert.Equal(t, sandboxstate.Running, state, reason)
 		})
 	}
 }
@@ -2056,7 +2166,7 @@ func TestSandbox_ResumeFailurePathsLeaveRealTimeout(t *testing.T) {
 			assertTimePtrEqual(t, timePtrOrNil(tc.expectTimeout.ShutdownTime), final.Spec.ShutdownTime, "final ShutdownTime must keep expected timeout")
 			if tc.expectReady {
 				state, reason := utils.GetSandboxState(&final)
-				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+				assert.Equal(t, sandboxstate.Running, state, reason)
 			}
 		})
 	}

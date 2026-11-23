@@ -34,6 +34,7 @@ import (
 	"github.com/openkruise/agents/pkg/pausedretention"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
@@ -310,7 +311,7 @@ func (sc *Controller) connectSandbox(r *http.Request, request models.SetTimeoutR
 	state, pauseResumeReason := sbx.GetState()
 	autoPause, currentEndAt := ParseTimeout(sbx)
 
-	paused := state == v1alpha1.SandboxStatePaused
+	paused := state == sandboxstate.Paused
 	effectiveTimeout := sc.getEffectivePauseTimeSeconds(log, request.TimeoutSeconds, paused, !currentEndAt.IsZero())
 
 	// Step 1: Resume the sandbox if it is paused, atomically writing the

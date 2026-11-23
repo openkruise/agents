@@ -680,8 +680,42 @@ func TestCache_CountActiveSandboxes(t *testing.T) {
 			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.5"},
 		},
 	}
+	// Claimed but not ready (provisioning): does not fill a slot
+	sbx6 := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sbx-6", Namespace: "default",
+			Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-3"},
+			Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.6"},
+		},
+	}
 
-	c, _, err := cachetest.NewTestCache(t, sbx1, sbx2, sbx3, sbx4, sbx5)
+	// Past its shutdown deadline (expired): does not fill a slot
+	sbx7 := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sbx-7", Namespace: "default",
+			Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-4"},
+			Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			ShutdownTime: &metav1.Time{Time: time.Now().Add(-time.Minute)},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.7"},
+		},
+	}
+
+	c, _, err := cachetest.NewTestCache(t, sbx1, sbx2, sbx3, sbx4, sbx5, sbx6, sbx7)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -690,7 +724,7 @@ func TestCache_CountActiveSandboxes(t *testing.T) {
 		expectCount int32
 	}{
 		{
-			name:        "user-1 counts 2 non-dead sandboxes",
+			name:        "user-1 counts 2 sandboxes that hold a slot",
 			opts:        cache.ListSandboxesOptions{User: "user-1"},
 			expectCount: 2,
 		},
@@ -704,6 +738,16 @@ func TestCache_CountActiveSandboxes(t *testing.T) {
 			opts:        cache.ListSandboxesOptions{User: "user-nobody"},
 			expectCount: 0,
 		},
+		{
+			name:        "claimed but not ready sandbox is not counted",
+			opts:        cache.ListSandboxesOptions{User: "user-3"},
+			expectCount: 0,
+		},
+		{
+			name:        "sandbox past its shutdown deadline is not counted",
+			opts:        cache.ListSandboxesOptions{User: "user-4"},
+			expectCount: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -713,20 +757,6 @@ func TestCache_CountActiveSandboxes(t *testing.T) {
 			assert.Equal(t, tt.expectCount, cnt)
 		})
 	}
-
-	// Verify CountActiveSandboxes matches non-dead ListSandboxes count for user-1.
-	list, err := c.ListSandboxes(t.Context(), cache.ListSandboxesOptions{User: "user-1"})
-	require.NoError(t, err)
-	var listActive int32
-	for _, sbx := range list {
-		state, _ := utils.GetSandboxState(sbx)
-		if state != agentsv1alpha1.SandboxStateDead {
-			listActive++
-		}
-	}
-	cnt, err := c.CountActiveSandboxes(t.Context(), cache.ListSandboxesOptions{User: "user-1"})
-	require.NoError(t, err)
-	assert.Equal(t, listActive, cnt, "CountActiveSandboxes should match ListSandboxes active count")
 }
 
 func TestCache_ListCheckpointsWithOptions_UserScoped(t *testing.T) {

@@ -38,6 +38,7 @@ import (
 	serving "github.com/openkruise/agents/pkg/sandbox-gateway/sessionservice"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
 
@@ -316,7 +317,7 @@ func putRunningTestRoute(t *testing.T, routeRegistry *registry.Registry, id, ip 
 	t.Helper()
 	putTestRoute(t, routeRegistry, id, sandboxroute.Route{
 		IP:              ip,
-		State:           agentsv1alpha1.SandboxStateRunning,
+		State:           sandboxstate.Running,
 		ResourceVersion: "1",
 	})
 }
@@ -649,7 +650,7 @@ func TestDecodeHeadersLocalReplies(t *testing.T) {
 			name: "creating sandbox is not routable",
 			arrange: func(t *testing.T, r *registry.Registry) {
 				putTestRoute(t, r, "default--test-sandbox", sandboxroute.Route{
-					IP: "10.0.0.1", State: agentsv1alpha1.SandboxStateCreating, ResourceVersion: "1",
+					IP: "10.0.0.1", State: sandboxstate.Creating, ResourceVersion: "1",
 				})
 			},
 			sandboxID:    "default--test-sandbox",
@@ -661,8 +662,18 @@ func TestDecodeHeadersLocalReplies(t *testing.T) {
 			name: "available sandbox is not routable",
 			arrange: func(t *testing.T, r *registry.Registry) {
 				putTestRoute(t, r, "default--test-sandbox", sandboxroute.Route{
-					IP: "10.0.0.1", State: agentsv1alpha1.SandboxStateAvailable, ResourceVersion: "1",
+					IP: "10.0.0.1", State: sandboxstate.Available, ResourceVersion: "1",
 				})
+			},
+			sandboxID:    "default--test-sandbox",
+			wantCode:     502,
+			wantDetails:  "sandbox_not_running",
+			wantBodyPart: "healthy sandbox not found",
+		},
+		{
+			name: "running sandbox without an address is not routable",
+			arrange: func(t *testing.T, r *registry.Registry) {
+				putRunningTestRoute(t, r, "default--test-sandbox", "")
 			},
 			sandboxID:    "default--test-sandbox",
 			wantCode:     502,
@@ -888,7 +899,7 @@ func TestFilterFactory(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := useTestRegistry(t)
 			activateTestRegistry(reg)
-			putTestRoute(t, reg, "test--sandbox", sandboxroute.Route{IP: "127.0.0.1", State: agentsv1alpha1.SandboxStateRunning, AccessToken: "test-secret"})
+			putTestRoute(t, reg, "test--sandbox", sandboxroute.Route{IP: "127.0.0.1", State: sandboxstate.Running, AccessToken: "test-secret"})
 			config := DefaultConfig()
 			config.EnableAuth = true
 			if tt.sandboxHeader != "" {
@@ -1107,7 +1118,7 @@ func TestDecodeHeadersAccessTokenAuth(t *testing.T) {
 			}
 			putTestRoute(t, r, sandboxID, sandboxroute.Route{
 				IP:              "10.0.0.1",
-				State:           agentsv1alpha1.SandboxStateRunning,
+				State:           sandboxstate.Running,
 				ResourceVersion: "1",
 				AccessToken:     tt.routeAccessToken,
 			})
@@ -1168,7 +1179,7 @@ func TestDecodeHeadersWakeOnTrafficDisabled(t *testing.T) {
 		IP:            "10.0.0.1",
 		Namespace:     "default",
 		Name:          "paused-sbx",
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: true,
 	})
 
@@ -1193,7 +1204,7 @@ func TestDecodeHeadersWakeOnTrafficRouteNotEnabled(t *testing.T) {
 		IP:            "10.0.0.1",
 		Namespace:     "default",
 		Name:          "paused-sbx",
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: false,
 	})
 
@@ -1234,7 +1245,7 @@ func TestDecodeHeadersWakeOnTrafficNoWaker(t *testing.T) {
 		IP:            "10.0.0.1",
 		Namespace:     "default",
 		Name:          "paused-sbx",
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: true,
 	})
 
@@ -1259,7 +1270,7 @@ func TestDecodeHeadersWakeOnTrafficPausedWithRunning(t *testing.T) {
 		IP:            "10.0.0.5",
 		Namespace:     "default",
 		Name:          "running-wakeable",
-		State:         agentsv1alpha1.SandboxStateRunning,
+		State:         sandboxstate.Running,
 		WakeOnTraffic: true,
 	})
 
@@ -1391,7 +1402,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			putTestRoute(t, useTestRegistry(t), sandboxID, sandboxroute.Route{
 				ID: sandboxID, UID: types.UID(sandboxUID), IP: "10.0.0.1",
-				State: agentsv1alpha1.SandboxStateRunning, ResourceVersion: "1", AccessToken: tt.routeToken,
+				State: sandboxstate.Running, ResourceVersion: "1", AccessToken: tt.routeToken,
 				RequireTrafficAuth: !tt.skipRouteAuth,
 			})
 
@@ -1445,7 +1456,7 @@ func TestDecodeHeadersRequiredJWTWithoutJWTMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			putTestRoute(t, useTestRegistry(t), sandboxID, sandboxroute.Route{
-				ID: sandboxID, IP: "10.0.0.1", State: agentsv1alpha1.SandboxStateRunning,
+				ID: sandboxID, IP: "10.0.0.1", State: sandboxstate.Running,
 				ResourceVersion: "1", RequireTrafficAuth: true,
 			})
 
@@ -1474,7 +1485,7 @@ func TestDecodeHeadersWakeOnTrafficCacheFallback(t *testing.T) {
 		IP:            "10.0.0.1",
 		Namespace:     "default",
 		Name:          "cache-fallback",
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: false,
 	})
 
@@ -1550,7 +1561,7 @@ func TestDecodeHeadersWakeOnTrafficCacheFallbackNoAnnotation(t *testing.T) {
 		IP:            "10.0.0.1",
 		Namespace:     "default",
 		Name:          "no-annot-fallback",
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: false,
 	})
 
@@ -1696,7 +1707,7 @@ func TestWakeAndContinueSuccess(t *testing.T) {
 		Namespace:     "default",
 		Name:          "async-success",
 		UID:           types.UID("uid-async-success"),
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: true,
 	})
 
@@ -1756,7 +1767,7 @@ func TestWakeAndContinueSuccess(t *testing.T) {
 			IP:              "10.0.0.1",
 			Namespace:       "default",
 			Name:            "async-success",
-			State:           agentsv1alpha1.SandboxStateRunning,
+			State:           sandboxstate.Running,
 			ResourceVersion: "2",
 		})
 	})
@@ -1862,14 +1873,14 @@ func TestShouldWakeSandbox(t *testing.T) {
 		Namespace:     "default",
 		Name:          "sbx",
 		UID:           sbxUID,
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: true,
 	}
 	navOnlyRoute := sandboxroute.Route{
 		Namespace:     "default",
 		Name:          "nav-only",
 		UID:           navOnlyUID,
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: true,
 	}
 
@@ -1886,7 +1897,7 @@ func TestShouldWakeSandbox(t *testing.T) {
 			route: sandboxroute.Route{
 				Namespace:     "default",
 				Name:          "sbx",
-				State:         agentsv1alpha1.SandboxStateCreating,
+				State:         sandboxstate.Creating,
 				WakeOnTraffic: true,
 			},
 			enableWake: true,
@@ -1910,7 +1921,7 @@ func TestShouldWakeSandbox(t *testing.T) {
 		{
 			name: "route without object key returns false",
 			route: sandboxroute.Route{
-				State:         agentsv1alpha1.SandboxStatePaused,
+				State:         sandboxstate.Paused,
 				WakeOnTraffic: true,
 			},
 			enableWake: true,
@@ -1934,7 +1945,7 @@ func TestShouldWakeSandbox(t *testing.T) {
 				Namespace:     "default",
 				Name:          "sbx",
 				UID:           types.UID("deleted-sandbox-uid"),
-				State:         agentsv1alpha1.SandboxStatePaused,
+				State:         sandboxstate.Paused,
 				WakeOnTraffic: true,
 			},
 			enableWake: true,
@@ -1947,7 +1958,7 @@ func TestShouldWakeSandbox(t *testing.T) {
 				Namespace:     "default",
 				Name:          "gone",
 				UID:           types.UID("gone-uid"),
-				State:         agentsv1alpha1.SandboxStatePaused,
+				State:         sandboxstate.Paused,
 				WakeOnTraffic: true,
 			},
 			enableWake: true,
@@ -1959,7 +1970,7 @@ func TestShouldWakeSandbox(t *testing.T) {
 			route: sandboxroute.Route{
 				Namespace:     "default",
 				Name:          "sbx",
-				State:         agentsv1alpha1.SandboxStatePaused,
+				State:         sandboxstate.Paused,
 				WakeOnTraffic: true,
 			},
 			enableWake: true,
@@ -2059,7 +2070,7 @@ func TestShouldWakeSandboxSpecFallback(t *testing.T) {
 			Namespace:     "default",
 			Name:          "with-rule",
 			UID:           types.UID("with-rule-uid"),
-			State:         agentsv1alpha1.SandboxStatePaused,
+			State:         sandboxstate.Paused,
 			WakeOnTraffic: false, // Force spec fallback
 		}
 		f := &sandboxFilter{config: cfg}
@@ -2084,7 +2095,7 @@ func TestShouldWakeSandboxSpecFallback(t *testing.T) {
 			Namespace:     "default",
 			Name:          "no-rule",
 			UID:           types.UID("no-rule-uid"),
-			State:         agentsv1alpha1.SandboxStatePaused,
+			State:         sandboxstate.Paused,
 			WakeOnTraffic: false, // Force spec fallback
 		}
 		f := &sandboxFilter{config: cfg}
@@ -2113,7 +2124,7 @@ func TestShouldWakeSandboxSpecFallback(t *testing.T) {
 			Namespace:     "default",
 			Name:          "recreated",
 			UID:           types.UID("deleted-sandbox-uid"),
-			State:         agentsv1alpha1.SandboxStatePaused,
+			State:         sandboxstate.Paused,
 			WakeOnTraffic: false, // Force spec fallback
 		}
 		f := &sandboxFilter{config: cfg}

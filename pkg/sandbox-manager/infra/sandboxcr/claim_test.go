@@ -62,6 +62,7 @@ import (
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandboxmetrics"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	pkgutils "github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -1172,7 +1173,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 				tt.preModifier(sbx)
 			}
 			state, reason := pkgutils.GetSandboxState(sbx)
-			require.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
+			require.Equal(t, sandboxstate.Available, state, reason)
 			CreateSandboxWithStatus(t, fc, sbx)
 			require.Eventually(t, func() bool {
 				var got v1alpha1.Sandbox
@@ -1478,7 +1479,7 @@ func TestSandboxReadyFailureMessage(t *testing.T) {
 					PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
 				},
 			},
-			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports StartContainerFailed: process exited, state=dead, ready=StartContainerFailed",
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports StartContainerFailed: process exited, state=provisioning, ready=StartContainerFailed",
 		},
 		{
 			name: "ready condition reports unschedulable with message",
@@ -1501,7 +1502,7 @@ func TestSandboxReadyFailureMessage(t *testing.T) {
 					PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
 				},
 			},
-			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports Unschedulable: insufficient CPU, state=dead, ready=Unschedulable",
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports Unschedulable: insufficient CPU, state=provisioning, ready=Unschedulable",
 		},
 		{
 			name: "unschedulable reason reported without pod ip",
@@ -1523,7 +1524,7 @@ func TestSandboxReadyFailureMessage(t *testing.T) {
 					},
 				},
 			},
-			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports Unschedulable: insufficient CPU, state=dead, ready=Unschedulable",
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports Unschedulable: insufficient CPU, state=provisioning, ready=Unschedulable",
 		},
 	}
 

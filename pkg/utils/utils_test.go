@@ -32,6 +32,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	_ "github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
@@ -1212,7 +1213,7 @@ func TestGetSandboxState(t *testing.T) {
 					},
 				},
 			},
-			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedState:  sandboxstate.Dead,
 			expectedReason: "ResourceDeleted",
 		},
 		{
@@ -1228,7 +1229,7 @@ func TestGetSandboxState(t *testing.T) {
 					},
 				},
 			},
-			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedState:  sandboxstate.Expired,
 			expectedReason: "ShutdownTimeReached",
 		},
 		{
@@ -1251,7 +1252,7 @@ func TestGetSandboxState(t *testing.T) {
 					},
 				},
 			},
-			expectedState:  agentsv1alpha1.SandboxStateRunning,
+			expectedState:  sandboxstate.Running,
 			expectedReason: "RunningResourceClaimedAndReady",
 		},
 		{
@@ -1261,7 +1262,7 @@ func TestGetSandboxState(t *testing.T) {
 					Phase: agentsv1alpha1.SandboxPending,
 				},
 			},
-			expectedState:  agentsv1alpha1.SandboxStateCreating,
+			expectedState:  sandboxstate.Creating,
 			expectedReason: "ResourcePending",
 		},
 		{
@@ -1271,7 +1272,7 @@ func TestGetSandboxState(t *testing.T) {
 					Phase: agentsv1alpha1.SandboxSucceeded,
 				},
 			},
-			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedState:  sandboxstate.Dead,
 			expectedReason: "ResourceSucceeded",
 		},
 		{
@@ -1281,7 +1282,7 @@ func TestGetSandboxState(t *testing.T) {
 					Phase: agentsv1alpha1.SandboxFailed,
 				},
 			},
-			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedState:  sandboxstate.Dead,
 			expectedReason: "ResourceFailed",
 		},
 		{
@@ -1291,7 +1292,7 @@ func TestGetSandboxState(t *testing.T) {
 					Phase: agentsv1alpha1.SandboxTerminating,
 				},
 			},
-			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedState:  sandboxstate.Dead,
 			expectedReason: "ResourceTerminating",
 		},
 		{
@@ -1319,7 +1320,7 @@ func TestGetSandboxState(t *testing.T) {
 					},
 				},
 			},
-			expectedState:  agentsv1alpha1.SandboxStateAvailable,
+			expectedState:  sandboxstate.Available,
 			expectedReason: "ResourceControlledBySbsAndReady",
 		},
 		{
@@ -1347,7 +1348,7 @@ func TestGetSandboxState(t *testing.T) {
 					},
 				},
 			},
-			expectedState:  agentsv1alpha1.SandboxStateCreating,
+			expectedState:  sandboxstate.Creating,
 			expectedReason: "ResourceControlledBySbsButNotReady",
 		},
 		{
@@ -1365,7 +1366,7 @@ func TestGetSandboxState(t *testing.T) {
 						PodIP: "1.2.3.4",
 					}},
 			},
-			expectedState:  agentsv1alpha1.SandboxStateRunning,
+			expectedState:  sandboxstate.Running,
 			expectedReason: "RunningResourceClaimedAndReady",
 		},
 		{
@@ -1384,7 +1385,7 @@ func TestGetSandboxState(t *testing.T) {
 					},
 				},
 			},
-			expectedState:  agentsv1alpha1.SandboxStatePaused,
+			expectedState:  sandboxstate.Paused,
 			expectedReason: "RunningResourceClaimedAndPaused",
 		},
 		{
@@ -1403,7 +1404,7 @@ func TestGetSandboxState(t *testing.T) {
 					},
 				},
 			},
-			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedState:  sandboxstate.Provisioning,
 			expectedReason: "RunningResourceClaimedButNotReady",
 		},
 		{
@@ -1413,7 +1414,7 @@ func TestGetSandboxState(t *testing.T) {
 					Phase: agentsv1alpha1.SandboxPaused,
 				},
 			},
-			expectedState:  agentsv1alpha1.SandboxStatePaused,
+			expectedState:  sandboxstate.Paused,
 			expectedReason: "NotRunningResourceClaimed",
 		},
 	}
@@ -1539,6 +1540,16 @@ func TestIsReservedFailedSandbox(t *testing.T) {
 }
 
 func TestIsSandboxPausable(t *testing.T) {
+	pastTime := metav1.NewTime(time.Now().Add(-time.Minute))
+	futureTime := metav1.NewTime(time.Now().Add(time.Hour))
+	readySandbox := func() *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{{
+				Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue,
+			}},
+		}}
+	}
 	tests := []struct {
 		name           string
 		sandbox        *agentsv1alpha1.Sandbox
@@ -1546,18 +1557,8 @@ func TestIsSandboxPausable(t *testing.T) {
 		expectedReason string
 	}{
 		{
-			name: "Running ready sandbox is pausable",
-			sandbox: &agentsv1alpha1.Sandbox{
-				Status: agentsv1alpha1.SandboxStatus{
-					Phase: agentsv1alpha1.SandboxRunning,
-					Conditions: []metav1.Condition{
-						{
-							Type:   string(agentsv1alpha1.SandboxConditionReady),
-							Status: metav1.ConditionTrue,
-						},
-					},
-				},
-			},
+			name:           "Running ready sandbox is pausable",
+			sandbox:        readySandbox(),
 			expectedResult: true,
 			expectedReason: "SandboxIsRunningAndReady",
 		},
@@ -1596,6 +1597,35 @@ func TestIsSandboxPausable(t *testing.T) {
 			},
 			expectedResult: false,
 			expectedReason: "SandboxPhaseNotAllowed",
+		},
+		{
+			name: "deletion timestamp prevents a new pause",
+			sandbox: func() *agentsv1alpha1.Sandbox {
+				sbx := readySandbox()
+				sbx.DeletionTimestamp = &pastTime
+				sbx.Finalizers = []string{"test-finalizer"}
+				return sbx
+			}(),
+			expectedReason: "SandboxIsTerminating",
+		},
+		{
+			name: "expired shutdown deadline prevents a new pause",
+			sandbox: func() *agentsv1alpha1.Sandbox {
+				sbx := readySandbox()
+				sbx.Spec.ShutdownTime = &pastTime
+				return sbx
+			}(),
+			expectedReason: "ShutdownTimeReached",
+		},
+		{
+			name: "ShutdownTime not reached falls through to phase check",
+			sandbox: func() *agentsv1alpha1.Sandbox {
+				sbx := readySandbox()
+				sbx.Spec.ShutdownTime = &futureTime
+				return sbx
+			}(),
+			expectedResult: true,
+			expectedReason: "SandboxIsRunningAndReady",
 		},
 	}
 

@@ -51,6 +51,7 @@ import (
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandboxmetrics"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -698,7 +699,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 		}
 		state, _ := utils.GetSandboxState(obj)
 		switch state {
-		case v1alpha1.SandboxStateAvailable:
+		case sandboxstate.Available:
 			if len(availableCandidates) >= cnt {
 				continue
 			}
@@ -707,7 +708,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 				continue
 			}
 			availableCandidates = append(availableCandidates, obj)
-		case v1alpha1.SandboxStateCreating:
+		case sandboxstate.Creating:
 			if opts.SpeculateCreatingDuration == 0 || len(speculatingCandidates) >= cnt {
 				continue
 			}
@@ -1392,7 +1393,7 @@ func sandboxReadyFailureReason(sbx *v1alpha1.Sandbox, state string, readyCond, i
 	if sbx.Status.PodInfo.PodIP == "" {
 		return "sandbox has no pod IP"
 	}
-	if state != v1alpha1.SandboxStateRunning {
+	if state != sandboxstate.Running {
 		return fmt.Sprintf("sandbox state is %s", state)
 	}
 	if readyCond.Reason != "" {
