@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,10 +44,11 @@ import (
 )
 
 type retryCleanupQuotaManager struct {
-	calls       atomic.Int64
-	failures    int64
-	callCh      chan int64
-	sawDeadline atomic.Bool
+	firstCallDelay time.Duration
+	calls          atomic.Int64
+	failures       int64
+	callCh         chan int64
+	sawDeadline    atomic.Bool
 }
 
 func newRetryCleanupQuotaManager(failures int64) *retryCleanupQuotaManager {
@@ -75,6 +77,13 @@ func (m *retryCleanupQuotaManager) Cleanup(ctx context.Context, _ string) error 
 	select {
 	case m.callCh <- call:
 	default:
+	}
+	if call == 1 && m.firstCallDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(m.firstCallDelay):
+		}
 	}
 	if call <= m.failures {
 		return errors.New("transient cleanup failure")
@@ -658,6 +667,7 @@ func TestDeleteAPIKeyPermissionMiddleware(t *testing.T) {
 
 func TestDeleteAPIKeyQuotaCleanupRetriesBestEffort(t *testing.T) {
 	fakeQuota := newRetryCleanupQuotaManager(1)
+	fakeQuota.firstCallDelay = 2 * time.Second
 	controller, _, teardown := SetupWithQuota(t, fakeQuota)
 	defer teardown()
 
@@ -672,21 +682,30 @@ func TestDeleteAPIKeyQuotaCleanupRetriesBestEffort(t *testing.T) {
 	require.NoError(t, err)
 	refreshKeyStorageForTest(t, controller)
 
-	req := NewRequest(t, nil, nil, map[string]string{"apiKeyID": target.ID.String()}, adminUser)
-	req = req.WithContext(context.WithValue(req.Context(), targetAPIKeyContextKey, target))
-	resp, apiErr := controller.DeleteAPIKey(req)
-	require.Nil(t, apiErr)
-	assert.Equal(t, http.StatusNoContent, resp.Code)
+	synctest.Test(t, func(t *testing.T) {
+		drained := waitForTestDrain(controller)
+		requestCtx, cancelRequest := context.WithCancel(t.Context())
+		defer cancelRequest()
+		req := httptest.NewRequestWithContext(requestCtx, http.MethodDelete, "/api-keys/"+target.ID.String(), nil)
+		req.Header.Set(models.HeaderApiKey, InitKey)
+		resp := httptest.NewRecorder()
+		started := time.Now()
+		controller.server.Handler.ServeHTTP(resp, req)
+		cancelRequest()
+		require.Equal(t, http.StatusNoContent, resp.Code)
+		require.Equal(t, started, time.Now(), "DELETE waited for detached quota cleanup")
 
-	for i := 0; i < 2; i++ {
-		select {
-		case <-fakeQuota.callCh:
-		case <-time.After(time.Second):
-			t.Fatalf("quota cleanup did not retry after transient failure, calls=%d", fakeQuota.calls.Load())
-		}
-	}
-	assert.True(t, fakeQuota.sawDeadline.Load())
-	assert.GreaterOrEqual(t, fakeQuota.calls.Load(), int64(2))
+		time.Sleep(fakeQuota.firstCallDelay)
+		requireDrainPending(t, drained)
+		require.EqualValues(t, 1, fakeQuota.calls.Load())
+		time.Sleep(apiKeyQuotaCleanupInitialBackoff)
+		synctest.Wait()
+		require.True(t, fakeQuota.sawDeadline.Load())
+		require.EqualValues(t, 2, fakeQuota.calls.Load(), "quota cleanup must retry despite request cancellation")
+
+		time.Sleep(time.Second)
+		requireDrainSealed(t, drained)
+	})
 }
 
 func TestDeleteAPIKeyUnlimitedSkipsQuotaCleanup(t *testing.T) {

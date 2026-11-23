@@ -21,6 +21,8 @@ spec:
         component: sandbox-manager
         app.kubernetes.io/name: sandbox-manager
     spec:
+      # Pod-level limit for E2E requests still in flight during termination.
+      terminationGracePeriodSeconds: 150
       serviceAccountName: sandbox-manager
       containers:
         - name: controller
@@ -62,15 +64,17 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
-            tcpSocket:
-              port: 7789
+            httpGet:
+              path: /health
+              port: 8080
             initialDelaySeconds: 10
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
           startupProbe:
-            tcpSocket:
-              port: 7789
+            httpGet:
+              path: /health
+              port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 30

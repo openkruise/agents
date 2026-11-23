@@ -174,7 +174,11 @@ func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], 
 			// dead memory because API-key IDs are never reused and deleted keys are no
 			// longer enumerated by anti-drift. A stronger tombstone/TTL cleanup policy is
 			// intentionally deferred to a later PR.
-			go sc.cleanupDeletedAPIKeyQuota(ctx, key.ID.String())
+			done := sc.activity.beginTask()
+			go func(id string) {
+				defer done()
+				sc.cleanupDeletedAPIKeyQuota(ctx, id)
+			}(key.ID.String())
 		}
 	}
 

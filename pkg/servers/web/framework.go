@@ -55,12 +55,13 @@ func (r *ApiError) Error() string {
 	return string(j)
 }
 
-func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handler[T], middlewares ...MiddleWare) {
+// RegisterRoute registers the path with and without a trailing slash.
+func RegisterRoute[T any](handle func(string, http.Handler), method, path string, handler Handler[T], middlewares ...MiddleWare) {
 	pattern := fmt.Sprintf("%s %s", method, path)
 	if len(pattern) > 1 && pattern[len(pattern)-1] == '/' {
 		pattern = pattern[:len(pattern)-1]
 	}
-	handleFunc := func(w http.ResponseWriter, r *http.Request) {
+	handleFunc := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		written := false
 		safeWriteJson := func(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, headers map[string]string, requestID string) {
 			if !written {
@@ -169,9 +170,9 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 			log.Info("API Success", "path", r.URL.Path, "cost", time.Since(start))
 			safeWriteJson(ctx, w, resp.Code, http.StatusOK, resp.Body, resp.Headers, requestID)
 		}
-	}
-	mux.HandleFunc(pattern, handleFunc)
-	mux.HandleFunc(pattern+"/", handleFunc)
+	})
+	handle(pattern, handleFunc)
+	handle(pattern+"/", handleFunc)
 }
 
 func writeJson(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, headers map[string]string, requestID string) {

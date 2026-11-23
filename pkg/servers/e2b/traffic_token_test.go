@@ -41,11 +41,18 @@ import (
 )
 
 type e2bTrafficTokenProvider struct {
-	calls atomic.Int32
+	calls             atomic.Int32
+	activity          *requestActivity
+	activeDuringIssue []int
 }
 
 func (p *e2bTrafficTokenProvider) IssueToken(_ context.Context, _ *v1alpha1.Sandbox, opts identity.TokenOptions) (*identity.TokenResponse, error) {
 	call := p.calls.Add(1)
+	if p.activity != nil {
+		p.activity.mu.Lock()
+		p.activeDuringIssue = append(p.activeDuringIssue, p.activity.active)
+		p.activity.mu.Unlock()
+	}
 	return &identity.TokenResponse{
 		AccessToken:           fmt.Sprintf("refreshed-jwt-%d", call),
 		AccessTokenExpiration: time.Now().Add(opts.RequestedValidity).UTC().Format(time.RFC3339),
@@ -59,7 +66,7 @@ func (*e2bTrafficTokenProvider) PropagateSecurityToken(context.Context, *v1alpha
 func TestRefreshTrafficAccessToken(t *testing.T) {
 	controller, client, teardown := Setup(t)
 	defer teardown()
-	provider := &e2bTrafficTokenProvider{}
+	provider := &e2bTrafficTokenProvider{activity: &controller.activity}
 	identity.RegisterProvider(provider)
 	t.Cleanup(func() { identity.RegisterProvider(identity.NewDefaultIdentityProvider()) })
 
@@ -95,11 +102,21 @@ func TestRefreshTrafficAccessToken(t *testing.T) {
 	assert.Equal(t, "refreshed-jwt-1", response.Body.TrafficAccessToken)
 	assert.NotEmpty(t, response.Body.TrafficAccessTokenExpiration)
 
+	// The leader releases its activity only after the shared flight completes,
+	// so wait for that release before issuing again; otherwise the next
+	// issuance can observe two active tasks.
+	require.Eventually(t, func() bool {
+		controller.activity.mu.Lock()
+		defer controller.activity.mu.Unlock()
+		return controller.activity.active == 0
+	}, time.Second, time.Millisecond)
+
 	second, apiErr := controller.RefreshTrafficAccessToken(request)
 	require.Nil(t, apiErr)
 	require.NotNil(t, second.Body)
 	assert.Equal(t, "refreshed-jwt-2", second.Body.TrafficAccessToken)
 	assert.Equal(t, int32(2), provider.calls.Load())
+	assert.Equal(t, []int{1, 1}, provider.activeDuringIssue)
 }
 
 func TestTrafficAccessTokenRouteIsKruiseOnly(t *testing.T) {
