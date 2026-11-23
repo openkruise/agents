@@ -400,6 +400,8 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 	if initRuntimeOpts != nil {
 		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
 		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
+	} else {
+		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = config.NewDefaultAccessToken()
 	}
 	requestJWTAuth, requestJWTAuthProvided := sbx.Annotations[identity.AnnotationEnableJwtAuth]
 	RestoreAnnotationsFromCheckpoint(cp, sbx.Sandbox)
