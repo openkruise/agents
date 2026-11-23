@@ -776,6 +776,7 @@ func TestCreateSandboxWithClone_Naming(t *testing.T) {
 func TestParseCreateSandboxRequest_SecurityProfile(t *testing.T) {
 	const validProfile = `{"tcpRules":[{"name":"deny-ssh","match":[{"cidrs":["10.23.0.0/16"],"ports":[22]}],"action":"Deny"}]}`
 	const legacyRules = `[{"name":"block","match":[{"domains":["api.example.com"]}],"actions":{"block":{"statusCode":403}}}]`
+	overRuleLimit := "[" + strings.Repeat("{},", maxSecurityRules) + "{}]"
 	tests := []struct {
 		name        string
 		profile     string
@@ -795,6 +796,17 @@ func TestParseCreateSandboxRequest_SecurityProfile(t *testing.T) {
 		{name: "shared profile priority", profile: `{"priority":1}`, wantMessage: "unknown field"},
 		{name: "null profile", profile: "null", wantMessage: "one profile JSON object"},
 		{name: "multiple profiles", profile: "{} {}", wantMessage: "one profile JSON object"},
+		{name: "profile size limit", profile: `{"inputs":[{"name":"settings","inline":{"data":"` + strings.Repeat("x", maxSecurityRulesBytes) + `"}}]}`, wantMessage: "profile exceeds"},
+		{name: "HTTP rule count limit", profile: `{"rules":` + overRuleLimit + `}`, wantMessage: "rules: at most"},
+		{name: "TCP rule count limit", profile: `{"tcpRules":` + overRuleLimit + `}`, wantMessage: "tcpRules: at most"},
+		{name: "reserved HTTP rule name", profile: `{"rules":[{"name":"agentio-e2b-user","match":[{"domains":["*"]}]}]}`, wantMessage: "reserved prefix"},
+		{name: "HTTP rule missing match", profile: `{"rules":[{"name":"block","actions":{"block":{}}}]}`, wantMessage: "requires a match"},
+		{name: "HTTP match missing domain", profile: `{"rules":[{"name":"block","match":[{"ports":[443]}]}]}`, wantMessage: "requires domains"},
+		{name: "invalid HTTP domain", profile: `{"rules":[{"name":"block","match":[{"domains":["bad_domain.example"]}]}]}`, wantMessage: "invalid domain"},
+		{name: "reserved TCP rule name", profile: `{"tcpRules":[{"name":"agentio-e2b-user","match":[{}],"action":"Allow"}]}`, wantMessage: "invalid or reserved name"},
+		{name: "unknown TCP action", profile: `{"tcpRules":[{"name":"egress","match":[{}],"action":"Reject"}]}`, wantMessage: "action must be Allow or Deny"},
+		{name: "TCP rule missing match", profile: `{"tcpRules":[{"name":"egress","action":"Deny"}]}`, wantMessage: "match must contain at least one clause"},
+		{name: "IPv4 and IPv6 matches", profile: `{"tcpRules":[{"name":"allow-api","match":[{"cidrs":["192.0.2.1","2001:db8::/32"],"ports":[443]}],"action":"Allow"}]}`},
 		{name: "invalid CIDR", profile: `{"tcpRules":[{"name":"deny","match":[{"cidrs":["bad"]}],"action":"Deny"}]}`, wantMessage: "invalid IP or CIDR"},
 		{name: "invalid port", profile: `{"tcpRules":[{"name":"deny","match":[{"ports":[0]}],"action":"Deny"}]}`, wantMessage: "outside 1-65535"},
 		{name: "null match", profile: `{"tcpRules":[{"name":"allow","match":[null],"action":"Allow"}]}`, wantMessage: "expected an object"},
