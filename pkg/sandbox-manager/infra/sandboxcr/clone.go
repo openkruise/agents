@@ -218,17 +218,6 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 
 	// Step 5: re-init runtime
 	if metrics, err = cloneReInitRuntime(ctx, sbx, opts, initRuntimeOpts, metrics, rtOpts...); err != nil {
-		if !wait.Interrupted(err) {
-			var apiErr *runtime.APIError
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
-				// A 401 against the rotated token is deterministic: envd still
-				// holds the source token. Keep it terminal so retries do not
-				// amplify orphaned clones.
-				err = fmt.Errorf("failed to init runtime: %w", err)
-			} else {
-				err = claim.RetriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
-			}
-		}
 		return
 	}
 
@@ -414,7 +403,7 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 		// reusing the source token recorded in the checkpoint, and persist the
 		// rotated token so later resume/recreate re-init cycles reuse it.
 		initRuntimeOpts.AccessToken = config.NewDefaultAccessToken()
-		initRuntimeRequest, marshalErr := json.Marshal(initRuntimeOpts)
+		initRuntimeRequest, marshalErr := json.Marshal(initRuntimeOpts) // #nosec G117 -- the init annotation is the designated persistence for the envd token, same as claim
 		if marshalErr != nil {
 			return nil, nil, fmt.Errorf("failed to marshal init runtime request: %w", marshalErr)
 		}
@@ -490,7 +479,17 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 	metrics.Total += metrics.InitRuntime
 	if err != nil {
 		log.Error(err, "failed to init runtime")
-		return metrics, err
+		if wait.Interrupted(err) {
+			return metrics, err
+		}
+		var apiErr *runtime.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
+			// A 401 against the rotated token is deterministic: envd still
+			// holds the source token. Keep it terminal so retries do not
+			// amplify orphaned clones.
+			return metrics, fmt.Errorf("failed to init runtime: %w", err)
+		}
+		return metrics, claim.RetriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
 	}
 	return metrics, nil
 }
