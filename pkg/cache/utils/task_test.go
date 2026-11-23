@@ -59,8 +59,9 @@ func TestWaitTask_ZeroTimeout_ReturnsError(t *testing.T) {
 		func(s *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
 	)
 	err := task.Wait(0)
-	assert.Error(t, err)
+	require.EqualError(t, err, "Pause for default/sbx-2 has not completed (waiting disabled)")
 	assert.ErrorIs(t, err, ErrWaitNotSatisfied)
+	assert.Equal(t, "wait ended before completion", ErrWaitNotSatisfied.Error())
 }
 
 func TestNewAcquiredWaitTask(t *testing.T) {
@@ -91,6 +92,21 @@ func TestNewAcquiredWaitTask(t *testing.T) {
 				task.Release()
 
 				_, exists = hooks.Load(key)
+				assert.False(t, exists)
+			},
+		},
+		{
+			name: "changed target is rejected and releases original hook",
+			run: func(t *testing.T) {
+				var hooks sync.Map
+				target := newTaskTestSandbox("original")
+				task, err := NewAcquiredWaitTask(t.Context(), &hooks, WaitActionPause, target, identityUpdate, sandboxRunning)
+				require.NoError(t, err)
+
+				got, err := task.WaitForObject(newTaskTestSandbox("other"), time.Second)
+				require.EqualError(t, err, "wait target changed for default/original")
+				assert.Nil(t, got)
+				_, exists := hooks.Load(WaitHookKey(target))
 				assert.False(t, exists)
 			},
 		},

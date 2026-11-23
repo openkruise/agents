@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -683,6 +684,67 @@ func TestSandbox_PauseWaitRejectsLifecycleConflict(t *testing.T) {
 			var stored v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), ctrl.ObjectKeyFromObject(sandbox), &stored))
 			assert.True(t, stored.Spec.Paused)
+		})
+	}
+}
+
+func TestSandbox_PauseWaitUsesPostWriteDeadline(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		t.Run(fmt.Sprintf("currentDeadlineExpired=%t", expired), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				before := &v1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: "pause-retention", Namespace: "default", ResourceVersion: "10"},
+					Spec:       v1alpha1.SandboxSpec{ShutdownTime: timePtrOrNil(time.Now().Add(time.Second))},
+					Status:     v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxRunning},
+				}
+				SetSandboxCondition(before, string(v1alpha1.SandboxConditionReady), metav1.ConditionTrue, "Ready", "")
+				// Keep the waiter's informer at the pre-write version while the API accepts the extension.
+				informer, _, err := cachetest.NewTestCache(t, before.DeepCopy())
+				require.NoError(t, err)
+				_, api, err := cachetest.NewTestCache(t, before.DeepCopy())
+				require.NoError(t, err)
+				s := AsSandbox(before, &apiReaderOverrideCache{Provider: informer, apiReader: api, client: api})
+				extended := time.Now().Add(time.Hour)
+				done := make(chan error, 1)
+				go func() {
+					done <- s.Pause(t.Context(), infra.PauseOptions{Timeout: &timeout.Options{ShutdownTime: extended}})
+				}()
+				synctest.Wait()
+				value, found := informer.GetWaitHooks().Load(cacheutils.WaitHookKey(before))
+				require.True(t, found)
+				entry := value.(*cacheutils.WaitEntry[*v1alpha1.Sandbox])
+				time.Sleep(2 * time.Second)
+				entry.RequestRead()
+				synctest.Wait()
+				entry.Observe(before)
+				select {
+				case err := <-done:
+					t.Fatalf("pre-write deadline completed Pause: %v", err)
+				default:
+				}
+
+				var current v1alpha1.Sandbox
+				require.NoError(t, api.Get(t.Context(), ctrl.ObjectKeyFromObject(before), &current))
+				require.True(t, current.Spec.Paused)
+				assertTimePtrEqual(t, timePtrOrNil(extended), current.Spec.ShutdownTime, "extended deadline")
+				if expired {
+					current.Spec.ShutdownTime = before.Spec.ShutdownTime
+					require.NoError(t, api.Update(t.Context(), &current))
+				} else {
+					current.Status.Phase = v1alpha1.SandboxPaused
+					SetSandboxCondition(&current, string(v1alpha1.SandboxConditionPaused), metav1.ConditionTrue, "DeletePod", "")
+					require.NoError(t, api.Status().Update(t.Context(), &current))
+				}
+				entry.Observe(&current)
+				err = <-done
+				if expired {
+					require.Equal(t, managererrors.ErrorConflict, managererrors.GetErrCode(err))
+					require.ErrorContains(t, err, "ShutdownTimeReached")
+				} else {
+					require.NoError(t, err)
+					require.Equal(t, current.ResourceVersion, s.ResourceVersion)
+				}
+			})
 		})
 	}
 }

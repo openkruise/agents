@@ -374,6 +374,37 @@ func TestWaitTask_ReadOutcomes(t *testing.T) {
 	}
 }
 
+func TestWaitTask_CoalescesReadRequests(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var hooks sync.Map
+		target := newTestSandbox("sbx-read", "default")
+		unblock := make(chan struct{})
+		reads := 0
+		task := NewWaitTask(t.Context(), &hooks, WaitActionResume, target,
+			func(_ context.Context, obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+				reads++
+				<-unblock
+				return obj, nil
+			}, sandboxRunning)
+		done := make(chan error, 1)
+		go func() { done <- task.Wait(time.Minute) }()
+		synctest.Wait() // first read is in flight
+		value, ok := hooks.Load(WaitHookKey(target))
+		require.True(t, ok)
+		entry := value.(*WaitEntry[*agentsv1alpha1.Sandbox])
+		entry.RequestRead()
+		entry.RequestRead()
+		close(unblock)
+		synctest.Wait()
+		assert.Equal(t, 2, reads, "both notifications should trigger a single follow-up read")
+
+		ready := target.DeepCopy()
+		ready.Status.Phase = agentsv1alpha1.SandboxRunning
+		entry.Observe(ready)
+		require.NoError(t, <-done)
+	})
+}
+
 // TestWaitTask_TimeoutClassification separates an internal wait-budget expiry
 // from the caller's own deadline, because callers retry on the former and stop
 // on the latter.
