@@ -43,193 +43,6 @@ func generateCIDREntries(n int) []string {
 	return entries
 }
 
-func TestValidateDenyOut(t *testing.T) {
-	tests := []struct {
-		name        string
-		denyOut     []string
-		expectError string
-	}{
-		{
-			name:        "valid CIDR entries",
-			denyOut:     []string{"10.0.0.0/8", "192.168.1.0/24"},
-			expectError: "",
-		},
-		{
-			name:        "valid bare IP entries",
-			denyOut:     []string{"8.8.8.8", "1.1.1.1"},
-			expectError: "",
-		},
-		{
-			name:        "valid mixed CIDR and IP",
-			denyOut:     []string{"10.0.0.0/8", "8.8.8.8"},
-			expectError: "",
-		},
-		{
-			name:        "valid IPv6 CIDR",
-			denyOut:     []string{"::1/128", "2001:db8::/32"},
-			expectError: "",
-		},
-		{
-			name:        "empty list is valid",
-			denyOut:     []string{},
-			expectError: "",
-		},
-		{
-			name:        "nil list is valid",
-			denyOut:     nil,
-			expectError: "",
-		},
-		{
-			name:        "plain domain rejected",
-			denyOut:     []string{"example.com"},
-			expectError: "domains are not supported in denyOut",
-		},
-		{
-			name:        "wildcard domain rejected",
-			denyOut:     []string{"*.example.com"},
-			expectError: "domains are not supported in denyOut",
-		},
-		{
-			name:        "multi-level domain rejected",
-			denyOut:     []string{"api.openai.com"},
-			expectError: "domains are not supported in denyOut",
-		},
-		{
-			name:        "domain mixed with valid CIDR rejected",
-			denyOut:     []string{"10.0.0.0/8", "evil.com"},
-			expectError: "domains are not supported in denyOut",
-		},
-		{
-			name:        "all-traffic CIDR is valid",
-			denyOut:     []string{"0.0.0.0/0"},
-			expectError: "",
-		},
-		{
-			name:        "denyOut exceeds max entries",
-			denyOut:     generateCIDREntries(maxNetworkEntriesPerList + 1),
-			expectError: "denyOut list exceeds maximum",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateDenyOut(tt.denyOut)
-			if tt.expectError == "" {
-				assert.NoError(t, err)
-			} else {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-			}
-		})
-	}
-}
-
-func TestValidateAllowOut(t *testing.T) {
-	tests := []struct {
-		name        string
-		allowOut    []string
-		expectError string
-	}{
-		{
-			name:        "valid CIDR entries",
-			allowOut:    []string{"10.0.0.0/8", "192.168.1.0/24"},
-			expectError: "",
-		},
-		{
-			name:        "valid bare IP entries",
-			allowOut:    []string{"8.8.8.8", "1.1.1.1"},
-			expectError: "",
-		},
-		{
-			name:        "valid domain entries",
-			allowOut:    []string{"example.com", "api.openai.com"},
-			expectError: "",
-		},
-		{
-			name:        "wildcard prefix rejected",
-			allowOut:    []string{"*.example.com", "*.openai.com"},
-			expectError: "wildcard domains are not supported",
-		},
-		{
-			name:        "wildcard in middle rejected",
-			allowOut:    []string{"api.*.github.com"},
-			expectError: "wildcard domains are not supported",
-		},
-		{
-			name:        "wildcard at end rejected",
-			allowOut:    []string{"example.com.*"},
-			expectError: "wildcard domains are not supported",
-		},
-		{
-			name:        "wildcard without dot rejected",
-			allowOut:    []string{"*example.com"},
-			expectError: "wildcard domains are not supported",
-		},
-		{
-			name:        "wildcard mixed with valid entries rejected",
-			allowOut:    []string{"10.0.0.0/8", "8.8.8.8", "api.example.com", "*.github.com"},
-			expectError: "wildcard domains are not supported",
-		},
-		{
-			name:        "valid mixed CIDR IP and domain",
-			allowOut:    []string{"10.0.0.0/8", "8.8.8.8", "api.example.com", "github.com"},
-			expectError: "",
-		},
-		{
-			name:        "empty list is valid",
-			allowOut:    []string{},
-			expectError: "",
-		},
-		{
-			name:        "nil list is valid",
-			allowOut:    nil,
-			expectError: "",
-		},
-		{
-			name:        "garbage string rejected",
-			allowOut:    []string{">>>invalid"},
-			expectError: "invalid allowOut entry",
-		},
-		{
-			name:        "single label rejected",
-			allowOut:    []string{"localhost"},
-			expectError: "invalid allowOut entry",
-		},
-		{
-			name:        "empty string rejected",
-			allowOut:    []string{""},
-			expectError: "invalid allowOut entry",
-		},
-		{
-			name:        "TLD too short rejected",
-			allowOut:    []string{"example.a"},
-			expectError: "invalid allowOut entry",
-		},
-		{
-			name:        "invalid entry mixed with valid rejected",
-			allowOut:    []string{"10.0.0.0/8", ">>>bad"},
-			expectError: "invalid allowOut entry",
-		},
-		{
-			name:        "allowOut exceeds max entries",
-			allowOut:    generateCIDREntries(maxNetworkEntriesPerList + 1),
-			expectError: "allowOut list exceeds maximum",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateAllowOut(tt.allowOut)
-			if tt.expectError == "" {
-				assert.NoError(t, err)
-			} else {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-			}
-		})
-	}
-}
-
 func TestValidateAndBuildNetworkConfig_DenyOutDomainError(t *testing.T) {
 	// Validation is centralized in validateAndBuildNetworkConfig.
 	_, err := validateAndBuildNetworkConfig(&models.SandboxNetworkConfig{
@@ -367,7 +180,7 @@ func TestValidateAndBuildNetworkConfig(t *testing.T) {
 		{
 			name: "allowOut exceeds max entries",
 			network: &models.SandboxNetworkConfig{
-				AllowOut: generateCIDREntries(maxNetworkEntriesPerList + 1),
+				AllowOut: generateCIDREntries(101),
 			},
 			wantNil:     true,
 			expectError: "allowOut list exceeds maximum",
@@ -375,7 +188,7 @@ func TestValidateAndBuildNetworkConfig(t *testing.T) {
 		{
 			name: "denyOut exceeds max entries",
 			network: &models.SandboxNetworkConfig{
-				DenyOut: generateCIDREntries(maxNetworkEntriesPerList + 1),
+				DenyOut: generateCIDREntries(101),
 			},
 			wantNil:     true,
 			expectError: "denyOut list exceeds maximum",
@@ -473,14 +286,14 @@ func TestUpdateSandboxNetwork_ValidationError(t *testing.T) {
 		{
 			name: "allowOut exceeds max entries",
 			req: models.SandboxNetworkUpdateConfig{
-				AllowOut: generateCIDREntries(maxNetworkEntriesPerList + 1),
+				AllowOut: generateCIDREntries(101),
 			},
 			expectError: "allowOut list exceeds maximum",
 		},
 		{
 			name: "denyOut exceeds max entries",
 			req: models.SandboxNetworkUpdateConfig{
-				DenyOut: generateCIDREntries(maxNetworkEntriesPerList + 1),
+				DenyOut: generateCIDREntries(101),
 			},
 			expectError: "denyOut list exceeds maximum",
 		},

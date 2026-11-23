@@ -26,7 +26,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -223,7 +225,27 @@ func TestInitRuntime(t *testing.T) {
 		sbxSetup    func(url string) *agentsv1alpha1.Sandbox
 		wantErr     bool
 		errContains string
+		extraStatus int
+		wantExtra   int32
 	}{
+		{
+			name:     "additional service receives the accepted native token",
+			handler:  func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) },
+			opts:     config.InitRuntimeOptions{SkipRefresh: true, AccessToken: "test-token"},
+			sbxSetup: newTestSandboxWithURL, extraStatus: 204, wantExtra: 1,
+		},
+		{
+			name:     "native rejection does not initialize an additional service",
+			handler:  func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(400) },
+			opts:     config.InitRuntimeOptions{SkipRefresh: true, AccessToken: "test-token"},
+			sbxSetup: newTestSandboxWithURL, extraStatus: 204, wantExtra: 0, wantErr: true, errContains: "returned status 400",
+		},
+		{
+			name:     "ReInit does not mask additional service authentication failure",
+			handler:  func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(401) },
+			opts:     config.InitRuntimeOptions{SkipRefresh: true, ReInit: true, AccessToken: "test-token"},
+			sbxSetup: newTestSandboxWithURL, extraStatus: 401, wantExtra: 1, wantErr: true, errContains: "returned status 401",
+		},
 		{
 			name: "successful init with 200 response",
 			handler: func(w http.ResponseWriter, r *http.Request) {
@@ -331,9 +353,27 @@ func TestInitRuntime(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			var nativeCalls, extraCalls atomic.Int32
+			if tt.extraStatus != 0 {
+				extra := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					extraCalls.Add(1)
+					assert.Positive(t, nativeCalls.Load())
+					assert.Equal(t, "/init", r.URL.Path)
+					var received config.InitRuntimeOptions
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&received))
+					assert.Equal(t, tt.opts.AccessToken, received.AccessToken)
+					w.WriteHeader(tt.extraStatus)
+				}))
+				defer extra.Close()
+				u, err := url.Parse(extra.URL)
+				require.NoError(t, err)
+				port, err := strconv.Atoi(u.Port())
+				require.NoError(t, err)
+				tt.opts.AdditionalInitPorts = []int{port}
+			}
 			var server *httptest.Server
 			if tt.handler != nil {
-				server = httptest.NewServer(tt.handler)
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { nativeCalls.Add(1); tt.handler(w, r) }))
 				defer server.Close()
 			}
 
@@ -352,6 +392,9 @@ func TestInitRuntime(t *testing.T) {
 			}
 
 			duration, err := InitRuntime(context.Background(), sbx, tt.opts, refreshFn)
+			if tt.extraStatus != 0 {
+				assert.Equal(t, tt.wantExtra, extraCalls.Load())
+			}
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.errContains != "" {
