@@ -19,6 +19,7 @@ package e2b
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/pausedretention"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -54,6 +56,12 @@ const noServerTimeout = 100 * 365 * 24 * time.Hour
 // mapInfraErrorToApiError converts an infra-layer error to an ApiError with the
 // appropriate HTTP status code based on managererrors.ErrorCode.
 func mapInfraErrorToApiError(err error) *web.ApiError {
+	if errors.Is(err, resourceaccess.ErrAccessDenied) {
+		return &web.ApiError{Code: http.StatusNotFound, Message: "Resource not found"}
+	}
+	if errors.Is(err, resourceaccess.ErrBackendRead) {
+		return &web.ApiError{Code: http.StatusInternalServerError, Message: "Failed to resolve resource"}
+	}
 	// The create API maps validation/lookups to 400, quota misses to 403, and
 	// everything else to 500.
 	switch managererrors.GetErrCode(err) {
@@ -181,7 +189,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	}
 	infraOpts.CSIMount = csiMount
 
-	if csiMount != nil && csiutils.BuildStorageAuthAnnotation != nil {
+	if !sc.isolatedResourceAccess() && csiMount != nil && csiutils.BuildStorageAuthAnnotation != nil {
 		var authErr error
 		storageAuthKey, storageAuthValue, authErr = csiutils.BuildStorageAuthAnnotation(ctx, sc.cache.GetClient(), request.Extensions.CSIMount.MountConfigs)
 		if authErr != nil {
@@ -275,7 +283,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	}
 	infraOpts.CSIMount = csiMount
 
-	if csiMount != nil && csiutils.BuildStorageAuthAnnotation != nil {
+	if !sc.isolatedResourceAccess() && csiMount != nil && csiutils.BuildStorageAuthAnnotation != nil {
 		var authErr error
 		storageAuthKey, storageAuthValue, authErr = csiutils.BuildStorageAuthAnnotation(ctx, sc.cache.GetClient(), request.Extensions.CSIMount.MountConfigs)
 		if authErr != nil {
@@ -335,6 +343,8 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 				MountPath: vm.Path,
 			})
 		}
+	} else if sc.isolatedResourceAccess() && request.VolumeMounts != nil {
+		request.Extensions.CSIMount.MountConfigs = []agentsv1alpha1.CSIMountConfig{}
 	}
 
 	if err := request.ParseExtensions(); err != nil {
@@ -345,6 +355,9 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 	}
 
 	for k := range request.Metadata {
+		if sc.isolatedResourceAccess() && k == resourceaccess.StorageAuthAnnotation {
+			return request, &web.ApiError{Code: http.StatusBadRequest, Message: "Forbidden metadata key [" + k + "]"}
+		}
 		if errLists := validation.IsQualifiedName(k); len(errLists) > 0 {
 			return request, &web.ApiError{
 				Code:    http.StatusBadRequest,
@@ -501,6 +514,16 @@ func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra
 // buildCSIMountOptions builds CSI mount options from the request's CSI mount
 // configurations. Returns nil if no mounts are configured.
 func (sc *Controller) buildCSIMountOptions(ctx context.Context, request models.NewSandboxRequest) (*config.CSIMountOptions, error) {
+	if sc.isolatedResourceAccess() {
+		if request.Extensions.CSIMount.MountConfigs == nil {
+			return nil, nil
+		}
+		raw, err := json.Marshal(request.Extensions.CSIMount.MountConfigs)
+		if err != nil {
+			return nil, err
+		}
+		return &config.CSIMountOptions{MountOptionListRaw: string(raw)}, nil
+	}
 	if len(request.Extensions.CSIMount.MountConfigs) == 0 {
 		return nil, nil
 	}
@@ -521,6 +544,10 @@ func (sc *Controller) buildCSIMountOptions(ctx context.Context, request models.N
 	return &config.CSIMountOptions{
 		MountOptionList: csiMountOptions,
 	}, nil
+}
+
+func (sc *Controller) isolatedResourceAccess() bool {
+	return sc.manager != nil && sc.manager.ResourceAccessMode() == resourceaccess.Isolated
 }
 
 // injectStorageAuthAnnotation injects the storage-auth annotation into the sandbox

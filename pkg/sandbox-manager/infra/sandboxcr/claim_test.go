@@ -58,6 +58,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -5637,13 +5638,30 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 	user := "test-user"
 
 	tests := []struct {
-		name         string
-		options      infra.ClaimSandboxOptions
-		mockProvider *mockIdentityProvider
-		preModifier  func(sbx *v1alpha1.Sandbox)
-		expectError  string
-		postCheck    func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics)
+		name          string
+		options       infra.ClaimSandboxOptions
+		mockProvider  *mockIdentityProvider
+		preModifier   func(sbx *v1alpha1.Sandbox)
+		expectError   string
+		expectedCause error
+		postCheck     func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics)
 	}{
+		{
+			name:    "isolated access denial remains terminal after runtime init",
+			options: infra.ClaimSandboxOptions{ResourceAccessMode: resourceaccess.Isolated, User: user, Template: existTemplate, InitRuntime: &config.InitRuntimeOptions{}},
+			mockProvider: &mockIdentityProvider{issueTokenFunc: func(context.Context, *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
+				return nil, fmt.Errorf("prepare token: %w", resourceaccess.ErrAccessDenied)
+			}},
+			expectError: resourceaccess.ErrAccessDenied.Error(), expectedCause: resourceaccess.ErrAccessDenied,
+		},
+		{
+			name:    "isolated backend read classification survives runtime init",
+			options: infra.ClaimSandboxOptions{ResourceAccessMode: resourceaccess.Isolated, User: user, Template: existTemplate, InitRuntime: &config.InitRuntimeOptions{}},
+			mockProvider: &mockIdentityProvider{issueTokenFunc: func(context.Context, *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
+				return nil, fmt.Errorf("private backend details: %w", resourceaccess.ErrBackendRead)
+			}},
+			expectError: resourceaccess.ErrBackendRead.Error(), expectedCause: resourceaccess.ErrBackendRead,
+		},
 		{
 			name: "issue security token success and propagate",
 			options: infra.ClaimSandboxOptions{
@@ -5857,13 +5875,26 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			opts, err := ValidateAndInitClaimOptions(tt.options)
 			require.NoError(t, err)
 
-			claimed, metrics, claimErr := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			var claimed infra.Sandbox
+			var metrics infra.ClaimMetrics
+			var claimErr error
+			if tt.expectedCause != nil {
+				claimed, metrics, claimErr = testInfra.ClaimSandbox(t.Context(), opts)
+				assert.Zero(t, metrics.Retries)
+			} else {
+				claimed, metrics, claimErr = TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			}
 
 			if tt.expectError != "" {
 				require.Error(t, claimErr)
 				assert.Contains(t, claimErr.Error(), tt.expectError)
 				var retryErr retriableError
-				assert.True(t, errors.As(claimErr, &retryErr), "error should be a retriableError")
+				if tt.expectedCause != nil {
+					assert.ErrorIs(t, claimErr, tt.expectedCause)
+					assert.False(t, errors.As(claimErr, &retryErr))
+				} else {
+					assert.True(t, errors.As(claimErr, &retryErr), "error should be a retriableError")
+				}
 			} else {
 				require.NoError(t, claimErr)
 				require.NotNil(t, claimed)

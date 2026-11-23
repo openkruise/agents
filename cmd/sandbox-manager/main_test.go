@@ -19,9 +19,35 @@ package main
 import (
 	"testing"
 
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestValidateResourceAccessFlags(t *testing.T) {
+	for _, tt := range []struct {
+		value   string
+		auth    bool
+		want    resourceaccess.Mode
+		wantErr string
+	}{
+		{value: "", wantErr: "--resource-access-mode must not be empty"},
+		{value: "trusted-domain", want: resourceaccess.TrustedDomain},
+		{value: "isolated", auth: true, want: resourceaccess.Isolated},
+		{value: "isolated", wantErr: "requires --e2b-enable-auth"},
+		{value: "strict", auth: true, wantErr: "invalid --resource-access-mode"},
+	} {
+		t.Run(tt.value+tt.wantErr, func(t *testing.T) {
+			got, err := validateResourceAccessFlags(tt.value, tt.auth)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
 
 func TestValidateE2BTimeoutFlags(t *testing.T) {
 	cases := []struct {

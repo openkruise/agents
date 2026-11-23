@@ -26,6 +26,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
 )
@@ -80,8 +81,8 @@ type ClaimControl interface {
 // client TLS bundle for reaching TLS-capable agent-runtimes; nil disables
 // runtime TLS for the claim path.
 func NewClaimControl(c client.Client, recorder record.EventRecorder, cache cache.Provider,
-	runtimeTLSBundle *runtimeclient.TLSBundle) map[string]ClaimControl {
+	runtimeTLSBundle *runtimeclient.TLSBundle, modes ...resourceaccess.Mode) map[string]ClaimControl {
 	controls := map[string]ClaimControl{}
-	controls[core.CommonControlName] = NewCommonControl(c, recorder, cache, runtimeTLSBundle)
+	controls[core.CommonControlName] = NewCommonControl(c, recorder, cache, runtimeTLSBundle, modes...)
 	return controls
 }

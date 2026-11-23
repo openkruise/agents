@@ -46,6 +46,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
@@ -1202,10 +1203,34 @@ func TestBasicSandboxCreateModifier(t *testing.T) {
 
 func TestMapInfraErrorToApiError(t *testing.T) {
 	tests := []struct {
-		name         string
-		err          error
-		expectedCode int
+		name           string
+		err            error
+		expectedCode   int
+		genericMessage string
 	}{
+		{
+			name:           "isolated denial is a generic 404",
+			err:            managererrors.WrapError(managererrors.ErrorInternal, resourceaccess.ErrAccessDenied, "private storage details"),
+			expectedCode:   http.StatusNotFound,
+			genericMessage: "Resource not found",
+		},
+		{
+			name:           "isolated backend read is a generic 500",
+			err:            managererrors.WrapError(managererrors.ErrorInternal, resourceaccess.ErrBackendRead, "private namespace and backend address"),
+			expectedCode:   http.StatusInternalServerError,
+			genericMessage: "Failed to resolve resource",
+		},
+		{
+			name:           "denial with canceled context stays generic",
+			err:            fmt.Errorf("private checkpoint: %w: %w", resourceaccess.ErrAccessDenied, context.Canceled),
+			expectedCode:   http.StatusNotFound,
+			genericMessage: "Resource not found",
+		},
+		{
+			name:         "legacy ErrorNotAllowed is not remapped",
+			err:          managererrors.NewError(managererrors.ErrorNotAllowed, "not owned"),
+			expectedCode: http.StatusInternalServerError,
+		},
 		{
 			name:         "ErrorBadRequest maps to 400",
 			err:          managererrors.NewError(managererrors.ErrorBadRequest, "quota exceeded"),
@@ -1241,6 +1266,10 @@ func TestMapInfraErrorToApiError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			apiErr := mapInfraErrorToApiError(tt.err)
 			assert.Equal(t, tt.expectedCode, apiErr.Code)
+			if tt.genericMessage != "" {
+				assert.Equal(t, tt.genericMessage, apiErr.Message)
+				return
+			}
 			assert.Contains(t, apiErr.Message, tt.err.Error())
 		})
 	}
@@ -1772,8 +1801,9 @@ func TestBuildCSIMountOptions(t *testing.T) {
 		Spec: corev1.PersistentVolumeSpec{
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
 				CSI: &corev1.CSIPersistentVolumeSource{
-					Driver:       "test-csi-driver",
-					VolumeHandle: "test-volume-handle",
+					Driver:           "test-csi-driver",
+					VolumeHandle:     "test-volume-handle",
+					VolumeAttributes: map[string]string{"bucket": "platform-default"},
 				},
 			},
 		},
@@ -1819,8 +1849,9 @@ func TestBuildCSIMountOptions(t *testing.T) {
 					CSIMount: models.CSIMountExtension{
 						MountConfigs: []v1alpha1.CSIMountConfig{
 							{
-								PvName:    "test-build-csi-pv",
-								MountPath: "/mnt/data",
+								PvName:     "test-build-csi-pv",
+								MountPath:  "/mnt/data",
+								Attributes: map[string]string{"bucket": "legacy-override"},
 							},
 						},
 					},
@@ -1853,6 +1884,8 @@ func TestBuildCSIMountOptions(t *testing.T) {
 			// The resolved mount carries the typed CSI request, not a pre-encoded blob.
 			require.NotNil(t, csiMount.MountOptionList[0].PublishRequest)
 			assert.NotEmpty(t, csiMount.MountOptionList[0].PublishRequest.GetTargetPath())
+			assert.Equal(t, "legacy-override", csiMount.MountOptionList[0].PublishRequest.VolumeContext["bucket"])
+			assert.Empty(t, csiMount.MountOptionListRaw, "legacy eager resolution keeps its old options shape")
 		})
 	}
 }
@@ -1974,8 +2007,10 @@ func TestCreateSandboxWithClone_StorageAuthHook(t *testing.T) {
 
 	t.Run("hook succeeds injects annotation", func(t *testing.T) {
 		capturedAnnotations = nil
+		calls := 0
 		origHook := csiutils.BuildStorageAuthAnnotation
 		csiutils.BuildStorageAuthAnnotation = func(ctx context.Context, client ctrlclient.Client, mounts []v1alpha1.CSIMountConfig) (string, string, error) {
+			calls++
 			return "security.agents.kruise.io/storage-auth", `[{"provider":"test"}]`, nil
 		}
 		t.Cleanup(func() { csiutils.BuildStorageAuthAnnotation = origHook })
@@ -1986,6 +2021,7 @@ func TestCreateSandboxWithClone_StorageAuthHook(t *testing.T) {
 		_, _ = controller.createSandboxWithClone(t.Context(), baseRequest, user, "")
 
 		require.NotNil(t, capturedAnnotations, "annotations should not be nil after clone with auth hook")
+		assert.Equal(t, 1, calls, "legacy clone invokes the storage-auth hook once in the clone modifier")
 		val, exists := capturedAnnotations["security.agents.kruise.io/storage-auth"]
 		assert.True(t, exists, "storage-auth annotation should be present on sandbox")
 		assert.Equal(t, `[{"provider":"test"}]`, val)

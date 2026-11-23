@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // #nosec -- intentional pprof endpoint for diagnostics
@@ -53,6 +54,7 @@ import (
 	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxmetricsgc"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -92,6 +94,7 @@ func main() {
 	var clientBurst int
 	var defaultPersistentContents string
 	var runtimeClientCertDir string
+	var resourceAccessMode string
 
 	// New variables for pprof
 	var enablePprof bool
@@ -135,6 +138,8 @@ func main() {
 			"When set, the controller reaches TLS-capable agent-runtimes over HTTPS and advertises the runtime "+
 			"HTTPS capability on newly created sandboxes; empty disables both. Set it only after the sidecar "+
 			"injection template already serves HTTPS, since the capability annotation is write-once.")
+	flag.StringVar(&resourceAccessMode, "resource-access-mode", string(resourceaccess.TrustedDomain),
+		"Resource sharing policy for new SandboxClaim deliveries: trusted-domain preserves legacy sharing without owner isolation; isolated enables ownership checks. Existing deliveries retain their persisted policy.")
 
 	var metricsAsyncWorkers int
 	var metricsAsyncQueueCap int
@@ -169,6 +174,15 @@ func main() {
 	opts.Encoder = tracing.NewTraceFirstJSONEncoder()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts), zap.RawZapOpts(gozap.AddCaller())))
 	setupLog.Info("controller logger initialized with trace-first JSON encoder and ISO8601 timestamps; --zap-encoder and --zap-time-encoding are overridden and have no effect")
+	if resourceAccessMode == "" {
+		setupLog.Error(errors.New("--resource-access-mode must not be empty"), "unable to start")
+		os.Exit(1)
+	}
+	mode, err := resourceaccess.Normalize(resourceaccess.Mode(resourceAccessMode))
+	if err != nil {
+		setupLog.Error(err, "unable to start")
+		os.Exit(1)
+	}
 
 	if metricLabelsAllowlist != "" {
 		keys := strings.Split(metricLabelsAllowlist, ",")
@@ -178,7 +192,7 @@ func main() {
 		sandboxctrl.InitSandboxLabelsMetric(keys)
 	}
 
-	err := mutating.SetDefaultPersistentContents(defaultPersistentContents)
+	err = mutating.SetDefaultPersistentContents(defaultPersistentContents)
 	if err != nil {
 		setupLog.Error(err, "unable to start")
 		os.Exit(1)
@@ -367,8 +381,9 @@ func main() {
 		"metricsAsyncWorkers", metricsAsyncWorkers,
 		"metricsAsyncQueueCap", metricsAsyncQueueCap)
 	if err = controller.SetupWithManager(mgr, controller.Deps{
-		MetricsCleanup:   metricsGC,
-		RuntimeTLSBundle: runtimeTLSBundle,
+		MetricsCleanup:     metricsGC,
+		RuntimeTLSBundle:   runtimeTLSBundle,
+		ResourceAccessMode: mode,
 	}); err != nil {
 		setupLog.Error(err, "unable to setup controllers")
 		os.Exit(1)

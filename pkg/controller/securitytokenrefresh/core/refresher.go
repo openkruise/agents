@@ -35,6 +35,7 @@ import (
 // Refresher performs the actual security-token refresh on a single sandbox.
 //
 // Implementations must guarantee the following ordering invariants:
+// Persisted resource policy and isolated storage scope are validated before issuance.
 //  1. Issue a new token via identity.IssueSandboxToken.
 //  2. Propagate the new token to the runtime via identity.PropagateSandboxToken,
 //     over the transport resolved for the sandbox.
@@ -89,12 +90,16 @@ func (r *defaultRefresher) Refresh(ctx context.Context, sbx *agentsv1alpha1.Sand
 		return nil, fmt.Errorf("resolve runtime transport: %w", err)
 	}
 
-	tokenResp, err := identity.IssueSandboxToken(ctx, sbx)
+	prepared, err := utilruntime.PrepareSandboxToken(ctx, r.client, sbx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("prepare token: %w", err)
+	}
+	tokenResp, err := identity.IssueSandboxToken(ctx, prepared)
 	if err != nil {
 		return nil, fmt.Errorf("issue token: %w", err)
 	}
 
-	if err := identity.PropagateSandboxToken(ctx, sbx, tokenResp, rtOpts...); err != nil {
+	if err := identity.PropagateSandboxToken(ctx, prepared, tokenResp, rtOpts...); err != nil {
 		return nil, fmt.Errorf("propagate token: %w", err)
 	}
 

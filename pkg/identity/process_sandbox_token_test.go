@@ -31,7 +31,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
+	"github.com/openkruise/agents/pkg/utils/runtime/config"
 )
 
 // fakeProcessProvider is an IdentityProvider stub that records issue/propagate
@@ -47,20 +49,24 @@ type fakeProcessProvider struct {
 	// gotPropOpts records how many transport options reached the propagation
 	// phase, so the tests can assert that ProcessSandboxToken forwards the
 	// caller-resolved transport verbatim instead of dropping it.
-	gotPropOpts int
+	gotPropOpts       int
+	issuedSandbox     *agentsv1alpha1.Sandbox
+	propagatedSandbox *agentsv1alpha1.Sandbox
 }
 
-func (f *fakeProcessProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ TokenOptions) (*TokenResponse, error) {
+func (f *fakeProcessProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ TokenOptions) (*TokenResponse, error) {
 	f.issueCalls++
+	f.issuedSandbox = sbx
 	if f.issueErr != nil {
 		return nil, f.issueErr
 	}
 	return f.resp, nil
 }
 
-func (f *fakeProcessProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse,
+func (f *fakeProcessProvider) PropagateSecurityToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ *TokenResponse,
 	rtOpts ...agentsruntime.Option) error {
 	f.propagateCalls++
+	f.propagatedSandbox = sbx
 	f.gotPropOpts = len(rtOpts)
 	return f.propagateErr
 }
@@ -70,6 +76,30 @@ func newProcessScheme(t *testing.T) *runtime.Scheme {
 	sch := runtime.NewScheme()
 	require.NoError(t, agentsv1alpha1.AddToScheme(sch))
 	return sch
+}
+
+func TestProcessSandboxTokenWithMountsUsesSnapshot(t *testing.T) {
+	fp := &fakeProcessProvider{resp: &TokenResponse{AccessToken: "token", AccessTokenExpiration: "2099-01-01T00:00:00Z"}}
+	RegisterProvider(fp)
+	t.Cleanup(func() { RegisterProvider(NewDefaultIdentityProvider()) })
+	sbx := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "team-a", Annotations: map[string]string{
+		resourceaccess.AnnotationPolicy: "isolated-v1", agentsv1alpha1.AnnotationOwner: "owner",
+		agentsv1alpha1.AnnotationCSIVolumeConfig: "invalid persisted request must not be read",
+		resourceaccess.StorageAuthAnnotation:     "stale",
+	}}}
+	c := fakeclient.NewClientBuilder().WithScheme(newProcessScheme(t)).WithObjects(sbx).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			t.Fatal("snapshot must not trigger reads")
+			return nil
+		},
+	}).Build()
+	_, err := ProcessSandboxTokenWithMounts(t.Context(), c, sbx, []config.MountConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, fp.issueCalls)
+	assert.Equal(t, 1, fp.propagateCalls)
+	assert.Same(t, fp.issuedSandbox, fp.propagatedSandbox)
+	assert.NotContains(t, fp.issuedSandbox.Annotations, resourceaccess.StorageAuthAnnotation)
+	assert.Equal(t, "stale", sbx.Annotations[resourceaccess.StorageAuthAnnotation])
 }
 
 // TestProcessSandboxToken exercises the full issue -> propagate -> record
@@ -94,7 +124,10 @@ func TestProcessSandboxToken(t *testing.T) {
 		expectPropagate int
 		expectPropOpts  int
 		expectAnnotated bool // whether the token-status annotation should be persisted
+		policy          string
 	}{
+		{name: "unknown policy fails before issue", agentName: "agent", policy: "unknown", expectError: "failed to prepare security token"},
+		{name: "isolated empty mounts", agentName: "agent", policy: "isolated-v1", expectIssue: 1, expectPropagate: 1, expectAnnotated: true},
 		{
 			name:            "success - issue, propagate and record",
 			agentName:       "my-agent",
@@ -161,6 +194,11 @@ func TestProcessSandboxToken(t *testing.T) {
 			if tt.agentName != "" {
 				sbx.Annotations = map[string]string{AnnotationAgentName: tt.agentName}
 			}
+			if tt.policy != "" {
+				sbx.Annotations[resourceaccess.AnnotationPolicy] = tt.policy
+				sbx.Annotations[agentsv1alpha1.AnnotationOwner] = "owner"
+				sbx.Annotations[resourceaccess.StorageAuthAnnotation] = "stale"
+			}
 
 			sch := newProcessScheme(t)
 			builder := fakeclient.NewClientBuilder().WithScheme(sch).WithObjects(sbx.DeepCopy())
@@ -177,6 +215,12 @@ func TestProcessSandboxToken(t *testing.T) {
 			c := builder.Build()
 
 			cost, err := ProcessSandboxToken(context.Background(), c, sbx, tt.rtOpts...)
+			if tt.policy == "isolated-v1" {
+				require.NoError(t, err)
+				assert.Same(t, fp.issuedSandbox, fp.propagatedSandbox)
+				assert.NotContains(t, fp.issuedSandbox.Annotations, resourceaccess.StorageAuthAnnotation)
+				assert.Equal(t, "stale", sbx.Annotations[resourceaccess.StorageAuthAnnotation])
+			}
 
 			if tt.expectError != "" {
 				require.Error(t, err)

@@ -28,6 +28,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
+	"github.com/openkruise/agents/pkg/utils/runtime/config"
 )
 
 // IsIDTokenRequested reports whether the sandbox opts into the ID token
@@ -243,18 +244,29 @@ func PropagateSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tok
 // sandbox runtime.
 func ProcessSandboxToken(ctx context.Context, c client.Client, sbx *agentsv1alpha1.Sandbox,
 	rtOpts ...agentsruntime.Option) (time.Duration, error) {
+	return ProcessSandboxTokenWithMounts(ctx, c, sbx, nil, rtOpts...)
+}
+
+// ProcessSandboxTokenWithMounts uses an already authorized mount snapshot when
+// non-nil; nil revalidates persisted isolated mounts without Secret reads.
+func ProcessSandboxTokenWithMounts(ctx context.Context, c client.Client, sbx *agentsv1alpha1.Sandbox,
+	mounts []config.MountConfig, rtOpts ...agentsruntime.Option) (time.Duration, error) {
 	// Measure the whole issue -> propagate -> record lifecycle so callers record
 	// the total cost of the security-token step, not just token issuance.
 	start := time.Now()
+	prepared, err := agentsruntime.PrepareSandboxToken(ctx, c, sbx, mounts)
+	if err != nil {
+		return time.Since(start), fmt.Errorf("failed to prepare security token: %w", err)
+	}
 
 	// IssueSandboxToken already wraps its failure as
 	// "failed to issue security token: %w", so callers can classify the phase.
-	tokenResp, err := IssueSandboxToken(ctx, sbx)
+	tokenResp, err := IssueSandboxToken(ctx, prepared)
 	if err != nil {
 		return time.Since(start), err
 	}
 
-	if err := PropagateSandboxToken(ctx, sbx, tokenResp, rtOpts...); err != nil {
+	if err := PropagateSandboxToken(ctx, prepared, tokenResp, rtOpts...); err != nil {
 		return time.Since(start), fmt.Errorf("failed to propagate security token: %w", err)
 	}
 

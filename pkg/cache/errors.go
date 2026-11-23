@@ -28,7 +28,8 @@ var (
 	// ErrCheckpointNotFound reports that no Checkpoint is indexed for the ID.
 	// Cache read failures stay distinct so callers can avoid treating an
 	// infrastructure error as absence.
-	ErrCheckpointNotFound = errors.New("checkpoint not found in cache")
+	ErrCheckpointNotFound    = errors.New("checkpoint not found in cache")
+	ErrCheckpointIDAmbiguous = errors.New("multiple checkpoints match checkpoint ID")
 	// ErrSandboxIDAmbiguous reports more than one claimed Sandbox indexed under
 	// one resolved ID, which only happens outside the supported metadata
 	// contract (for example duplicated reserved labels written out of band).

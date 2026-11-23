@@ -35,6 +35,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -64,6 +65,11 @@ var deleteCheckpointLookupBackoff = wait.Backoff{
 }
 
 func ValidateAndInitCloneOptions(opts infra.CloneSandboxOptions) (infra.CloneSandboxOptions, error) {
+	mode, err := resourceaccess.Normalize(opts.ResourceAccessMode)
+	if err != nil {
+		return infra.CloneSandboxOptions{}, err
+	}
+	opts.ResourceAccessMode = mode
 	if opts.User == "" {
 		return infra.CloneSandboxOptions{}, fmt.Errorf("user is required")
 	}
@@ -93,6 +99,10 @@ func ValidateAndInitCheckpointOptions(opts infra.CreateCheckpointOptions) infra.
 }
 
 func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider) (cloned infra.Sandbox, metrics infra.CloneMetrics, err error) {
+	opts.ResourceAccessMode, err = resourceaccess.Normalize(opts.ResourceAccessMode)
+	if err != nil {
+		return
+	}
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraCloneSandbox,
 		attribute.String(tracing.AttrCloneCheckpointID, opts.CheckPointID),
 	)
@@ -141,7 +151,13 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	// checkpoint. The limit check and the csi-mount step both act on this
 	// single resolved result so they can never count different mount sets, and
 	// an unparsable or unresolvable config fails fast before create.
-	if opts.CSIMount == nil {
+	if opts.ResourceAccessMode == resourceaccess.Isolated {
+		// A restored runtime can remount CSI volumes without a separate saved init request.
+		opts.CSIMount, err = prepareIsolatedMounts(ctx, sbx, opts.User, opts.CSIMount, true)
+		if err != nil {
+			return nil, metrics, err
+		}
+	} else if opts.CSIMount == nil {
 		opts.CSIMount, err = runtime.ResolveCSIMountFromAnnotation(ctx, sbx.Sandbox, sbx.Cache.GetClient(), sbx.Cache, sbx.storageRegistry)
 		if err != nil {
 			return nil, metrics, err
@@ -226,8 +242,15 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	// rtOpts rides along so the credential is delivered over the same transport
 	// as the re-init handshake.
 	if identity.IsIDTokenRequested(sbx.Sandbox) {
-		metrics.SecurityToken, err = identity.ProcessSandboxToken(ctx, cache.GetClient(), sbx.Sandbox, rtOpts...)
+		if opts.ResourceAccessMode == resourceaccess.Isolated {
+			metrics.SecurityToken, err = identity.ProcessSandboxTokenWithMounts(ctx, cache.GetClient(), sbx.Sandbox, opts.CSIMount.MountOptionList, rtOpts...)
+		} else {
+			metrics.SecurityToken, err = identity.ProcessSandboxToken(ctx, cache.GetClient(), sbx.Sandbox, rtOpts...)
+		}
 		if err != nil {
+			if errors.Is(err, resourceaccess.ErrAccessDenied) || errors.Is(err, resourceaccess.ErrBackendRead) {
+				return
+			}
 			if !wait.Interrupted(err) {
 				err = retriableError{Message: fmt.Sprintf("security token processing failed: %s", err)}
 			}
@@ -249,6 +272,9 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		metrics.Total += metrics.TrafficToken
 		if issueErr != nil {
 			err = issueErr
+			if errors.Is(err, resourceaccess.ErrAccessDenied) || errors.Is(err, resourceaccess.ErrBackendRead) {
+				return
+			}
 			if !wait.Interrupted(err) {
 				err = retriableError{Message: issueErr.Error()}
 			}
@@ -284,9 +310,9 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 	var checkpoint *v1alpha1.Checkpoint
 	retryFunc := utils.RetryIfContextNotCanceled(ctx)
 	err := retry.OnError(utils.CacheBackoff, func(err error) bool {
-		return !opts.SkipWaitCheckpoint && retryFunc(err)
+		return !opts.SkipWaitCheckpoint && !errors.Is(err, infracache.ErrCheckpointIDAmbiguous) && retryFunc(err)
 	}, func() error {
-		cp, err := cache.GetCheckpoint(ctx, infracache.GetCheckpointOptions{Namespace: opts.Namespace, CheckpointID: opts.CheckPointID})
+		cp, err := cache.GetCheckpoint(ctx, infracache.GetCheckpointOptions{Namespace: opts.Namespace, CheckpointID: opts.CheckPointID, RequireUnique: opts.ResourceAccessMode == resourceaccess.Isolated})
 		if err != nil {
 			return err
 		}
@@ -295,7 +321,31 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 	})
 	if err != nil {
 		log.Error(err, "checkpoint not found in cache")
+		if errors.Is(err, infracache.ErrCheckpointIDAmbiguous) {
+			err = resourceaccess.ErrAccessDenied
+		}
 		return nil, nil, metrics, err
+	}
+	// Source restrictions survive a change of the Manager's admission default.
+	// Admission is outside lookup retries and precedes the paired template read.
+	sourceMode, err := resourceaccess.FromAnnotations(checkpoint.Annotations)
+	if err != nil {
+		return nil, nil, metrics, err
+	}
+	if sourceMode == resourceaccess.Isolated && opts.ResourceAccessMode != resourceaccess.Isolated {
+		if _, err := cache.GetCheckpoint(ctx, infracache.GetCheckpointOptions{Namespace: opts.Namespace, CheckpointID: opts.CheckPointID, RequireUnique: true}); err != nil {
+			if errors.Is(err, infracache.ErrCheckpointIDAmbiguous) {
+				err = resourceaccess.ErrAccessDenied
+			}
+			return nil, nil, metrics, err
+		}
+	}
+	if opts.CheckpointAdmission != nil {
+		if err := opts.CheckpointAdmission(checkpoint.Annotations[v1alpha1.AnnotationOwner], sourceMode); err != nil {
+			return nil, nil, metrics, err
+		}
+	} else if opts.ResourceAccessMode == resourceaccess.Isolated || sourceMode == resourceaccess.Isolated {
+		return nil, nil, metrics, resourceaccess.ErrAccessDenied
 	}
 
 	// Try to get template from cache first
@@ -417,6 +467,10 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 	}
 	DefaultPostProcessClonedSandbox(sbx.Sandbox)
 	delete(sbx.Labels, v1alpha1.LabelSandboxClaimMethod)
+	sbx.Annotations, err = resourceaccess.Stamp(sbx.Annotations, opts.ResourceAccessMode)
+	if err != nil {
+		return nil, nil, err
+	}
 	return sbx, initRuntimeOpts, nil
 }
 

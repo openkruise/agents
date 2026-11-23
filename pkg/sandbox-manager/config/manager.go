@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"k8s.io/client-go/rest"
@@ -60,6 +61,8 @@ type QuotaOptions struct {
 }
 
 type SandboxManagerOptions struct {
+	// ResourceAccessMode is immutable delivery admission policy, validated at Build.
+	ResourceAccessMode    resourceaccess.Mode
 	SystemNamespace       string
 	PeerSelector          string
 	BindAddress           string
@@ -81,6 +84,9 @@ type SandboxManagerOptions struct {
 }
 
 func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {
+	if opts.ResourceAccessMode == "" {
+		opts.ResourceAccessMode = resourceaccess.TrustedDomain
+	}
 	if opts.SystemNamespace == "" {
 		opts.SystemNamespace = utils.DefaultSandboxDeployNamespace
 	}
