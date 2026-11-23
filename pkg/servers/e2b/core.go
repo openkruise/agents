@@ -100,7 +100,7 @@ type ControllerOptions struct {
 	MaxTimeout int
 	// KeyConfig configures API key storage. Nil disables E2B authentication.
 	KeyConfig *keys.Config
-	// NetworkAnnotation selects Agentio's inline egress policies for new sandboxes.
+	// NetworkAnnotation controls whether new sandboxes store E2B network settings in an annotation.
 	NetworkAnnotation bool
 
 	// Manager is passed to the sandbox-manager builder unchanged.

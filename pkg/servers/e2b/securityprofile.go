@@ -33,20 +33,15 @@ const (
 	securityProfileAnnotation  = agentsv1alpha1.InternalPrefix + "security-profile"
 )
 
-// A pointer match distinguishes a missing clause from an explicit match-all object.
-type inlineTCPRule struct {
-	Name   string                       `json:"name"`
-	Match  []*agentsv1alpha1.TCPMatch   `json:"match"`
-	Action agentsv1alpha1.TCPActionType `json:"action"`
-}
-
 func parseInlineSecurityProfile(raw string) (string, error) {
 	if len(raw) > maxSecurityRulesBytes {
 		return "", fmt.Errorf("profile exceeds %d bytes", maxSecurityRulesBytes)
 	}
 	var profile *struct {
-		Rules    []agentsv1alpha1.SecurityRule `json:"rules,omitempty"`
-		TCPRules []inlineTCPRule               `json:"tcpRules,omitempty"`
+		Rules    []agentsv1alpha1.SecurityRule         `json:"rules,omitempty"`
+		TCPRules []agentsv1alpha1.TCPRule              `json:"tcpRules,omitempty"`
+		Inputs   []agentsv1alpha1.SecurityProfileInput `json:"inputs,omitempty"`
+		Audit    []agentsv1alpha1.AuditAction          `json:"audit,omitempty"`
 	}
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -56,17 +51,23 @@ func parseInlineSecurityProfile(raw string) (string, error) {
 	if _, err := decoder.Token(); err != io.EOF {
 		return "", fmt.Errorf("expected one profile JSON object")
 	}
-	if profile == nil || len(profile.Rules)+len(profile.TCPRules) == 0 {
-		return "", fmt.Errorf("profile must contain at least one rule")
+	if profile == nil {
+		return "", fmt.Errorf("expected one profile JSON object")
 	}
-	if err := validateInlineSecurityRules(profile.Rules); err != nil {
-		return "", err
+	if len(profile.Rules) > maxSecurityRules {
+		return "", fmt.Errorf("rules: at most %d rules are allowed", maxSecurityRules)
 	}
 	for _, rule := range profile.Rules {
 		if strings.HasPrefix(rule.Name, "agentio-e2b-") {
 			return "", fmt.Errorf("rules: name %q uses a reserved prefix", rule.Name)
 		}
-		for _, match := range rule.Match {
+		if len(rule.Match) == 0 {
+			return "", fmt.Errorf("rule %q requires a match", rule.Name)
+		}
+		for i, match := range rule.Match {
+			if len(match.Domains) == 0 {
+				return "", fmt.Errorf("rule %q match[%d] requires domains", rule.Name, i)
+			}
 			for _, domain := range match.Domains {
 				name := strings.ToLower(strings.TrimSuffix(domain, "."))
 				if name != "*" && len(validation.IsDNS1123Subdomain(strings.TrimPrefix(name, "*."))) > 0 {
@@ -78,6 +79,25 @@ func parseInlineSecurityProfile(raw string) (string, error) {
 	if err := validateInlineTCPRules(profile.TCPRules); err != nil {
 		return "", err
 	}
+	// encoding/json decodes null into a zero TCPMatch, which means match all.
+	// Check the wire value before persisting a profile containing an explicit null.
+	if len(profile.TCPRules) > 0 && strings.Contains(raw, "null") {
+		var wire struct {
+			TCPRules []struct {
+				Match []*struct{} `json:"match"`
+			} `json:"tcpRules"`
+		}
+		if err := json.Unmarshal([]byte(raw), &wire); err != nil {
+			return "", fmt.Errorf("invalid tcpRules: %w", err)
+		}
+		for i, rule := range wire.TCPRules {
+			for j, match := range rule.Match {
+				if match == nil {
+					return "", fmt.Errorf("tcpRules[%d].match[%d]: expected an object", i, j)
+				}
+			}
+		}
+	}
 	encoded, err := json.Marshal(profile)
 	if err != nil {
 		return "", fmt.Errorf("encode profile: %w", err)
@@ -88,7 +108,7 @@ func parseInlineSecurityProfile(raw string) (string, error) {
 	return string(encoded), nil
 }
 
-func validateInlineTCPRules(rules []inlineTCPRule) error {
+func validateInlineTCPRules(rules []agentsv1alpha1.TCPRule) error {
 	if len(rules) > maxSecurityRules {
 		return fmt.Errorf("tcpRules: at most %d rules are allowed", maxSecurityRules)
 	}
@@ -108,9 +128,6 @@ func validateInlineTCPRules(rules []inlineTCPRule) error {
 			return fmt.Errorf("tcpRules[%d]: match must contain at least one clause", i)
 		}
 		for j, match := range rule.Match {
-			if match == nil {
-				return fmt.Errorf("tcpRules[%d].match[%d]: expected an object", i, j)
-			}
 			for _, value := range match.CIDRs {
 				prefix, err := netip.ParsePrefix(value)
 				if err == nil && !prefix.Addr().Is4In6() {

@@ -91,8 +91,8 @@ type NewSandboxRequest struct {
 	SecurityRulesJSON string `json:"-"`
 	// SecurityProfileJSON is the validated inline profile for this delivery.
 	SecurityProfileJSON string `json:"-"`
-	// EgressAnnotation is the validated Agentio network configuration for this delivery.
-	EgressAnnotation string `json:"-"`
+	// E2BNetworkAnnotation is the JSON value for the agents.kruise.io/e2b-network annotation.
+	E2BNetworkAnnotation string `json:"-"`
 }
 
 type SandboxNetworkConfig struct {

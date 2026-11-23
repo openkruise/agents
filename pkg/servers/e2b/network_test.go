@@ -671,7 +671,11 @@ func TestE2BNetworkAnnotationLifecycle(t *testing.T) {
 
 func TestE2BSecurityProfileExclusive(t *testing.T) {
 	const profile = `{
-		"rules":[{"name":"block-api","match":[{"domains":["blocked.example.com"]}],"actions":{"block":{"statusCode":403}}}],
+		"inputs":[{"name":"settings","inline":{"team":"platform"}}],
+		"audit":[{"name":"requests","webhook":{"url":"https://audit.example.com/requests"}}],
+		"rules":[{"name":"allow-api","match":[{"domains":["api.example.com"]}],"actions":{
+			"bypass":true,"audit":[{"name":"api","webhook":{"url":"https://audit.example.com/api"}}]
+		}}],
 		"tcpRules":[{"name":"deny-ssh","match":[{"ports":[22]}],"action":"Deny"}]
 	}`
 	for _, networkAnnotation := range []bool{false, true} {

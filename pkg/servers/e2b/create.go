@@ -428,7 +428,7 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 		if err != nil {
 			return request, &web.ApiError{Code: http.StatusInternalServerError, Message: "Failed to encode sandbox network configuration"}
 		}
-		request.EgressAnnotation = string(raw)
+		request.E2BNetworkAnnotation = string(raw)
 		if len(request.Extensions.SecurityRules) == 0 {
 			request.SecurityRulesJSON = ""
 		}
@@ -459,8 +459,8 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	for k, v := range request.Metadata {
 		annotations[k] = v
 	}
-	if request.EgressAnnotation != "" {
-		annotations[e2bNetworkAnnotation] = request.EgressAnnotation
+	if request.E2BNetworkAnnotation != "" {
+		annotations[e2bNetworkAnnotation] = request.E2BNetworkAnnotation
 	} else {
 		delete(annotations, e2bNetworkAnnotation)
 	}
@@ -503,7 +503,7 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 
 	// Apply the legacy GlobalTrafficPolicy selector only for legacy deliveries.
 	allowInternetAccess := agentsv1alpha1.True
-	if request.EgressAnnotation == "" && request.AllowInternetAccess != nil && !*request.AllowInternetAccess {
+	if request.E2BNetworkAnnotation == "" && request.AllowInternetAccess != nil && !*request.AllowInternetAccess {
 		allowInternetAccess = agentsv1alpha1.False
 	}
 	labels[agentsv1alpha1.LabelAllowInternetAccess] = allowInternetAccess
@@ -588,7 +588,7 @@ func (sc *Controller) injectStorageAuthAnnotation(sbx infra.Sandbox, key, value 
 // prevent it from running without network policies, and an ApiError is returned.
 // Returns nil if no network config is provided or creation succeeds.
 func (sc *Controller) createNetworkPolicyForSandbox(ctx context.Context, sbx infra.Sandbox, user *models.CreatedTeamAPIKey, request models.NewSandboxRequest, log klog.Logger) *web.ApiError {
-	if request.EgressAnnotation != "" || request.Network == nil {
+	if request.E2BNetworkAnnotation != "" || request.Network == nil {
 		return nil
 	}
 	if netErr := sbx.CreateNetworkPolicy(ctx, infra.SandboxNetworkConfig{

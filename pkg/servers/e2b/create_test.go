@@ -789,8 +789,12 @@ func TestParseCreateSandboxRequest_SecurityProfile(t *testing.T) {
 		{name: "profile with denyOut", profile: validProfile, network: &models.SandboxNetworkConfig{DenyOut: []string{"10.0.0.0/8"}}, wantMessage: "cannot be combined"},
 		{name: "profile with network.rules", profile: validProfile, network: &models.SandboxNetworkConfig{Rules: map[string][]models.SandboxNetworkRule{"api.example.com": {{}}}}, wantMessage: "cannot be combined"},
 		{name: "profile with internet disabled", profile: validProfile, internet: ptr.To(false), wantMessage: "cannot be combined"},
-		{name: "unsupported field", profile: `{"inputs":[]}`, wantMessage: "unknown field"},
-		{name: "unsupported HTTP action", profile: `{"rules":[{"name":"skip","match":[{"domains":["*"]}],"actions":{"bypass":true}}]}`, wantMessage: "bypass is not allowed"},
+		{name: "audit only", profile: `{"audit":[{"name":"requests","webhook":{"url":"https://audit.example.com/events"}}]}`},
+		{name: "inputs only", profile: `{"inputs":[{"name":"settings","inline":{"region":"west"}}]}`},
+		{name: "shared profile selector", profile: `{"selector":{}}`, wantMessage: "unknown field"},
+		{name: "shared profile priority", profile: `{"priority":1}`, wantMessage: "unknown field"},
+		{name: "null profile", profile: "null", wantMessage: "one profile JSON object"},
+		{name: "multiple profiles", profile: "{} {}", wantMessage: "one profile JSON object"},
 		{name: "invalid CIDR", profile: `{"tcpRules":[{"name":"deny","match":[{"cidrs":["bad"]}],"action":"Deny"}]}`, wantMessage: "invalid IP or CIDR"},
 		{name: "invalid port", profile: `{"tcpRules":[{"name":"deny","match":[{"ports":[0]}],"action":"Deny"}]}`, wantMessage: "outside 1-65535"},
 		{name: "null match", profile: `{"tcpRules":[{"name":"allow","match":[null],"action":"Allow"}]}`, wantMessage: "expected an object"},
@@ -803,9 +807,14 @@ func TestParseCreateSandboxRequest_SecurityProfile(t *testing.T) {
 			if tt.legacy != "" {
 				metadata[models.ExtensionKeySecurityRules] = tt.legacy
 			}
-			_, apiErr := ctrl.parseCreateSandboxRequest(NewRequest(t, nil, models.NewSandboxRequest{
+			request, apiErr := ctrl.parseCreateSandboxRequest(NewRequest(t, nil, models.NewSandboxRequest{
 				Metadata: metadata, Network: tt.network, AllowInternetAccess: tt.internet,
 			}, nil, nil))
+			if tt.wantMessage == "" {
+				require.Nil(t, apiErr)
+				require.JSONEq(t, tt.profile, request.SecurityProfileJSON)
+				return
+			}
 			require.NotNil(t, apiErr)
 			require.Equal(t, http.StatusBadRequest, apiErr.Code)
 			require.Contains(t, apiErr.Message, tt.wantMessage)

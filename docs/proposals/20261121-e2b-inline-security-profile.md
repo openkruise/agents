@@ -1,7 +1,7 @@
 ---
 title: Inline SecurityProfile for E2B sandboxes
 creation-date: 2026-11-21
-last-updated: 2026-11-21
+last-updated: 2026-11-23
 status: provisional
 ---
 
@@ -9,7 +9,8 @@ status: provisional
 
 E2B clients can set the `e2b.agents.kruise.io/security-profile` metadata key
 when creating a sandbox through Kruise Agents. The value is a JSON string
-containing `rules`, `tcpRules`, or both. The deployment needs an Agentio
+with four optional fields, `rules`, `tcpRules`, `inputs`, and `audit`. Each
+uses the corresponding SecurityProfile API type. The deployment needs an Agentio
 gateway with support for inline Sandbox SecurityProfiles to enforce the rules.
 
 ```python
@@ -35,7 +36,9 @@ sandbox = Sandbox.create(
 
 Sandbox Manager validates the value and writes the
 `agents.kruise.io/security-profile` annotation on the delivered Sandbox.
-HTTP rules support `block` and `headerManipulation`. TCP rules support
+`rules` accepts native SecurityProfile actions. `inputs` supplies named
+values to the profile. Top-level `audit` supplies default HTTP audit actions,
+and a rule can override them with its own `actions.audit`. TCP rules support
 `Allow` and `Deny` and keep their declared order. The maximum JSON size is
 32 KiB, with up to 64 HTTP rules and 64 TCP rules. Use unique names within
 each rule list and reserve the `agentio-e2b-` prefix for Agentio.
