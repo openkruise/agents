@@ -470,6 +470,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 							UID:       types.UID(uuid.NewString()),
 							Labels: map[string]string{
 								agentsv1alpha1.LabelSandboxTemplate: template,
+								agentsv1alpha1.LabelSandboxPool:     template,
 							},
 							CreationTimestamp: createAt,
 							Annotations:       map[string]string{},
