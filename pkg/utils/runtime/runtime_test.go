@@ -131,7 +131,6 @@ func TestGetInitRuntimeRequest(t *testing.T) {
 		name        string
 		annotations map[string]string
 		wantNil     bool
-		wantReInit  bool
 		wantErr     bool
 		wantEnvVars map[string]string
 	}{
@@ -150,7 +149,6 @@ func TestGetInitRuntimeRequest(t *testing.T) {
 			annotations: map[string]string{
 				agentsv1alpha1.AnnotationInitRuntimeRequest: `{"envVars":{"FOO":"bar"},"accessToken":"tok123"}`,
 			},
-			wantReInit:  true,
 			wantEnvVars: map[string]string{"FOO": "bar"},
 		},
 		{
@@ -158,7 +156,6 @@ func TestGetInitRuntimeRequest(t *testing.T) {
 			annotations: map[string]string{
 				agentsv1alpha1.AnnotationInitRuntimeRequest: `{}`,
 			},
-			wantReInit: true,
 		},
 		{
 			name: "invalid JSON returns error",
@@ -193,7 +190,7 @@ func TestGetInitRuntimeRequest(t *testing.T) {
 			}
 
 			require.NotNil(t, result)
-			assert.Equal(t, tt.wantReInit, result.ReInit)
+			assert.False(t, result.ReInit, "the parser must not impose re-init policy on callers")
 			if tt.wantEnvVars != nil {
 				assert.Equal(t, tt.wantEnvVars, result.EnvVars)
 			}

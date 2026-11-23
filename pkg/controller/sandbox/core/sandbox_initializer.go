@@ -182,6 +182,10 @@ func reinitRuntime(ctx context.Context, logger klog.Logger, box *agentsv1alpha1.
 	}
 	if initRuntimeOpts != nil {
 		initRuntimeOpts.SkipRefresh = true
+		// Resume/recreate restores the same token the annotation records, so a
+		// 401 means envd already holds it (e.g. older envd builds reject any
+		// re-init): the desired end state is already reached.
+		initRuntimeOpts.ReInit = true
 		logger.Info("will re-init runtime after resume")
 		if _, err = utilruntime.InitRuntime(ctx, sbxForInit, *initRuntimeOpts, nil, rtOpts...); err != nil {
 			logger.Error(err, "failed to perform ReInit after resume")
