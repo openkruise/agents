@@ -77,7 +77,7 @@ func TestManagedBuildCaptureDefaulting(t *testing.T) {
 			}
 			var defaulted v1alpha1.SandboxTemplate
 			require.NoError(t, json.Unmarshal(raw, &defaulted))
-			require.Equal(t, tt.checkpoint, defaulted.Spec.BuildOptions.Checkpoint)
+			require.Equal(t, tt.checkpoint, defaulted.Spec.BuildOptions.Checkpoint != nil && defaulted.Spec.BuildOptions.Checkpoint.Enable)
 			request.Object.Raw = raw
 			response = handler.Handle(t.Context(), request)
 			require.True(t, response.Allowed)

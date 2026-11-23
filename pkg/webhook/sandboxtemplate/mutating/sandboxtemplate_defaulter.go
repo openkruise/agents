@@ -63,7 +63,7 @@ func (h *Defaulter) Handle(ctx context.Context, req admission.Request) admission
 	// Apply defaulting logic to volume claim templates
 	setDefaultVolumeClaimTemplates(obj.Spec.VolumeClaimTemplates)
 	if sandboxtemplate.IsBuildVersion(obj) && obj.Spec.BuildOptions != nil && len(obj.Spec.BuildOptions.Steps) > 0 {
-		obj.Spec.BuildOptions.Checkpoint = true
+		obj.Spec.BuildOptions.Checkpoint = &agentsv1alpha1.CheckpointStrategy{Enable: true}
 	}
 
 	if !reflect.DeepEqual(obj, clone) {

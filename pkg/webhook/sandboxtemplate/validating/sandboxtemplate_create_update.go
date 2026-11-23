@@ -190,10 +190,10 @@ func validateBuildOptions(spec agentsv1alpha1.SandboxTemplateSpec) field.ErrorLi
 	if options.FromTemplate != "" {
 		errs = append(errs, field.Forbidden(p.Child("fromTemplate"), "not supported"))
 	}
-	if len(options.Steps) > 0 && !options.Checkpoint {
+	if len(options.Steps) > 0 && (options.Checkpoint == nil || !options.Checkpoint.Enable) {
 		errs = append(errs, field.Forbidden(p.Child("checkpoint"), "steps require artifact capture"))
 	}
-	if options.Checkpoint {
+	if options.Checkpoint != nil && options.Checkpoint.Enable {
 		if len(spec.PersistentContents) == 0 {
 			errs = append(errs, field.Required(field.NewPath("spec", "persistentContents"), "artifact capture requires a non-empty scope"))
 		}

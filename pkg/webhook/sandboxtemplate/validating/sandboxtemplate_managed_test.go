@@ -158,7 +158,9 @@ func TestManagedTemplateAdmission(t *testing.T) {
 		{name: "steps need capture", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo hi"}}}}
 		}},
-		{name: "capture requires a scope", object: submitted, mutate: func(v *api.SandboxTemplate) { v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true} }},
+		{name: "capture requires a scope", object: submitted, mutate: func(v *api.SandboxTemplate) {
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}}
+		}},
 		{name: "start command is deferred", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{StartCommand: &api.TemplateBuildCommand{Command: "serve"}}
 		}},
@@ -167,50 +169,50 @@ func TestManagedTemplateAdmission(t *testing.T) {
 		}},
 		{name: "fromTemplate remains unsupported with capture", old: draft, object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem, api.PersistentContentMemory}
-			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{FromTemplate: "base", Checkpoint: true}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{FromTemplate: "base", Checkpoint: &api.CheckpointStrategy{Enable: true}}
 		}},
 		{name: "ready command is deferred", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{ReadyCommand: &api.TemplateBuildCommand{Command: "ready"}}
 		}},
 		{name: "capture rejects unsupported scope", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.PersistentContents = []string{"unsupported"}
-			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}}
 		}},
 		{name: "step requires an operation", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
-			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{}}}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}, Steps: []api.TemplateBuildStep{{}}}
 		}},
 		{name: "step cannot combine command and COPY", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
-			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo build"}, Copy: &api.TemplateBuildCopy{Src: "app", Dest: "/app", FilesHash: "hash"}}}}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}, Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo build"}, Copy: &api.TemplateBuildCopy{Src: "app", Dest: "/app", FilesHash: "hash"}}}}
 		}},
 		{name: "command cannot be whitespace", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
-			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: " \t "}}}}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}, Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: " \t "}}}}
 		}},
 		{name: "command working directory must be absolute", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
-			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo build", Cwd: "app"}}}}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}, Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo build", Cwd: "app"}}}}
 		}},
 		{name: "COPY source must stay in context", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
-			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Copy: &api.TemplateBuildCopy{Src: "../app", Dest: "/app", FilesHash: "hash"}}}}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}, Steps: []api.TemplateBuildStep{{Copy: &api.TemplateBuildCopy{Src: "../app", Dest: "/app", FilesHash: "hash"}}}}
 		}},
 		{name: "COPY destination must be absolute", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
-			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Copy: &api.TemplateBuildCopy{Src: "app", Dest: "app", FilesHash: "hash"}}}}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}, Steps: []api.TemplateBuildStep{{Copy: &api.TemplateBuildCopy{Src: "app", Dest: "app", FilesHash: "hash"}}}}
 		}},
 		{name: "valid COPY is accepted", object: submitted, allowed: true, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
-			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Copy: &api.TemplateBuildCopy{Src: "app", Dest: "/app", FilesHash: "hash"}}}}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}, Steps: []api.TemplateBuildStep{{Copy: &api.TemplateBuildCopy{Src: "app", Dest: "/app", FilesHash: "hash"}}}}
 		}},
 		{name: "copy hash is required", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
-			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Copy: &api.TemplateBuildCopy{Src: "app.py", Dest: "/app/app.py"}}}}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}, Steps: []api.TemplateBuildStep{{Copy: &api.TemplateBuildCopy{Src: "app.py", Dest: "/app/app.py"}}}}
 		}},
 		{name: "valid command build accepted", object: submitted, allowed: true, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem, api.PersistentContentMemory}
-			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo hi", Cwd: "/app"}}}}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}, Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo hi", Cwd: "/app"}}}}
 		}},
 		{name: "invalid Version name", object: submitted, mutate: func(v *api.SandboxTemplate) { v.Name = "INVALID" }},
 	}

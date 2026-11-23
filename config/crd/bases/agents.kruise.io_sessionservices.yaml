@@ -255,14 +255,23 @@ spec:
                   checkpoint:
                     description: Checkpoint captures the completed build as a restorable
                       artifact.
-                    type: boolean
+                    properties:
+                      enable:
+                        description: Enable turns artifact capture on for the Build.
+                        type: boolean
+                    type: object
                   fromTemplate:
                     description: FromTemplate names an existing logical Template used
                       as the build base.
                     type: string
                   imageAcceleration:
                     description: ImageAcceleration requests best-effort image pre-warming.
-                    type: boolean
+                    properties:
+                      enable:
+                        description: Enable turns best-effort image acceleration on
+                          for the Build.
+                        type: boolean
+                    type: object
                   readyCommand:
                     description: ReadyCommand checks business process readiness before
                       capture.

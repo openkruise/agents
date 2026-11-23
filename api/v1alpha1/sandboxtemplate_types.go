@@ -129,11 +129,28 @@ type SandboxTemplateBuildOptions struct {
 
 	// Checkpoint captures the completed build as a restorable artifact.
 	// +optional
-	Checkpoint bool `json:"checkpoint,omitempty"`
+	Checkpoint *CheckpointStrategy `json:"checkpoint,omitempty"`
 
 	// ImageAcceleration requests best-effort image pre-warming.
 	// +optional
-	ImageAcceleration bool `json:"imageAcceleration,omitempty"`
+	ImageAcceleration *ImageAccelerationStrategy `json:"imageAcceleration,omitempty"`
+}
+
+// CheckpointStrategy configures artifact capture. Future options such as
+// capture scope extend it without another type change.
+type CheckpointStrategy struct {
+	// Enable turns artifact capture on for the Build.
+	// +optional
+	Enable bool `json:"enable,omitempty"`
+}
+
+// ImageAccelerationStrategy configures best-effort image acceleration.
+// Future options such as provider hints extend it without another type
+// change.
+type ImageAccelerationStrategy struct {
+	// Enable turns best-effort image acceleration on for the Build.
+	// +optional
+	Enable bool `json:"enable,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.command) != has(self.copy)",message="exactly one of command or copy is required"
