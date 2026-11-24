@@ -21,21 +21,16 @@ limitations under the License.
 // that matches no rule is denied: permission exists because something granted
 // it, never because nothing forbade it.
 //
-// A successful Decision is cached briefly rather than recomputed on every
-// identical request (§8.3): the walk below is a List plus one Get per bound
-// role, on every call. Two things keep the cache honest. WatchForInvalidation
-// registers informer handlers that evict a namespace's cached decisions the
-// moment an AgentRole or AgentRoleBinding in it changes, so a binding deleted
-// a moment ago stops granting as soon as that event is delivered rather than
-// whenever the entry would otherwise have expired. The TTL (see
-// DefaultDecisionCacheTTL) is a short, secondary bound for the rare case an
-// event is somehow missed, not the primary invalidation mechanism; a caller
-// that never calls WatchForInvalidation still gets correct answers, merely
-// slower to notice a change, bounded by the TTL alone.
+// Every call reads live state: a List scoped by IndexFieldAgentIdentityRef to
+// the identity being asked about, plus one Get per bound role. Both go
+// through the informer cache, so this stays cheap without a caching layer of
+// its own on top; the index is what keeps the List from scaling with every
+// binding in the namespace instead of just the ones that name this identity.
+// SetupFieldIndex must have registered it first.
 //
-// Independently of caching, authorization does not consult the Ready
-// condition on a binding or a role: readiness reports what a controller has
-// observed, which necessarily lags the spec that authorization has to act on.
+// Authorization does not consult the Ready condition on a binding or a role:
+// readiness reports what a controller has observed, which necessarily lags
+// the spec that authorization has to act on.
 package authorization
 
 import (
@@ -43,8 +38,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
-	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -97,39 +90,19 @@ type Decision struct {
 var deniedNoBindings = Decision{Reason: ReasonNoBindings}
 
 // Authorizer evaluates requests against the bindings and roles in the
-// cluster, caching the outcome briefly. See WatchForInvalidation and
-// DefaultDecisionCacheTTL.
+// cluster.
 type Authorizer struct {
-	// reader must be informer-backed. A cache miss still lists bindings and
-	// gets roles, so a direct API read would put the apiserver in the hot
+	// reader must be informer-backed, with IndexFieldAgentIdentityRef already
+	// registered on its cache via SetupFieldIndex. Authorization runs on
+	// every request, so a direct API read would put the apiserver in the hot
 	// path, and the informer is current enough that a deleted binding stops
 	// granting within one event.
 	reader client.Reader
-
-	// ttl bounds how long a cached Decision may be served without a
-	// confirming informer event. See DefaultDecisionCacheTTL.
-	ttl time.Duration
-
-	// now is the clock the cache checks entries against. Tests override it to
-	// move time without sleeping; production uses time.Now.
-	now func() time.Time
-
-	mu    sync.Mutex
-	cache map[decisionCacheKey]decisionCacheEntry
 }
 
 // New returns an Authorizer reading through reader.
-func New(reader client.Reader, opts ...Option) *Authorizer {
-	a := &Authorizer{
-		reader: reader,
-		ttl:    DefaultDecisionCacheTTL,
-		now:    time.Now,
-		cache:  make(map[decisionCacheKey]decisionCacheEntry),
-	}
-	for _, opt := range opts {
-		opt(a)
-	}
-	return a
+func New(reader client.Reader) *Authorizer {
+	return &Authorizer{reader: reader}
 }
 
 // Authorize reports whether the request is permitted.
@@ -138,43 +111,11 @@ func New(reader client.Reader, opts ...Option) *Authorizer {
 // refusal rather than a denial: it is not a statement about permission, and it
 // may succeed on retry. A Decision with Allowed false is the opposite, a settled
 // answer that retrying will not change.
-//
-// A successful outcome is served from cache when a previous call answered the
-// same (Namespace, AgentIdentity, Action, Resource) within the TTL and no
-// invalidating informer event arrived since; see the package doc. An error is
-// never cached, so a read failure is always retried on the next call.
 func (a *Authorizer) Authorize(ctx context.Context, req Request) (Decision, error) {
 	if err := req.validate(); err != nil {
 		return Decision{}, err
 	}
 
-	key := decisionCacheKey{
-		Namespace:     req.Namespace,
-		AgentIdentity: req.AgentIdentity,
-		Action:        req.Action,
-		Resource:      req.Resource,
-	}
-	if decision, ok := a.lookupCache(key); ok {
-		return decision, nil
-	}
-
-	decision, err := a.evaluate(ctx, req)
-	if err != nil {
-		return Decision{}, err
-	}
-
-	a.storeCache(key, decision)
-	return decision, nil
-}
-
-// evaluate computes a Decision by reading the current bindings and roles. It
-// is Authorize's cache-miss path.
-//
-// Every call reads live state rather than anything cached from a token or an
-// earlier call: a binding deleted a moment ago must stop granting as soon as
-// Authorize's cache is invalidated or expires, which is what makes reading
-// live here, rather than from readiness, correct.
-func (a *Authorizer) evaluate(ctx context.Context, req Request) (Decision, error) {
 	// An action this release does not define can never be granted, whatever the
 	// rules say, so it is refused before any lookup.
 	kind, wildcardAllowed, known := resourceKindFor(req.Action)
@@ -183,8 +124,11 @@ func (a *Authorizer) evaluate(ctx context.Context, req Request) (Decision, error
 	}
 
 	bindings := &securityv1alpha1.AgentRoleBindingList{}
-	if err := a.reader.List(ctx, bindings, client.InNamespace(req.Namespace)); err != nil {
-		return Decision{}, fmt.Errorf("list agent role bindings in %s: %w", req.Namespace, err)
+	if err := a.reader.List(ctx, bindings,
+		client.InNamespace(req.Namespace),
+		client.MatchingFields{IndexFieldAgentIdentityRef: req.AgentIdentity},
+	); err != nil {
+		return Decision{}, fmt.Errorf("list agent role bindings in %s for %s: %w", req.Namespace, req.AgentIdentity, err)
 	}
 
 	roleNames := a.rolesBoundTo(bindings, req.AgentIdentity)
@@ -223,9 +167,12 @@ func (a *Authorizer) evaluate(ctx context.Context, req Request) (Decision, error
 // rolesBoundTo returns the roles bound to one identity, in the order the
 // bindings were listed, with duplicates kept out.
 //
-// Several bindings may name the same identity, and §5.5 says their rules
-// combine. A binding being deleted is skipped: it must stop granting
-// immediately, which is the whole reason authorization reads live state.
+// bindings is already scoped to agentIdentity by Authorize's field-indexed
+// List; the equality check here is a cheap re-check against the index itself
+// ever being wrong, not the primary filter. Several bindings may name the
+// same identity, and §5.5 says their rules combine. A binding being deleted
+// is skipped: it must stop granting immediately, which is the whole reason
+// authorization reads live state.
 func (a *Authorizer) rolesBoundTo(bindings *securityv1alpha1.AgentRoleBindingList,
 	agentIdentity string) []string {
 	var names []string
