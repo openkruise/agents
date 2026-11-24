@@ -19,7 +19,9 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
+	"fmt"
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // #nosec -- intentional pprof endpoint for diagnostics
 	"os"
@@ -53,7 +55,10 @@ import (
 	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxmetricsgc"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/peersecurity"
+	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -201,6 +206,13 @@ func main() {
 
 	var bindAddress string
 	if utilfeature.DefaultFeatureGate.Enabled(features.SandboxRouteSyncGate) && peerSelector != "" {
+		if memberlistBindPort <= 0 {
+			memberlistBindPort = 7946
+		}
+		if memberlistBindPort > 65535 {
+			setupLog.Error(fmt.Errorf("port %d is outside the range 1-65535", memberlistBindPort), "invalid --memberlist-bind-port")
+			os.Exit(1)
+		}
 		peerSecurity.PeerKeySecret, err = utils.ParseSecretRef(peerKeySecret)
 		if err != nil {
 			setupLog.Error(err, "invalid --peer-key-secret")
@@ -402,19 +414,30 @@ func main() {
 		setupLog.Info("runtime client TLS disabled, using legacy plaintext runtime paths")
 	}
 
-	routeSync, err := sandboxctrl.SetupRouteSync(mgr, peerSelector, bindAddress, memberlistBindPort, peerSecurity)
-	if err != nil {
-		setupLog.Error(err, "unable to setup controller route sync")
-		os.Exit(1)
-	}
+	ctx := ctrl.SetupSignalHandler()
 	deps := controller.Deps{MetricsCleanup: metricsGC, RuntimeTLSBundle: runtimeTLSBundle}
-	if routeSync != nil {
-		deps.SyncRouteWithPeers = routeSync.SyncRouteWithPeers
+	var peerManager *peers.MemberlistPeers
+	var peerOutbound *refresh.PeerOutbound
+	if utilfeature.DefaultFeatureGate.Enabled(features.SandboxRouteSyncGate) && peerSelector != "" {
+		peerClient, err := ctrlclient.New(config, ctrlclient.Options{Scheme: mgr.GetScheme(), Mapper: mgr.GetRESTMapper()})
+		if err != nil {
+			setupLog.Error(err, "unable to create peer client")
+			os.Exit(1)
+		}
+		peerManager = peers.NewMemberlistPeers(peerClient, peers.NodePrefixSandboxController+peers.NewPeerNodeName(true), utils.DefaultSandboxDeployNamespace, peerSelector)
+		peerOutbound, _, err = refresh.InitializePeers(ctx, peerClient, peerManager, peerSecurity)
+		if err != nil {
+			setupLog.Error(err, "unable to initialize controller peers")
+			os.Exit(1)
+		}
+		deps.SyncRouteWithPeers = func(ctx context.Context, route sandboxroute.Route) error {
+			return refresh.SyncRouteWithPeers(ctx, peerManager, route, peerOutbound)
+		}
 	}
 	setupLog.Info("setup controllers",
 		"metricsAsyncWorkers", metricsAsyncWorkers,
 		"metricsAsyncQueueCap", metricsAsyncQueueCap,
-		"routeSyncEnabled", routeSync != nil)
+		"routeSyncEnabled", peerManager != nil)
 	if err = controller.SetupWithManager(mgr, deps); err != nil {
 		setupLog.Error(err, "unable to setup controllers")
 		os.Exit(1)
@@ -450,8 +473,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The shared Start launches discovery in the background on every replica, independently of leader election.
+	if peerManager != nil {
+		if err := peerManager.Start(ctx, bindAddress, memberlistBindPort); err != nil {
+			peerOutbound.CloseIdleConnections()
+			setupLog.Error(err, "unable to start controller peers")
+			os.Exit(1)
+		}
+	}
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	err = mgr.Start(ctx)
+	// Clean up before any os.Exit, including when manager startup fails without canceling the signal context.
+	if peerManager != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), peers.DefaultLeaveTimeout+10*time.Second)
+		stopErr := peerManager.Stop(stopCtx)
+		cancel()
+		peerOutbound.CloseIdleConnections()
+		if stopErr != nil {
+			setupLog.Error(stopErr, "unable to stop controller peers")
+			err = errors.Join(err, stopErr)
+		}
+	}
+	if err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}

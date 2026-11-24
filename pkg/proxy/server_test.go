@@ -147,12 +147,15 @@ func TestRunWrapsPeerTLSListener(t *testing.T) {
 	server := NewServer(config.SandboxManagerOptions{DisableEnvoyExtProc: true})
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	server.SetPeerServerTLS(tlsConfig)
-	server.SetPeerOutbound(&tls.Config{MinVersion: tls.VersionTLS12})
+	outbound := refresh.NewPeerOutbound(&tls.Config{MinVersion: tls.VersionTLS12})
+	server.SetPeerOutbound(outbound)
+	server.SetPeerOutbound(outbound)
+	assert.Same(t, outbound, server.peerOutbound, "reinstalling must retain the peer owner's transport")
 	t.Cleanup(func() { server.Stop(context.Background()) })
 
 	require.NoError(t, server.Run())
 	require.Same(t, tlsConfig, server.peerServerTLS)
-	require.NotNil(t, server.peerOutbound)
+	require.Same(t, outbound, server.peerOutbound)
 	assert.Equal(t, "https", server.peerOutbound.Scheme())
 
 	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(refresh.DefaultPort)))

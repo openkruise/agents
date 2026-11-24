@@ -123,16 +123,16 @@ fields retain their existing serialization rules.
   status for transition detection.
 - Sending remains synchronous to avoid an unbounded background queue or
   detached goroutines. The controller supplies a **200ms total context budget**
-  covering sender readiness, parallel fanout, requests, and retry backoff;
+  covering parallel fanout, requests, and retry backoff;
   cancellation or an earlier reconcile deadline can shorten it. Network waiting
   adds at most this budget, subject to scheduling, rather than the shared
   sender's approximately 1.1s retry budget. Manager/gateway retry behavior is
   unchanged. During sustained outages, workers may still pay up to 200ms per
   triggered update; this is an explicit trade-off, not non-blocking delivery.
-- An empty receiving-peer snapshot is skipped immediately. The sender logs
-  `route sync skipped: no peers discovered` at most once per minute per process,
-  including the first attempt. Successful deliveries log the count from the
-  same snapshot used for fanout; a skip never emits a delivery-success log.
+- The controller callback directly delegates to the shared
+  `refresh.SyncRouteWithPeers`, which takes the receiving-peer snapshot and skips
+  an empty snapshot immediately. No controller-specific success or empty-peer
+  logs or rate-limit state are added; delivery errors retain reconciler logging.
 - Changes to message or resourceVersion alone do not send. Two different
   nonempty IP addresses do send, even if routability is unchanged. Spec, Ready
   conditions, and pool ownership still determine routability through the shared
@@ -174,9 +174,13 @@ fields retain their existing serialization rules.
   only selector-matching seed Pods in `sandbox-system`, at most once per retry
   cycle while unjoined, and stops listing after a successful join. Security
   material is retrieved by referenced Secret Get, never by Secret List.
-- Security configuration directly reuses `peersecurity.Inputs + Load`, without
-  controller-specific inputs or loaders or changes to manager/gateway security
-  policy. All three controller flags default to empty strings:
+- Manager, gateway, and controller all call the neutral
+  `refresh.InitializePeers(ctx, reader, peerManager, inputs)`. It calls
+  `peersecurity.Load` once within the shared 30-second startup budget, installs
+  the gossip key on the existing memberlist instance, and creates the outbound
+  refresh client. No controller-specific inputs or loader, security retry loop,
+  or change to manager/gateway receive policy is introduced. All three
+  controller flags default to empty strings:
   `--peer-key-secret`, `--peer-tls-server-secret`, and `--peer-tls-client-secret`.
   Empty references are valid. With all three empty, `Load` reads no Secrets,
   memberlist gossip is unencrypted, and refresh uses plaintext HTTP without
@@ -198,8 +202,9 @@ fields retain their existing serialization rules.
   server/client certificate chains, validity periods, usages, and identity
   separation. The server Secret's `ca.crt` verifies client identity; the client
   Secret's `ca.crt` trusts receiving servers. The two may use different CAs.
-  The controller uses only the returned key and client TLS configuration and
-  does not serve refresh requests, but still performs full TLS-pair validation.
+  Shared initialization installs the key and uses the client TLS configuration
+  for outbound refresh. The controller ignores the returned server TLS snapshot
+  and serves no refresh requests, but still performs full TLS-pair validation.
   HTTPS retains the fixed SNI `agentruntime.sandbox.agents.kruise.io` and TLS
   >= 1.2. Missing or invalid explicitly configured material never causes a
   fallback to plaintext or skipped certificate verification. Explicitly empty
@@ -214,31 +219,53 @@ fields retain their existing serialization rules.
   receivers to accept the existing sandbox-manager client identity. Template
   references do not prove runtime interoperability. The controller gate does
   not trigger KDM key creation.
-- RouteSync remains a non-leader-elected runnable. Waiting for material pauses
-  only RouteSync, not other controllers. Each startup load uses a cancelable
-  30-second context; failures retry after 10 seconds. No gossip listener,
-  outbound client, or ready signal is published before loading succeeds.
-  Empty security inputs succeed without Secret reads. After loading, RouteSync
-  installs the key, constructs the shared `PeerOutbound`, calls the shared
-  memberlist `Start`, and publishes ready. Subsequent seed discovery and join
-  retries belong entirely to the shared peers lifecycle. The sending callback
-  waits for ready within the existing 200ms total budget.
-- Keys and TLS configurations are startup snapshots. Reads retried before
-  startup support late-arriving Secrets; successful startup does not enable hot
-  rotation. Material changes require coordinated restarts; peers with different
-  key generations cannot communicate. Unsent updates are not queued for replay;
-  receiving informers provide eventual convergence. Shutdown cancels material
-  waiting and shared discovery, performs memberlist Leave/Shutdown, and closes
-  idle outbound connections.
+- Like manager/gateway, setup calls shared initialization before publishing the
+  sending callback. Missing, unreadable, or invalid configured Secrets fail
+  controller startup; no controller-specific security retry loop or readiness
+  wait is added. Empty security inputs succeed without Secret reads. The returned
+  `PeerOutbound` remains read-only after publication. The controller
+  process entrypoint directly calls the shared `MemberlistPeers.Start` before
+  `mgr.Start`, on every replica independently of leader election; no separate
+  peer runnable or controller-specific lifecycle wrapper is needed. Shared
+  `Start` launches discovery in the background. Seed discovery and join retries
+  remain entirely in `MemberlistPeers`; unavailable seeds do not fail startup.
+  Until membership is available, the shared `GetPeers()` returns an empty
+  snapshot and sending is an immediate no-op.
+- Keys and TLS configurations are startup snapshots, without hot rotation or
+  support for waiting on late-arriving Secrets during startup. Material changes
+  require coordinated restarts; peers with different key generations cannot
+  communicate. Unsent updates are not queued for replay; receiving informers
+  provide eventual convergence. The process cancellation signal also cancels
+  startup Secret reads. Shutdown cancels shared discovery, performs memberlist
+  Leave/Shutdown, and closes idle outbound connections.
 
 `SyncRouteWithPeers` and `PeerOutbound` move from `pkg/proxy` into the neutral
 `pkg/sandboxroute/refresh` package. Proxy keeps its instance wrapper;
 manager/gateway and controller share the sending implementation. The controller
-uses `SyncRouteWithPeerList` to keep logging and delivery on one membership
-snapshot. This new dependency closure contains neither API-layer nor
-sandbox-manager packages. Existing `sandbox_peers` and
+callback only supplies its peer manager and initialized outbound client to
+`refresh.SyncRouteWithPeers`. This new dependency closure contains neither
+API-layer nor sandbox-manager packages. Existing `sandbox_peers` and
 `sandbox_peer_outbound_tls_errors_total` move with the implementation; no new
 metric names are introduced, and the controller registers these existing metrics.
+
+Shared initialization accepts an existing `peers.Peers` instance rather than
+creating another member owner or starting it. All three owners keep using
+`peers.NewMemberlistPeers` with their existing node identity, namespace, and
+selector. Manager constructs this instance in `Build` and initializes security
+inside `StartTransports`, before `proxy.Run`; gateway constructs it in `Start`
+and publishes it after binding its route listener; controller initializes it
+before injecting the callback. Manager's existing no-reader/plaintext no-op
+and injected peer implementations remain supported; a configured gossip key
+requires `MemberlistPeers`. Neither memberlist nor a route listener starts inside
+`InitializePeers`.
+
+The returned server TLS config leaves `ClientAuth` to receivers. Manager retains
+`RequireAndVerifyClientCert`; gateway retains `VerifyClientCertIfGiven` plus
+refresh-handler verification, preserving certificate-free probes. Proxy's
+`SetPeerOutbound` accepts the already initialized client, closes idle connections
+on its previous client, and does not reconstruct a transport. Its existing
+plaintext default remains available to standalone callers before initialization.
+Controller does not start a receive listener.
 
 Neither `POD_NAME` nor `POD_IP` requires a new configuration entry. Dual-interface
 deployments use `eni1` by default; other interface names need an override. Allow
@@ -248,20 +275,25 @@ mistake the controller for a refresh target. `config/manager/manager.yaml`
 provides commented gate/override examples only; it does not enable the feature,
 add a controller refresh Service, or change probes.
 
-Targeted coverage includes routability changes in both directions, Ready/IP/phase
-combinations, nonempty IP changes, unchanged routability, sending failures and
-deadlines, failed/NotFound patches, returned resourceVersion, gate/configuration
-validation, startup cancellation, empty-peer log rate limiting, and sender-only
-member filtering. Security cases use referenced Secret Get through the real
-shared client, covering late-arriving key and certificate Secrets and Secret
-permission errors that do not block other controllers. Shared security tests
-retain invalid/expired certificates and independent-CA trust verification;
-controller cases retain real memberlist joins with matching/mismatched keys.
-Refresh cases retain real mTLS and rejection of missing client identity, wrong
-server names, and untrusted servers. This describes coverage, not a passing
-validation result: tests, builds, and lint were not run in this round, and the
-previous status test remains paused. Ordinary validation does not deploy a
-cluster or run E2E tests.
+Retained controller status tests cover routability changes in both directions,
+Ready/IP/phase combinations, nonempty IP changes, unchanged routability,
+sending failures and deadlines, failed/NotFound patches, and returned
+resourceVersion. Shared peer tests cover node naming, sender-only member
+filtering, scoped discovery, and the non-blocking start/stop lifecycle. Shared
+security tests cover empty inputs, canceled loading, Secret references, key
+validation, invalid/expired certificates, and independent-CA trust verification.
+Refresh tests cover common initialization's empty inputs, bounded Secret reads,
+cancellation, fail-fast errors without retries, and real encrypted joins with
+matching, mismatched, or absent receiver keys. They retain real mTLS and rejection
+of missing client identity, wrong server names, and untrusted servers. Manager
+tests retain the builder's member instance and startup order; gateway tests
+check receive policy and publication of the same initialized member and outbound;
+proxy tests check that installing the client preserves its identity. Tests
+coupled to the removed controller wrapper are removed with that layer; they do
+not validate the new entrypoint wiring. This describes retained coverage, not a
+passing validation result: tests, builds, and lint were not run in this round,
+and the previous status test remains paused. Ordinary validation does not
+deploy a cluster or run E2E tests.
 
 ### Bounded peer listing
 

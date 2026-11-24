@@ -280,13 +280,10 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Load owns the enablement decision: inputs without Secret references
-	// return plaintext materials without reading any Secret.
-	loadCtx, cancel := context.WithTimeout(ctx, peersecurity.LoadTimeout)
-	secretKey, serverTLS, clientTLS, err := peersecurity.Load(loadCtx, s.client, inputs)
-	cancel()
+	peerManager := peers.NewMemberlistPeers(s.client, peers.NodePrefixSandboxGateway+nodeName, os.Getenv(EnvNamespace), os.Getenv(EnvLabelSelector))
+	outbound, serverTLS, err := refresh.InitializePeers(ctx, s.client, peerManager, inputs)
 	if err != nil {
-		return fmt.Errorf("load peer security: %w", err)
+		return err
 	}
 	if serverTLS != nil {
 		// Client certificates stay optional at the handshake because this
@@ -297,7 +294,7 @@ func (s *Server) Start(ctx context.Context) error {
 		cfg.ClientAuth = tls.VerifyClientCertIfGiven
 		s.peerServerTLS = cfg
 	}
-	s.peerOutbound = refresh.NewPeerOutbound(clientTLS)
+	s.peerOutbound = outbound
 	s.httpServer.Handler = s.newServeMux(s.peerServerTLS != nil)
 
 	lis, err := net.Listen("tcp", s.httpServer.Addr)
@@ -308,12 +305,7 @@ func (s *Server) Start(ctx context.Context) error {
 		lis = tls.NewListener(lis, s.peerServerTLS)
 	}
 
-	// Get namespace and label selector from environment variables
-	namespace := os.Getenv(EnvNamespace)
-	labelSelector := os.Getenv(EnvLabelSelector)
-
-	s.peerManager = peers.NewMemberlistPeers(s.client, peers.NodePrefixSandboxGateway+nodeName, namespace, labelSelector)
-	s.peerManager.SetSecretKey(secretKey)
+	s.peerManager = peerManager
 	setPeerRuntime(s.peerManager, s.peerOutbound)
 
 	go func() {

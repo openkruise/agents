@@ -111,10 +111,13 @@ func (s *Server) SetPeerServerTLS(cfg *tls.Config) {
 	s.peerServerTLS = cfg
 }
 
-// SetPeerOutbound installs this process's outbound peer client. A nil TLS
-// config keeps plaintext HTTP.
-func (s *Server) SetPeerOutbound(clientTLS *tls.Config) {
-	s.peerOutbound = refresh.NewPeerOutbound(clientTLS)
+// SetPeerOutbound installs the peer owner's client before Run, without rebuilding
+// its transport or making another security decision.
+func (s *Server) SetPeerOutbound(outbound *refresh.PeerOutbound) {
+	if s.peerOutbound != outbound {
+		s.peerOutbound.CloseIdleConnections()
+	}
+	s.peerOutbound = outbound
 }
 
 // Run binds the route-refresh HTTP listener and, unless disabled, the Envoy

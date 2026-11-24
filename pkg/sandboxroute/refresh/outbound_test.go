@@ -17,6 +17,7 @@ limitations under the License.
 package refresh
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -34,17 +35,27 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/hashicorp/memberlist"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
@@ -68,6 +79,139 @@ func (t errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 		return nil, t.err
 	}
 	return t.resp, nil
+}
+
+func TestInitializePeers(t *testing.T) {
+	keyRef := types.NamespacedName{Namespace: "ns", Name: "peer-key"}
+	keyInputs := peersecurity.Inputs{PeerKeySecret: keyRef}
+	keySecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: keyRef.Namespace, Name: keyRef.Name},
+		Data:       map[string][]byte{"key": bytes.Repeat([]byte{'k'}, 32)},
+	}
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, keyRef.Name, errors.New("denied"))
+	tests := []struct {
+		name       string
+		inputs     peersecurity.Inputs
+		memberlist bool
+		nilReader  bool
+		canceled   bool
+		readErr    error
+		wantReads  int
+		wantErr    string
+		wantIs     error
+	}{
+		{name: "empty inputs read nothing"},
+		{name: "plaintext needs no Secret reader", nilReader: true},
+		{name: "installs a key on existing memberlist", inputs: keyInputs, memberlist: true, wantReads: 1},
+		{name: "key requires memberlist", inputs: keyInputs, wantReads: 1, wantErr: "does not accept it"},
+		{name: "configured inputs require a reader", inputs: keyInputs, nilReader: true, wantErr: "peer secret reader is not configured"},
+		{name: "missing Secret fails without retry", inputs: peersecurity.Inputs{PeerKeySecret: types.NamespacedName{Namespace: "ns", Name: "missing"}}, wantReads: 1, wantErr: "not found"},
+		{name: "Forbidden fails without retry", inputs: keyInputs, readErr: forbidden, wantReads: 1, wantErr: "forbidden", wantIs: forbidden},
+		{name: "incomplete TLS pair fails before reads", inputs: peersecurity.Inputs{TLSServerSecret: types.NamespacedName{Namespace: "ns", Name: "server"}}, wantErr: "both server and client"},
+		{name: "canceled plaintext publishes no client", canceled: true, wantErr: "context canceled", wantIs: context.Canceled},
+		{name: "canceled security does not read", inputs: keyInputs, canceled: true, wantErr: "context canceled", wantIs: context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reads := 0
+			reader := interceptor.NewClient(fake.NewClientBuilder().WithObjects(keySecret).Build(), interceptor.Funcs{
+				Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+					reads++
+					deadline, ok := ctx.Deadline()
+					assert.True(t, ok, "shared initialization must bound Secret reads")
+					assert.LessOrEqual(t, time.Until(deadline), peersecurity.LoadTimeout)
+					if tt.readErr != nil {
+						return tt.readErr
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+				List: func(context.Context, ctrlclient.WithWatch, ctrlclient.ObjectList, ...ctrlclient.ListOption) error {
+					t.Error("initialization must not start discovery")
+					return errors.New("unexpected discovery")
+				},
+			})
+			var peerManager peers.Peers = staticPeers{}
+			if tt.memberlist {
+				peerManager = peers.NewMemberlistPeers(reader, "sm-test", "ns", "app=peer")
+			}
+			var secretReader ctrlclient.Reader = reader
+			if tt.nilReader {
+				secretReader = nil
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tt.canceled {
+				cancel()
+			}
+			outbound, serverTLS, err := InitializePeers(ctx, secretReader, peerManager, tt.inputs)
+			assert.Equal(t, tt.wantReads, reads)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				if tt.wantIs != nil {
+					assert.ErrorIs(t, err, tt.wantIs)
+				}
+				assert.Nil(t, outbound)
+				assert.Nil(t, serverTLS)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, outbound)
+			defer outbound.CloseIdleConnections()
+			assert.Equal(t, "http", outbound.Scheme(), "gossip encryption does not imply refresh TLS")
+			assert.Nil(t, serverTLS)
+			assert.Nil(t, peerManager.LocalAddr(), "membership stays unstarted")
+		})
+	}
+}
+
+func TestInitializePeersGossipKey(t *testing.T) {
+	key := bytes.Repeat([]byte{'k'}, 32)
+	tests := []struct {
+		name        string
+		receiverKey []byte
+		wantErr     bool
+	}{
+		{name: "matching encrypted peer joins", receiverKey: key},
+		{name: "different key is rejected", receiverKey: bytes.Repeat([]byte{'x'}, 32), wantErr: true},
+		{name: "plaintext peer is rejected", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "peer-key"},
+				Data:       map[string][]byte{"key": key},
+			}
+			reader := fake.NewClientBuilder().WithObjects(secret).Build()
+			peerManager, port, err := peers.CreateTestPeer(t.Context(), reader, "sc-test")
+			require.NoError(t, err)
+			outbound, _, err := InitializePeers(t.Context(), reader, peerManager, peersecurity.Inputs{
+				PeerKeySecret: types.NamespacedName{Namespace: "ns", Name: "peer-key"},
+			})
+			require.NoError(t, err)
+			t.Cleanup(outbound.CloseIdleConnections)
+			require.NoError(t, peerManager.Start(t.Context(), "127.0.0.1", port))
+			t.Cleanup(func() { require.NoError(t, peerManager.Stop(context.Background())) })
+
+			// Configure an independent real peer so a missing key installation cannot
+			// pass merely because both sides accidentally use plaintext gossip.
+			cfg := memberlist.DefaultLANConfig()
+			cfg.Name = "sm-receiver"
+			cfg.BindAddr = "127.0.0.1"
+			cfg.BindPort = 0
+			cfg.SecretKey = tt.receiverKey
+			cfg.LogOutput = io.Discard
+			receiver, err := memberlist.Create(cfg)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, receiver.Shutdown()) })
+			_, err = receiver.Join([]string{net.JoinHostPort(peerManager.LocalAddr().String(), strconv.Itoa(peerManager.LocalPort()))})
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Len(t, receiver.Members(), 2)
+			}
+		})
+	}
 }
 
 func TestRequestPeerAddressAndTransport(t *testing.T) {

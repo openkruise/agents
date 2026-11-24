@@ -319,7 +319,12 @@ func TestApplyPeerSecurity(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Cleanup(func() { tt.manager.proxy.Stop(context.Background()) })
+			peerManager := tt.manager.peersManager
 			err := tt.manager.applyPeerSecurity(t.Context())
+			if peerManager != nil {
+				assert.Same(t, peerManager, tt.manager.peersManager, "initialization must preserve the builder's peer instance")
+				assert.Nil(t, peerManager.LocalAddr(), "security initialization must not start membership")
+			}
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
