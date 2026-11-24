@@ -755,7 +755,9 @@ func TestPrepareSandboxFromCheckpoint_TokenRotation(t *testing.T) {
 
 			if !tt.expectInit {
 				assert.Nil(t, initRuntimeOpts)
-				assert.NotContains(t, sbx.GetAnnotations(), v1alpha1.AnnotationRuntimeAccessToken)
+				// Without an init request the clone skips /init, but it still gets
+				// an independent gateway credential minted at preparation time.
+				assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken])
 				assert.NotContains(t, sbx.GetAnnotations(), v1alpha1.AnnotationInitRuntimeRequest)
 				return
 			}
