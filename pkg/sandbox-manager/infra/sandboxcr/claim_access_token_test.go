@@ -32,15 +32,14 @@ func TestValidateAndInitClaimOptions_AccessToken(t *testing.T) {
 		outerToken string
 		innerToken string
 		initialize bool
-		wantToken  string
 		wantError  bool
 	}{
-		{name: "skip initialization with token", outerToken: "outer-token", wantToken: "outer-token"},
+		{name: "skip initialization with token", outerToken: "outer-token"},
 		{name: "skip initialization without token"},
 		{name: "initialization without tokens", initialize: true},
-		{name: "default inner token", initialize: true, outerToken: "outer-token", wantToken: "outer-token"},
-		{name: "default outer token", initialize: true, innerToken: "runtime-token", wantToken: "runtime-token"},
-		{name: "matching tokens", initialize: true, outerToken: "same-token", innerToken: "same-token", wantToken: "same-token"},
+		{name: "missing inner token", initialize: true, outerToken: "outer-token", wantError: true},
+		{name: "missing outer token", initialize: true, innerToken: "runtime-token", wantError: true},
+		{name: "matching tokens", initialize: true, outerToken: "same-token", innerToken: "same-token"},
 		{name: "conflicting tokens", initialize: true, outerToken: "outer-token", innerToken: "runtime-token", wantError: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -55,7 +54,7 @@ func TestValidateAndInitClaimOptions_AccessToken(t *testing.T) {
 				}
 			}
 
-			// When validation normalizes the options before claim execution.
+			// When the options are validated before claim execution.
 			got, err := ValidateAndInitClaimOptions(input)
 
 			// Then the input remains unchanged and inconsistent credentials fail safely.
@@ -66,26 +65,21 @@ func TestValidateAndInitClaimOptions_AccessToken(t *testing.T) {
 			if tt.wantError {
 				require.Error(t, err)
 				require.Equal(t, managererrors.ErrorBadRequest, managererrors.GetErrCode(err))
-				require.NotContains(t, err.Error(), tt.outerToken)
-				require.NotContains(t, err.Error(), tt.innerToken)
+				for _, token := range []string{tt.outerToken, tt.innerToken} {
+					if token != "" {
+						require.NotContains(t, err.Error(), token)
+					}
+				}
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, tt.wantToken, got.AccessToken)
+			require.Equal(t, tt.outerToken, got.AccessToken)
 			if !tt.initialize {
 				require.Nil(t, got.InitRuntime)
 			} else {
 				require.NotNil(t, got.InitRuntime)
-				expected := *input.InitRuntime
-				expected.AccessToken = tt.wantToken
-				require.Equal(t, expected, *got.InitRuntime)
-				if tt.outerToken != "" && tt.innerToken == "" {
-					require.NotSame(t, input.InitRuntime, got.InitRuntime)
-				}
+				require.Same(t, input.InitRuntime, got.InitRuntime)
 			}
-			validatedAgain, err := ValidateAndInitClaimOptions(got)
-			require.NoError(t, err)
-			require.Equal(t, got, validatedAgain)
 		})
 	}
 }

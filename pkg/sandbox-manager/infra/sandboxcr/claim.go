@@ -93,17 +93,9 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 	if opts.Template == "" {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("template is required")
 	}
-	if opts.InitRuntime != nil {
-		if opts.AccessToken == "" {
-			opts.AccessToken = opts.InitRuntime.AccessToken
-		} else if opts.InitRuntime.AccessToken == "" {
-			initRuntime := *opts.InitRuntime
-			initRuntime.AccessToken = opts.AccessToken
-			opts.InitRuntime = &initRuntime
-		} else if opts.AccessToken != opts.InitRuntime.AccessToken {
-			return infra.ClaimSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest,
-				"claim access token must match runtime initialization access token")
-		}
+	if opts.InitRuntime != nil && opts.AccessToken != opts.InitRuntime.AccessToken {
+		return infra.ClaimSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest,
+			"claim access token must match runtime initialization access token")
 	}
 	if opts.CSIMount != nil {
 		// for csi mount, init runtime is required
