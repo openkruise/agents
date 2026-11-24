@@ -404,7 +404,7 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 				sbs.Namespace, sbs.Spec.TemplateRef.Name, err)
 		}
 		if err := r.validateTemplateRef(ctx, refTemplate); err != nil {
-			r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to build sandbox: %s", err)
+			r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to validate template ref: %s", err)
 			return nil, err
 		}
 		if refTemplate.Spec.Template == nil {

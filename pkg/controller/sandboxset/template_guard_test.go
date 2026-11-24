@@ -60,6 +60,7 @@ func TestTemplateGuardBeforeMaterialization(t *testing.T) {
 	select {
 	case event := <-recorder.Events:
 		require.Contains(t, event, EventCreateSandboxFailed)
+		require.Contains(t, event, "Failed to validate template ref")
 		require.Contains(t, event, "not a Ready static Version")
 	default:
 		t.Fatal("expected a create-sandbox-failed event for the rejected templateRef")
