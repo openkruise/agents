@@ -4428,7 +4428,9 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 			require.NoError(t, err)
 			err = c.Status().Update(t.Context(), sbs)
 			require.NoError(t, err)
-			require.True(t, testInfra.HasTemplate(t.Context(), infra.HasTemplateOptions{Name: template}))
+			hasTemplate, err := testInfra.HasTemplate(t.Context(), infra.HasTemplateOptions{Name: template})
+			require.NoError(t, err)
+			require.True(t, hasTemplate)
 
 			now := metav1.Now()
 			ownerRefs := []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}

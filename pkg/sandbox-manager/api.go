@@ -139,7 +139,13 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	// sandbox-manager handles every instance it claims, so it owns their metrics.
 	infraOpts.ControlPlaneSource = v1alpha1.SandboxSourceE2B
 
-	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
+	hasTemplate, err := m.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template})
+	if err != nil {
+		log.Error(err, "failed to check template existence", "template", infraOpts.Template)
+		incClaimRequestResult(infraOpts.Namespace, metricResultFailure)
+		return nil, managererrors.WrapError(managererrors.ErrorInternal, err, "failed to check template %s", infraOpts.Template)
+	}
+	if !hasTemplate {
 		// A failure before binding only feeds the legacy request metric; it produces no
 		// instance claim event.
 		incClaimRequestResult(infraOpts.Namespace, metricResultFailure)
@@ -294,6 +300,14 @@ func (m *SandboxManager) DeleteCheckpoint(ctx context.Context, user string, opts
 func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
 	route, ok := m.proxy.LoadRoute(sandboxID)
 	return route.Owner, ok
+}
+
+func (m *SandboxManager) HasTemplate(ctx context.Context, opts infra.HasTemplateOptions) (bool, error) {
+	return m.infra.HasTemplate(ctx, opts)
+}
+
+func (m *SandboxManager) HasCheckpoint(ctx context.Context, opts infra.HasCheckpointOptions) (bool, error) {
+	return m.infra.HasCheckpoint(ctx, opts)
 }
 
 // GetOwnerOfVolume returns the owner (UserID) of the volume identified by volumeID (PV Name)

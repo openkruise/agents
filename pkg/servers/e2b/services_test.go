@@ -1108,9 +1108,11 @@ func CreateCheckpointAndTemplate(t *testing.T, controller *Controller, checkpoin
 	err = fc.Status().Update(t.Context(), cp)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
+		ok, err := controller.manager.HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
 			CheckpointID: checkpointID,
 		})
+		assert.NoError(t, err)
+		return ok
 	}, time.Second, 10*time.Millisecond)
 
 	return func() {
@@ -1178,9 +1180,11 @@ func CreateCheckpointAndTemplateWithAnnotations(t *testing.T, controller *Contro
 	err = fc.Status().Update(t.Context(), cp)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
+		ok, err := controller.manager.HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
 			CheckpointID: checkpointID,
 		})
+		assert.NoError(t, err)
+		return ok
 	}, time.Second, 10*time.Millisecond)
 
 	return func() {
