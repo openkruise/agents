@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/peers"
@@ -77,10 +78,12 @@ type Server struct {
 	adapter RequestAdapter
 	LBEntry string // entry of load balancer, usually a service
 	// peers - now managed by Peers
-	peersManager  peers.Peers
-	bindAddress   string
-	peerServerTLS *tls.Config
-	peerOutbound  *refresh.PeerOutbound
+	peersManager         peers.Peers
+	bindAddress          string
+	peerServerTLS        *tls.Config
+	peerOutbound         *refresh.PeerOutbound
+	sandboxNamespace     string
+	sandboxLabelSelector string
 	// lifecycle: Run is called once and Stop at most once, after Run.
 	mu sync.Mutex
 }
@@ -93,6 +96,8 @@ func NewServer(opts config.SandboxManagerOptions) *Server {
 		store:                       store,
 		bindAddress:                 opts.BindAddress,
 		peerOutbound:                refresh.NewPeerOutbound(nil),
+		sandboxNamespace:            opts.SandboxNamespace,
+		sandboxLabelSelector:        opts.SandboxLabelSelector,
 	}
 }
 
@@ -183,6 +188,25 @@ func (s *Server) Run() error {
 
 func (s *Server) newServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
+	selector, err := labels.Parse(s.sandboxLabelSelector)
+	if err != nil {
+		// 正常启动已验证配置；独立调用方也不能因无效 selector 扩大接收范围。
+		klog.ErrorS(err, "invalid route receiver label selector")
+		mux.HandleFunc(http.MethodPost+" "+refresh.Path, func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "invalid route receiver scope", http.StatusInternalServerError)
+		})
+		return mux
+	}
+	acceptRoute := func(route sandboxroute.Route) bool {
+		if s.sandboxNamespace != "" && route.Namespace != s.sandboxNamespace {
+			return false
+		}
+		if selector.Empty() {
+			return true
+		}
+		// legacy payload 未携带标签时无法证明 scope；由本地 informer 补齐观察。
+		return route.Labels != nil && selector.Matches(labels.Set(route.Labels))
+	}
 	mux.Handle(
 		http.MethodPost+" "+refresh.Path,
 		refresh.NewHandler(s.store, func(result sandboxroute.MutationResult) {
@@ -190,7 +214,7 @@ func (s *Server) newServeMux() *http.ServeMux {
 			case sandboxroute.EventResultApplied, sandboxroute.EventResultIgnored:
 				s.updateRouteCount()
 			}
-		}),
+		}, acceptRoute),
 	)
 	return mux
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,6 +50,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -864,8 +866,15 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 	messageChanged.Message = "still running"
 	withPodMetadata := *running.DeepCopy()
 	withPodMetadata.PodInfo.NodeName = "worker-1"
+	withPodMetadata.PodInfo.PodUID = "pod-uid"
 	withPodMetadata.PodInfo.Labels = map[string]string{"app": "sandbox"}
 	withPodMetadata.PodInfo.Annotations = map[string]string{"example.com/key": "value"}
+	clearedUID := *withPodMetadata.DeepCopy()
+	clearedUID.PodInfo.PodUID = ""
+	clearedNode := *withPodMetadata.DeepCopy()
+	clearedNode.PodInfo.NodeName = ""
+	clearedScalars := *withPodMetadata.DeepCopy()
+	clearedScalars.PodInfo.PodIP, clearedScalars.PodInfo.PodUID, clearedScalars.PodInfo.NodeName = "", "", ""
 	clearedIPWithMetadata := *withPodMetadata.DeepCopy()
 	clearedIPWithMetadata.PodInfo.PodIP = ""
 	pauseTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -901,6 +910,10 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 		{name: "traffic address removed", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "", true), wantSync: true},
 		{name: "clearing address preserves Pod metadata", oldStatus: withPodMetadata, newStatus: clearedIPWithMetadata, wantSync: true},
 		{name: "clearing address with sync disabled", oldStatus: withPodMetadata, newStatus: clearedIPWithMetadata, disabled: true},
+		{name: "clearing Pod UID", oldStatus: withPodMetadata, newStatus: clearedUID},
+		{name: "clearing node name", oldStatus: withPodMetadata, newStatus: clearedNode},
+		{name: "clearing all PodInfo scalars preserves maps", oldStatus: withPodMetadata, newStatus: clearedScalars, wantSync: true},
+		{name: "clearing all PodInfo scalars with sync disabled", oldStatus: withPodMetadata, newStatus: clearedScalars, disabled: true},
 		{name: "nonempty address changes", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.2", true), wantSync: true},
 		{name: "address changes while unroutable", oldStatus: pending, newStatus: status(agentsv1alpha1.SandboxPending, "10.0.0.2", false), wantSync: true},
 		{name: "entering pause", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true), wantSync: true},
@@ -1010,9 +1023,9 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 			if tt.patchErr != nil {
 				assert.Equal(t, tt.oldStatus, box.Status)
 				assert.Equal(t, "10", box.ResourceVersion)
-				assert.Equal(t, tt.oldStatus, persisted.Status)
+				assert.True(t, apiequality.Semantic.DeepEqual(tt.oldStatus, persisted.Status), "persisted status differs: want=%#v got=%#v", tt.oldStatus, persisted.Status)
 			} else {
-				assert.Equal(t, tt.newStatus, persisted.Status)
+				assert.True(t, apiequality.Semantic.DeepEqual(tt.newStatus, persisted.Status), "persisted status differs: want=%#v got=%#v", tt.newStatus, persisted.Status)
 			}
 		})
 	}
@@ -1304,6 +1317,8 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 		pod                    *corev1.Pod
 		expectEvent            bool
 		expectFinalizerRemoved bool
+		disabled               bool
+		syncErr                error
 	}{
 		{
 			name: "records event when active pod is deleted",
@@ -1333,6 +1348,8 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 			expectEvent:            false,
 			expectFinalizerRemoved: true,
 		},
+		{name: "sync failure does not roll back finalizer removal", expectFinalizerRemoved: true, syncErr: fmt.Errorf("peer unavailable")},
+		{name: "disabled sync still removes finalizer", expectFinalizerRemoved: true, disabled: true},
 	}
 
 	for _, tt := range tests {
@@ -1343,7 +1360,8 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 					Name:              "test-sandbox",
 					Namespace:         "default",
 					DeletionTimestamp: &deletionTime,
-					Finalizers:        []string{core.SandboxFinalizer},
+					UID:               "sandbox-uid", ResourceVersion: "10",
+					Finalizers: []string{core.SandboxFinalizer},
 				},
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase: agentsv1alpha1.SandboxRunning,
@@ -1369,12 +1387,32 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 				}),
 			}
 
-			_, err := reconciler.handleTerminating(context.Background(), core.EnsureFuncArgs{
+			sent := 0
+			if !tt.disabled {
+				reconciler.syncRouteWithPeers = func(ctx context.Context, route sandboxroute.Route) error {
+					sent++
+					assert.Equal(t, sandbox.ResourceVersion, route.ResourceVersion)
+					assert.Equal(t, sandbox.UID, route.UID)
+					assert.NotEmpty(t, route.ResourceVersion)
+					assert.Equal(t, sandboxstate.Dead, route.State)
+					assert.False(t, route.Terminal)
+					deadline, ok := ctx.Deadline()
+					assert.True(t, ok)
+					assert.LessOrEqual(t, time.Until(deadline), controllerRouteSyncTimeout)
+					return tt.syncErr
+				}
+			}
+			_, err := reconciler.handleTerminating(t.Context(), core.EnsureFuncArgs{
 				Pod:       tt.pod,
 				Box:       sandbox,
 				NewStatus: sandbox.Status.DeepCopy(),
 			})
 			assert.NoError(t, err)
+			if tt.disabled {
+				assert.Zero(t, sent)
+			} else {
+				assert.Equal(t, 1, sent)
+			}
 
 			if tt.expectEvent {
 				assertSandboxRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+eventReasonSandboxTerminating, "Sandbox deletion is in progress from phase Running")

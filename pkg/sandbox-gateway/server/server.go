@@ -35,9 +35,7 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
-	"github.com/openkruise/agents/pkg/utils"
 )
 
 // Environment variable names for peer discovery
@@ -160,15 +158,15 @@ func SetProcessStopForTest(fn func(context.Context) error) {
 	processStop = fn
 }
 
-// getMemberlistBindPort reads the memberlist bind port from environment variable
-// Returns the default port if not set or invalid
+// getMemberlistBindPort 读取 MEMBERLIST_BIND_PORT；未设置、无法解析为整数或非正数时使用默认值。
+// 此处不检查端口上限，超范围的正数由 memberlist 启动时拒绝。
 func getMemberlistBindPort() int {
 	if val := os.Getenv(EnvMemberlistBindPort); val != "" {
 		if port, err := strconv.Atoi(val); err == nil && port > 0 {
 			return port
 		}
 	}
-	return config.DefaultMemberlistBindPort
+	return peers.DefaultMemberlistBindPort
 }
 
 func normalizePort(port int, defaultPort int) int {
@@ -178,36 +176,16 @@ func normalizePort(port int, defaultPort int) int {
 	return port
 }
 
-// peerSecurityFromEnv parses the Gateway peer-security environment variables.
-// They mirror the sandbox-manager flags and keep the same defaults and
-// enablement rules: a feature is enabled only by its own Secret reference, data
-// keys are read only while that reference is set, and both TLS references empty
-// keeps plaintext peer HTTP. PEER_ALLOWED_CLIENT_CNS is an optional inbound
-// identity restriction and requires the TLS pair when non-empty. The server
-// Secret supplies inbound credentials and ca.crt for verifying peer clients.
-// The client Secret supplies this process's own runtime client credentials
-// (never the sandbox manager's bundle) and ca.crt for verifying peer servers.
-// Both bundles use the shared TLS loader's fixed data-key precedence.
+// peerSecurityFromEnv 将 gateway 环境变量交给 peersecurity.ParseInputs 统一解析和校验。
+// PEER_TLS_CLIENT_SECRET 配置 gateway 自身的客户端凭证，不使用 sandbox-manager 的凭证。
 func peerSecurityFromEnv() (peersecurity.Inputs, error) {
-	keySecret, err := utils.ParseSecretRef(os.Getenv(envPeerKeySecret))
+	in, err := peersecurity.ParseInputs(
+		os.Getenv(envPeerKeySecret),
+		os.Getenv(envPeerTLSServerSecret),
+		os.Getenv(envPeerTLSClientSecret),
+		os.Getenv(envPeerAllowedClientCNs),
+	)
 	if err != nil {
-		return peersecurity.Inputs{}, fmt.Errorf("invalid %s: %w", envPeerKeySecret, err)
-	}
-	serverSecret, err := utils.ParseSecretRef(os.Getenv(envPeerTLSServerSecret))
-	if err != nil {
-		return peersecurity.Inputs{}, fmt.Errorf("invalid %s: %w", envPeerTLSServerSecret, err)
-	}
-	clientSecret, err := utils.ParseSecretRef(os.Getenv(envPeerTLSClientSecret))
-	if err != nil {
-		return peersecurity.Inputs{}, fmt.Errorf("invalid %s: %w", envPeerTLSClientSecret, err)
-	}
-	in := peersecurity.Inputs{
-		PeerKeySecret:    keySecret,
-		TLSServerSecret:  serverSecret,
-		TLSClientSecret:  clientSecret,
-		AllowedClientCNs: os.Getenv(envPeerAllowedClientCNs),
-	}
-	if err := in.Validate(); err != nil {
 		return peersecurity.Inputs{}, fmt.Errorf("invalid peer security environment variables: %w", err)
 	}
 	return in, nil

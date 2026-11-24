@@ -2196,6 +2196,7 @@ func TestSandboxManager_deleteRouteAndSync(t *testing.T) {
 	tests := []struct {
 		name            string
 		setRouteInProxy bool
+		phase           agentsv1alpha1.SandboxPhase
 	}{
 		{
 			name:            "route deleted from proxy after deleteRouteAndSync",
@@ -2205,6 +2206,8 @@ func TestSandboxManager_deleteRouteAndSync(t *testing.T) {
 			name:            "deleteRouteAndSync does not panic when route does not exist",
 			setRouteInProxy: false,
 		},
+		{name: "failed CR route is deleted", setRouteInProxy: true, phase: agentsv1alpha1.SandboxFailed},
+		{name: "succeeded CR route is deleted", setRouteInProxy: true, phase: agentsv1alpha1.SandboxSucceeded},
 	}
 
 	for _, tt := range tests {
@@ -2212,7 +2215,10 @@ func TestSandboxManager_deleteRouteAndSync(t *testing.T) {
 			manager, client := setupTestManager(t)
 
 			sandbox := getSandboxForApiTest(tt.name)
-			sandbox.Status.Phase = agentsv1alpha1.SandboxRunning
+			sandbox.Status.Phase = tt.phase
+			if sandbox.Status.Phase == "" {
+				sandbox.Status.Phase = agentsv1alpha1.SandboxRunning
+			}
 			sandbox.Status.Conditions = []metav1.Condition{
 				{
 					Type:   string(agentsv1alpha1.SandboxConditionReady),

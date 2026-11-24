@@ -20,14 +20,15 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"k8s.io/client-go/rest"
 )
 
 const (
-	// DefaultMemberlistBindPort is the default port for memberlist gossip
-	DefaultMemberlistBindPort = 7946
+	// DefaultMemberlistBindPort 保留既有配置入口，默认值统一由 peers 定义。
+	DefaultMemberlistBindPort = peers.DefaultMemberlistBindPort
 	// DefaultTrafficAccessTokenValidity preserves the existing traffic-token
 	// lifetime while clients migrate to automatic refresh.
 	DefaultTrafficAccessTokenValidity = 100 * 365 * 24 * time.Hour

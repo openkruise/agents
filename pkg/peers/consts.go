@@ -7,4 +7,7 @@ const (
 	// controller publishes route refreshes but never serves them, so GetPeers
 	// excludes these members from every refresh target list.
 	NodePrefixSandboxController = "sc-"
+
+	// DefaultMemberlistBindPort is the default port for memberlist gossip.
+	DefaultMemberlistBindPort = 7946
 )

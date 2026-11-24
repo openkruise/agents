@@ -21,7 +21,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
-	"fmt"
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // #nosec -- intentional pprof endpoint for diagnostics
 	"os"
@@ -148,7 +147,7 @@ func main() {
 			"HTTPS capability on newly created sandboxes; empty disables both. Set it only after the sidecar "+
 			"injection template already serves HTTPS, since the capability annotation is write-once.")
 
-	flag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip; only used when SandboxRouteSync is enabled; non-positive values use 7946.")
+	flag.IntVar(&memberlistBindPort, "memberlist-bind-port", peers.DefaultMemberlistBindPort, "Port for memberlist gossip; only used when SandboxRouteSync is enabled; non-positive values use the default.")
 	flag.StringVar(&peerSelector, "peer-selector", "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", "Label selector of memberlist seed Pods in sandbox-system; only used when SandboxRouteSync is enabled; empty disables sync.")
 	flag.StringVar(&networkInterface, "network-interface", "eni1", "Network interface whose single global-unicast address (IPv4 preferred, IPv6 otherwise) binds and advertises controller memberlist; only used when SandboxRouteSync is enabled; empty uses POD_IP or the first non-loopback IPv4.")
 
@@ -204,32 +203,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	peerSelector = strings.TrimSpace(peerSelector)
 	var bindAddress string
 	if utilfeature.DefaultFeatureGate.Enabled(features.SandboxRouteSyncGate) && peerSelector != "" {
-		if memberlistBindPort <= 0 {
-			memberlistBindPort = 7946
-		}
-		if memberlistBindPort > 65535 {
-			setupLog.Error(fmt.Errorf("port %d is outside the range 1-65535", memberlistBindPort), "invalid --memberlist-bind-port")
+		if memberlistBindPort, err = peers.NormalizeBindPort(memberlistBindPort); err != nil {
+			setupLog.Error(err, "invalid --memberlist-bind-port")
 			os.Exit(1)
 		}
-		peerSecurity.PeerKeySecret, err = utils.ParseSecretRef(peerKeySecret)
-		if err != nil {
-			setupLog.Error(err, "invalid --peer-key-secret")
+		if peerSecurity, err = peersecurity.ParseInputs(peerKeySecret, peerTLSServerSecret, peerTLSClientSecret, ""); err != nil {
+			setupLog.Error(err, "invalid peer security flags")
 			os.Exit(1)
 		}
-		peerSecurity.TLSServerSecret, err = utils.ParseSecretRef(peerTLSServerSecret)
-		if err != nil {
-			setupLog.Error(err, "invalid --peer-tls-server-secret")
-			os.Exit(1)
-		}
-		peerSecurity.TLSClientSecret, err = utils.ParseSecretRef(peerTLSClientSecret)
-		if err != nil {
-			setupLog.Error(err, "invalid --peer-tls-client-secret")
-			os.Exit(1)
-		}
-		bindAddress, err = network.ResolveNetworkInterfaceAddress(networkInterface)
-		if err != nil {
+		if bindAddress, err = network.ResolveNetworkInterfaceAddress(networkInterface); err != nil {
 			setupLog.Error(err, "invalid --network-interface", "interface", networkInterface)
 			os.Exit(1)
 		}
@@ -366,7 +351,9 @@ func main() {
 		setupLog.Info("Pod informer cache label selector disabled, all Pods will be cached")
 	}
 
+	shutdownTimeout := 30 * time.Second
 	mgr, err := ctrl.NewManager(config, ctrl.Options{
+		GracefulShutdownTimeout: &shutdownTimeout,
 		Scheme:                  scheme,
 		Metrics:                 metricsServerOptions,
 		WebhookServer:           webhookServer,
@@ -414,7 +401,8 @@ func main() {
 		setupLog.Info("runtime client TLS disabled, using legacy plaintext runtime paths")
 	}
 
-	ctx := ctrl.SetupSignalHandler()
+	ctx, cancelRun := context.WithCancel(ctrl.SetupSignalHandler())
+	defer cancelRun()
 	deps := controller.Deps{MetricsCleanup: metricsGC, RuntimeTLSBundle: runtimeTLSBundle}
 	var peerManager *peers.MemberlistPeers
 	var peerOutbound *refresh.PeerOutbound
@@ -474,20 +462,28 @@ func main() {
 	}
 
 	// The shared Start launches discovery in the background on every replica, independently of leader election.
+	var peerStopDone chan error
 	if peerManager != nil {
 		if err := peerManager.Start(ctx, bindAddress, memberlistBindPort); err != nil {
 			peerOutbound.CloseIdleConnections()
 			setupLog.Error(err, "unable to start controller peers")
 			os.Exit(1)
 		}
+		peerStopDone = make(chan error, 1)
+		// 从同一停止信号开始等待，给 join 和清理完整的 manager shutdown 预算。
+		// 不在 mgr.Start 返回后重新计时，也不让独立的 15 秒限制提前结束等待。
+		context.AfterFunc(ctx, func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			peerStopDone <- peerManager.Stop(stopCtx)
+		})
 	}
 	setupLog.Info("starting manager")
 	err = mgr.Start(ctx)
-	// Clean up before any os.Exit, including when manager startup fails without canceling the signal context.
-	if peerManager != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), peers.DefaultLeaveTimeout+10*time.Second)
-		stopErr := peerManager.Stop(stopCtx)
-		cancel()
+	// manager 启动失败也取消 peers；Stop 仍只由上述回调调用一次。
+	cancelRun()
+	if peerStopDone != nil {
+		stopErr := <-peerStopDone
 		peerOutbound.CloseIdleConnections()
 		if stopErr != nil {
 			setupLog.Error(stopErr, "unable to stop controller peers")

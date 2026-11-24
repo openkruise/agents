@@ -104,7 +104,7 @@ func NewMemberlistPeers(apiReader ctrlclient.Reader, nodeName string, namespace,
 	return &MemberlistPeers{
 		apiReader:     apiReader,
 		sysNs:         namespace,
-		peerSelector:  peerSelector,
+		peerSelector:  strings.TrimSpace(peerSelector),
 		localName:     nodeName,
 		retryInterval: DefaultJoinRetryInterval,
 	}
@@ -118,6 +118,18 @@ func (m *MemberlistPeers) SetSecretKey(key []byte) {
 		return
 	}
 	m.secretKey = append([]byte(nil), key...)
+}
+
+// NormalizeBindPort returns DefaultMemberlistBindPort for a non-positive port
+// and rejects ports above the TCP port range.
+func NormalizeBindPort(port int) (int, error) {
+	if port <= 0 {
+		return DefaultMemberlistBindPort, nil
+	}
+	if port > 65535 {
+		return 0, fmt.Errorf("port %d is outside the range 1-65535", port)
+	}
+	return port, nil
 }
 
 // NewPeerNodeName returns HOSTNAME, then POD_NAME. When both are unset,
@@ -402,8 +414,7 @@ func (m *MemberlistPeers) Stop(ctx context.Context) error {
 	}
 }
 
-// GetPeers returns the current list of alive peers (excluding self and
-// sender-only members, which serve no route refreshes)
+// GetPeers 返回除自身外的所有存活成员；接收能力由发送方决定。
 func (m *MemberlistPeers) GetPeers() []Peer {
 	if !m.started.Load() {
 		return nil
@@ -411,7 +422,7 @@ func (m *MemberlistPeers) GetPeers() []Peer {
 
 	peers := make([]Peer, 0, len(m.list.Members()))
 	for _, member := range m.list.Members() {
-		if member.Name == m.localName || strings.HasPrefix(member.Name, NodePrefixSandboxController) {
+		if member.Name == m.localName {
 			continue
 		}
 		if member.State == memberlist.StateAlive {

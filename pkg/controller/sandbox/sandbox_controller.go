@@ -46,6 +46,7 @@ import (
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/pausedretention"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -683,6 +684,20 @@ func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.Ens
 	if recordTerminatingEvent {
 		r.recordSandboxTerminatingEvent(box)
 	}
+	if r.syncRouteWithPeers != nil {
+		// 使用已观察到的删除对象及其 RV；NotFound 没有版本凭据，不能伪造删除 fence。
+		route, err := sandboxroute.RouteFromSandbox(box)
+		if err == nil {
+			route.State = sandboxstate.Dead
+			route.Terminal = false
+			syncCtx, cancel := context.WithTimeout(ctx, controllerRouteSyncTimeout)
+			err = r.syncRouteWithPeers(syncCtx, route)
+			cancel()
+		}
+		if err != nil {
+			klog.FromContext(ctx).Error(err, "failed to sync terminating Sandbox route", "sandbox", klog.KObj(box))
+		}
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -744,15 +759,15 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus, statusAttrs...)
 
-	// The UID precondition keeps a same-name replacement from receiving this
-	// status or reporting its completion. Completion counting is best-effort
-	// under concurrent writers because the cached old status is not CAS-guarded.
-	// Explicitly serialize an empty PodIP so omitempty does not preserve the old address in a merge patch.
+	// 显式序列化 PodInfo 标量，避免 omitempty 在 merge patch 中保留已清空的值。
 	type podInfoPatch struct {
 		agentsv1alpha1.PodInfo
-		PodIP string `json:"podIP"`
+		PodIP    string    `json:"podIP"`
+		PodUID   types.UID `json:"podUID"`
+		NodeName string    `json:"nodeName"`
 	}
 	patchBytes, err := json.Marshal(map[string]interface{}{
+		// UID 前置条件防止误写同名替换对象；旧状态没有 CAS 保护，完成计数在并发写入时为尽力而为。
 		"metadata": map[string]interface{}{"uid": box.UID},
 		"status": struct {
 			agentsv1alpha1.SandboxStatus
@@ -762,7 +777,10 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 		}{
 			SandboxStatus: newStatus,
 			Conditions:    newStatus.Conditions,
-			PodInfo:       podInfoPatch{PodInfo: newStatus.PodInfo, PodIP: newStatus.PodInfo.PodIP},
+			PodInfo: podInfoPatch{
+				PodInfo: newStatus.PodInfo, PodIP: newStatus.PodInfo.PodIP,
+				PodUID: newStatus.PodInfo.PodUID, NodeName: newStatus.PodInfo.NodeName,
+			},
 		},
 	})
 	if err != nil {

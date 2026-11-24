@@ -109,14 +109,22 @@ new `Route.CanRouteTraffic()` values and IP addresses. A change to either
 triggers a route update to the receiving memberlist peers. Both projections
 use `sandboxroute.RouteFromSandbox`; the outgoing route carries the API server's
 returned UID, resourceVersion, and full route attributes, never the pre-write
-version. The status merge patch explicitly writes `podInfo.podIP`, including an
-empty string, so `omitempty` cannot preserve a stale address. Other PodInfo
-fields retain their existing serialization rules.
+version. The status merge patch explicitly writes the three PodInfo scalars
+`podIP`, `podUID`, and `nodeName`, including empty values, so `omitempty` cannot
+preserve stale Pod identity or address information. PodInfo labels and annotations
+retain their existing merge-patch serialization rules. The metadata UID
+precondition protects against same-name replacement objects; it is not an
+old-status CAS, so completion accounting remains best effort under concurrent
+status writers.
 
 - Synchronization is best-effort acceleration. Failed patches, NotFound, and
-  unchanged status do not send. Projection and delivery errors are logged without
-  rolling back status or retrying reconcile for that error. Manager and gateway
-  Sandbox informers still provide eventual convergence.
+  unchanged status do not send. After successful termination control, an observed
+  deleting CR also sends a versioned deletion route within a 200ms budget, even
+  when no Pod remains. NotFound has no version evidence and must not manufacture
+  a deletion fence. Repeated deleting observations may repeat the best-effort
+  push; receiver RV ordering makes them idempotent. Projection and delivery errors
+  are logged without rolling back status/finalizer work or retrying reconcile for
+  that error. Manager and gateway Sandbox informers still provide convergence.
 - Delivery runs before `recordSandboxLifecycleCompletions` and
   `recordSandboxMetrics`, so metric locks cannot delay dispatch. The local status
   is updated before invoking the sender; completion accounting retains the old
@@ -138,15 +146,18 @@ fields retain their existing serialization rules.
   conditions, and pool ownership still determine routability through the shared
   projection; an IP change is an independent trigger.
 - The controller joins memberlist as `sc-<node-name>` and participates in TCP/UDP
-  gossip, but does not serve `:7789/refresh`. Every member's `GetPeers()` excludes
-  the `sc-` prefix; `GetAllMembers()` retains these nodes for membership
-  inspection. The controller does not need the manager/gateway seed Pod labels.
+  gossip, but does not serve `:7789/refresh`. `GetPeers()` returns all live members
+  except self. The shared refresh sender filters the `sc-` prefix before counting
+  or fanout; `GetAllMembers()` remains the complete membership view. This keeps
+  application delivery policy out of the memberlist accessor. The controller
+  does not need the manager/gateway seed Pod labels.
 - The Alpha FeatureGate `SandboxRouteSync` is disabled by default. With the gate
   disabled, the controller does not resolve the interface or selector, create
   the peer client, or start the peer listener. `--peer-selector` defaults to
   `agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager`; a nonempty
-  selector alone cannot enable synchronization, and an explicit empty selector
-  disables it. Peer discovery uses the shared namespace `sandbox-system`.
+  selector alone cannot enable synchronization. Selectors are trimmed; an empty
+  or whitespace-only selector disables it. Peer discovery uses the shared
+  namespace `sandbox-system`.
   `--memberlist-bind-port` defaults to 7946; non-positive values use that default,
   and values above 65535 fail enabled startup. A disabled gate skips port
   validation. Custom ports also provide the seed port for Pods without a
@@ -162,9 +173,10 @@ fields retain their existing serialization rules.
   groups must still permit connectivity. Selector, interface, and port flags
   remain optional overrides and cannot individually enable synchronization.
   For ACK deployments using plaintext peers, these defaults allow adding only
-  `SandboxRouteSync=true` to existing `options.featureGate`, without editing
-  Deployment YAML. Encrypted or mTLS-enabled peers require matching explicit
-  security configuration. The gate is read through `--feature-gates` at process
+  `SandboxRouteSync=true` to existing `options.featureGate`, provided receiver
+  rollout, network access, and termination grace already satisfy the prerequisites.
+  Otherwise deployment changes are required. Encrypted or mTLS-enabled peers
+  require matching explicit security configuration. The gate is read through `--feature-gates` at process
   startup and cannot be changed live.
 - The controller uses the same peer path as manager/gateway: a separate
   controller-runtime client built from the process `rest.Config` is passed to
@@ -179,7 +191,7 @@ fields retain their existing serialization rules.
   `peersecurity.Load` once within the shared 30-second startup budget, installs
   the gossip key on the existing memberlist instance, and creates the outbound
   refresh client. No controller-specific inputs or loader, security retry loop,
-  or change to manager/gateway receive policy is introduced. All three
+  or change to manager/gateway receive TLS policy is introduced. All three
   controller flags default to empty strings:
   `--peer-key-secret`, `--peer-tls-server-secret`, and `--peer-tls-client-secret`.
   Empty references are valid. With all three empty, `Load` reads no Secrets,
@@ -237,7 +249,12 @@ fields retain their existing serialization rules.
   communicate. Unsent updates are not queued for replay; receiving informers
   provide eventual convergence. The process cancellation signal also cancels
   startup Secret reads. Shutdown cancels shared discovery, performs memberlist
-  Leave/Shutdown, and closes idle outbound connections.
+  Leave/Shutdown, and closes idle outbound connections. Controller entrypoint
+  starts its peer Stop wait from the same cancellation signal as manager shutdown,
+  using the same explicit 30-second budget, not a fresh 15-second wait after
+  `mgr.Start` returns. Startup failure also cancels the context. Stop expiration
+  never transfers cleanup ownership; completion before forced process exit is
+  not guaranteed for a join spanning multiple network deadlines.
 
 `SyncRouteWithPeers` and `PeerOutbound` move from `pkg/proxy` into the neutral
 `pkg/sandboxroute/refresh` package. Proxy keeps its instance wrapper;
@@ -247,6 +264,11 @@ callback only supplies its peer manager and initialized outbound client to
 API-layer nor sandbox-manager packages. Existing `sandbox_peers` and
 `sandbox_peer_outbound_tls_errors_total` move with the implementation; no new
 metric names are introduced, and the controller registers these existing metrics.
+The TLS counter is not an all-outbound-error counter: dial errors, HTTP rejection,
+retry exhaustion, cancellation, and deadlines are still returned by the shared
+sender and logged by the caller. Deterministic 4xx responses are not retried;
+5xx and transport failures retain bounded retries. Tests cover both TLS and
+non-TLS failures. No additional error collector is introduced.
 
 Shared initialization accepts an existing `peers.Peers` instance rather than
 creating another member owner or starting it. All three owners keep using
@@ -270,16 +292,58 @@ Controller does not start a receive listener.
 Neither `POD_NAME` nor `POD_IP` requires a new configuration entry. Dual-interface
 deployments use `eni1` by default; other interface names need an override. Allow
 bidirectional controller/peer TCP/UDP 7946 and controller-to-receiver TCP 7789.
-Update receivers' `sc-` filtering before enabling the gate: older receivers
-mistake the controller for a refresh target. `config/manager/manager.yaml`
-provides commented gate/override examples only; it does not enable the feature,
-add a controller refresh Service, or change probes.
+Upgrade all receivers before enabling the controller gate: older receivers
+mistake `sc-` nodes for refresh targets and interpret terminal Dead observations
+as deletions. `config/manager/manager.yaml` provides generic commented gate,
+override, environment, and gossip-port examples only; it does not enable the
+feature, add a controller refresh Service, or change probes. It retains its
+existing 10-second E2E termination grace while the gate is disabled; deployments
+that enable synchronization must allow the 30-second shutdown budget plus
+headroom (for example, a 40-second Pod termination grace). This manifest is not
+evidence of a production deployment's settings.
+
+The peer refresh payload adds two fields without changing existing fields:
+- `labels` is a cloned CR label snapshot for receiver admission, not authentication
+  evidence. A known empty label set serializes as `{}`; missing/null labels in
+  legacy payloads are unknown. Manager applies its `--sandbox-namespace` and
+  `--sandbox-label-selector` before both Upsert and Delete. A nonempty selector
+  conservatively ignores unknown-label payloads, including negative selectors;
+  the local informer remains authoritative. Excluded refreshes return 204 without
+  mutation or callback. Label changes that leave the receiver scope converge via
+  the filtered informer's deletion event rather than an out-of-scope peer push.
+- `terminal=true` marks Failed/Succeeded CR observations. When they project Dead,
+  refresh performs Upsert, preserving a non-running record in either peer-first
+  or informer-first arrival order. Addressless projections retain the existing
+  Creating compatibility state and remain non-routable. Actual manager deletion
+  and controller termination pushes clear this flag; legacy unmarked Dead and
+  empty-state payloads still mean Delete. Same-RV terminal replays cannot cross
+  an authoritative deletion fence.
+
+The Store clones labels on installation and reads so callers cannot mutate a
+stored snapshot. Older receivers ignore these new fields, so receiver-first
+rollout is mandatory; this is not mixed-version terminal-semantic compatibility.
+
+The current release deployment intentionally does not configure peer TLS: the
+controller's TLS Secret defaults remain empty, and every refresh receiver must
+also use plaintext HTTP. Existing optional TLS support is retained, but no new
+expected-transport parameter or runtime group-validation mechanism is added in
+this release.
+
+Transport agreement is a deployment prerequisite, not a property proved by local
+TLS-pair validation. No existing member metadata advertises refresh HTTP versus
+HTTPS. Future TLS enablement must align all senders and receivers on transport,
+trust, and client identity before rollout. A fail-closed check against a
+verifiable target-group contract is deferred to that work; this release does not
+claim to prevent accidentally mixed HTTP/HTTPS configurations. There is no
+automatic probing, protocol downgrade, or send-token-then-detect fallback.
 
 Retained controller status tests cover routability changes in both directions,
 Ready/IP/phase combinations, nonempty IP changes, unchanged routability,
 sending failures and deadlines, failed/NotFound patches, and returned
-resourceVersion. Shared peer tests cover node naming, sender-only member
-filtering, scoped discovery, and the non-blocking start/stop lifecycle. Shared
+resourceVersion. Shared peer tests cover node naming, complete live-member
+snapshots, selector normalization, scoped discovery, and the non-blocking
+start/stop lifecycle. Shared refresh tests cover sender-only target filtering,
+HTTP retries and cancellation, and real memberlist-to-handler delivery. Shared
 security tests cover empty inputs, canceled loading, Secret references, key
 validation, invalid/expired certificates, and independent-CA trust verification.
 Refresh tests cover common initialization's empty inputs, bounded Secret reads,
@@ -290,10 +354,20 @@ tests retain the builder's member instance and startup order; gateway tests
 check receive policy and publication of the same initialized member and outbound;
 proxy tests check that installing the client preserves its identity. Tests
 coupled to the removed controller wrapper are removed with that layer; they do
-not validate the new entrypoint wiring. This describes retained coverage, not a
-passing validation result: tests, builds, and lint were not run in this round,
-and the previous status test remains paused. Ordinary validation does not
-deploy a cluster or run E2E tests.
+not validate the new entrypoint wiring at runtime. Receiver tests additionally
+cover namespace/label admission and terminal peer-first/informer-first ordering;
+Store tests cover label snapshot isolation and deletion fences.
+
+Targeted validation passed on 2026-11-24 with `go test -mod=mod -p 1` for the
+changed route, refresh, proxy, peers, security, controller, manager, and gateway
+paths. Both controller and manager command packages compiled. The controller
+status regressions, including semantic time equality and PodInfo scalar clearing,
+and termination regressions passed. Relevant peer cleanup, concurrent Store,
+label snapshot, refresh retry/cancellation, and terminal-ordering tests also
+passed with `-race -count=3`. `gofmt` and `git diff --check` completed successfully.
+This is targeted validation, not a full-suite result or a runtime test of command
+entrypoint wiring. No cluster deployment, E2E tests, or separate lint/vet run was
+performed.
 
 ### Bounded peer listing
 
@@ -483,8 +557,9 @@ discovery intentionally stops its Kubernetes retry loop.
 
 The original Manager address design adds two optional CLI flags,
 `--network-interface` and `--disable-envoy-ext-proc`. The controller extension
-also adds the optional peer-security overrides described above. Neither changes
-CRDs, HTTP models, Secret schemas, or the memberlist wire protocol. Both
+also adds the optional peer-security overrides and the additive peer refresh
+`labels`/`terminal` fields described above. CRDs, public control-API models,
+Secret schemas, and the memberlist wire protocol remain unchanged. Both
 in-cluster configuration and `KUBECONFIG` continue to supply the sandbox-cluster
 Kubernetes client.
 

@@ -19,6 +19,7 @@ package refresh
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,7 +27,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/sandboxstate"
@@ -301,6 +305,55 @@ func TestHandler(t *testing.T) {
 				assert.Equal(t, "invalid route refresh payload\n", response.Body.String())
 			}
 		})
+	}
+}
+
+func TestTerminalRefreshOrdering(t *testing.T) {
+	for _, phase := range []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxFailed, agentsv1alpha1.SandboxSucceeded} {
+		for _, peerFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/peerFirst=%t", phase, peerFirst), func(t *testing.T) {
+				box := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "sandbox", UID: "uid", ResourceVersion: "2"},
+					Status:     agentsv1alpha1.SandboxStatus{Phase: phase, PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"}},
+				}
+				route, err := sandboxroute.RouteFromSandbox(box)
+				require.NoError(t, err)
+				require.True(t, route.Terminal)
+				require.Equal(t, sandboxstate.Dead, route.State)
+				store := sandboxroute.NewStore()
+				previous := route
+				previous.State, previous.Terminal, previous.ResourceVersion = sandboxstate.Running, false, "1"
+				store.Upsert(previous)
+				body, err := json.Marshal(route)
+				require.NoError(t, err)
+				deliver := func() {
+					response := httptest.NewRecorder()
+					NewHandler(store, nil).ServeHTTP(response, httptest.NewRequest(http.MethodPost, Path, bytes.NewReader(body)))
+					require.Equal(t, http.StatusNoContent, response.Code)
+				}
+				if peerFirst {
+					deliver()
+				}
+				store.Upsert(route)
+				if !peerFirst {
+					deliver()
+				}
+				got, ok := store.Get(route.ID)
+				require.True(t, ok, "a still-existing terminal CR must remain recorded")
+				assert.Equal(t, route, got)
+				assert.False(t, got.CanRouteTraffic())
+				deletion := route
+				deletion.Terminal = false
+				body, err = json.Marshal(deletion)
+				require.NoError(t, err)
+				deliver()
+				_, ok = store.Get(route.ID)
+				assert.False(t, ok, "an actual deletion still removes the terminal record")
+				store.Upsert(route)
+				_, ok = store.Get(route.ID)
+				assert.False(t, ok, "same-RV terminal replay cannot cross the deletion fence")
+			})
+		}
 	}
 }
 

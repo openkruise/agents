@@ -19,6 +19,7 @@ package sandboxroute
 import (
 	"errors"
 	"fmt"
+	"maps"
 
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/resourceversion"
@@ -43,6 +44,10 @@ type Route struct {
 	AccessToken        string    `json:"accessToken,omitempty"`
 	RequireTrafficAuth bool      `json:"requireTrafficAuth,omitempty"`
 	WakeOnTraffic      bool      `json:"wakeOnTraffic,omitempty"`
+	// Labels 是当前 CR 的标签快照，用于接收方的观察范围过滤；不作为身份认证依据。
+	Labels map[string]string `json:"labels"`
+	// Terminal 区分仍存在的终态 CR 和 legacy dead 删除标记。
+	Terminal bool `json:"terminal,omitempty"`
 }
 
 // CanRouteTraffic reports whether the sandbox is running and has a traffic address.
@@ -122,6 +127,11 @@ func RouteFromSandbox(sandbox *agentsv1alpha1.Sandbox) (Route, error) {
 		AccessToken:        utils.GetAccessToken(sandbox),
 		RequireTrafficAuth: identity.IsAccessTokenRequested(sandbox),
 		WakeOnTraffic:      utils.WakeOnIngressTrafficEnabled(sandbox),
+		Labels:             maps.Clone(sandbox.Labels),
+		Terminal:           sandbox.Status.Phase == agentsv1alpha1.SandboxFailed || sandbox.Status.Phase == agentsv1alpha1.SandboxSucceeded,
+	}
+	if route.Labels == nil {
+		route.Labels = map[string]string{}
 	}
 	if err := route.validate(); err != nil {
 		return Route{}, err

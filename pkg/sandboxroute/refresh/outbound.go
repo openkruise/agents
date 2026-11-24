@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,12 +102,6 @@ func NewPeerOutbound(clientTLS *tls.Config) *PeerOutbound {
 	}
 }
 
-// NewTestPeerOutbound builds a plaintext outbound peer client over the given
-// HTTP client. It exists for tests that must redirect the fixed refresh port.
-func NewTestPeerOutbound(client *http.Client) *PeerOutbound {
-	return &PeerOutbound{scheme: "http", client: client}
-}
-
 func newPeerHTTPClient(clientTLS *tls.Config) *http.Client {
 	transport := &http.Transport{
 		// Peer refreshes dial fixed IPs directly, never a proxy.
@@ -133,14 +128,6 @@ func newPeerHTTPClient(clientTLS *tls.Config) *http.Client {
 	}
 }
 
-// Scheme returns the URL scheme used for peer requests.
-func (o *PeerOutbound) Scheme() string {
-	if o == nil {
-		return ""
-	}
-	return o.scheme
-}
-
 // CloseIdleConnections drops idle outbound peer connections.
 func (o *PeerOutbound) CloseIdleConnections() {
 	if o == nil || o.client == nil {
@@ -163,6 +150,14 @@ func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route san
 // SyncRouteWithPeerList sends to the caller's snapshot, keeping target counts consistent.
 // An empty snapshot remains a no-op; the caller owns skip logging.
 func SyncRouteWithPeerList(ctx context.Context, peerList []peers.Peer, route sandboxroute.Route, outbound *PeerOutbound) error {
+	// controller 仅发送路由，不提供 /refresh；过滤使用独立快照，不修改调用方列表。
+	targets := make([]peers.Peer, 0, len(peerList))
+	for _, peer := range peerList {
+		if !strings.HasPrefix(peer.Name, peers.NodePrefixSandboxController) {
+			targets = append(targets, peer)
+		}
+	}
+	peerList = targets
 	body, err := json.Marshal(route) // #nosec G117 -- AccessToken is serialized for peer /refresh authentication sync, never logged; the peer owner configures transport security.
 	if err != nil {
 		return err

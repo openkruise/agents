@@ -69,6 +69,10 @@ func (p staticPeers) GetAllMembers() []peers.Peer              { return p }
 func (p staticPeers) LocalAddr() net.IP                        { return nil }
 func (p staticPeers) LocalPort() int                           { return 0 }
 
+func newTestPeerOutbound(client *http.Client) *PeerOutbound {
+	return &PeerOutbound{scheme: "http", client: client}
+}
+
 type errRoundTripper struct {
 	err  error
 	resp *http.Response
@@ -157,7 +161,7 @@ func TestInitializePeers(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, outbound)
 			defer outbound.CloseIdleConnections()
-			assert.Equal(t, "http", outbound.Scheme(), "gossip encryption does not imply refresh TLS")
+			assert.Equal(t, "http", outbound.scheme, "gossip encryption does not imply refresh TLS")
 			assert.Nil(t, serverTLS)
 			assert.Nil(t, peerManager.LocalAddr(), "membership stays unstarted")
 		})
@@ -223,14 +227,14 @@ func TestRequestPeerAddressAndTransport(t *testing.T) {
 
 	t.Run("plaintext disables proxy and redirects", func(t *testing.T) {
 		out := NewPeerOutbound(nil)
-		assert.Equal(t, "http", out.Scheme())
+		assert.Equal(t, "http", out.scheme)
 		transport, ok := out.client.Transport.(*http.Transport)
 		require.True(t, ok)
 		assert.Nil(t, transport.Proxy)
 		assert.ErrorIs(t, out.client.CheckRedirect(&http.Request{}, []*http.Request{{}}), errPeerRedirect)
 		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 		out = NewPeerOutbound(tlsConfig)
-		assert.Equal(t, "https", out.Scheme())
+		assert.Equal(t, "https", out.scheme)
 		transport, ok = out.client.Transport.(*http.Transport)
 		require.True(t, ok)
 		assert.Same(t, tlsConfig, transport.TLSClientConfig)
@@ -268,6 +272,16 @@ func TestSyncRouteWithPeers(t *testing.T) {
 			expectPeerCount: 0,
 		},
 		{
+			name:  "sender-only members need no outbound client",
+			peers: staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}},
+		},
+		{
+			name:            "mixed membership counts only refresh targets",
+			peers:           staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}, {Name: "sm-manager", IP: "127.0.0.2"}},
+			expectErr:       "peer outbound client is not configured",
+			expectPeerCount: 1,
+		},
+		{
 			name:            "peers without an outbound client fail",
 			peers:           threePeers,
 			expectErr:       "peer outbound client is not configured",
@@ -276,7 +290,7 @@ func TestSyncRouteWithPeers(t *testing.T) {
 		{
 			name:  "rejected peers are reported and still counted",
 			peers: threePeers,
-			outbound: NewTestPeerOutbound(&http.Client{Transport: errRoundTripper{resp: &http.Response{
+			outbound: newTestPeerOutbound(&http.Client{Transport: errRoundTripper{resp: &http.Response{
 				StatusCode: http.StatusForbidden,
 				Body:       io.NopCloser(strings.NewReader("")),
 			}}}),
@@ -296,7 +310,9 @@ func TestSyncRouteWithPeers(t *testing.T) {
 					if tt.peers != nil {
 						peerList = tt.peers.GetPeers()
 					}
+					before := append([]peers.Peer(nil), peerList...)
 					err = SyncRouteWithPeerList(t.Context(), peerList, route, tt.outbound)
+					assert.Equal(t, before, append([]peers.Peer(nil), peerList...), "snapshot must not be modified")
 				} else {
 					err = SyncRouteWithPeers(t.Context(), tt.peers, route, tt.outbound)
 				}
@@ -309,6 +325,131 @@ func TestSyncRouteWithPeers(t *testing.T) {
 			}
 		})
 	}
+}
+
+// 只重定向 TCP 拨号，保留公共构造器的 HTTP 策略与真实请求行为。
+func outboundForServers(t *testing.T, targets map[string]string) *PeerOutbound {
+	t.Helper()
+	out := NewPeerOutbound(nil)
+	transport := out.client.Transport.(*http.Transport)
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		target, ok := targets[address]
+		if !ok {
+			return nil, errors.New("no test target for " + address)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, target)
+	}
+	t.Cleanup(out.CloseIdleConnections)
+	return out
+}
+
+func TestSyncRouteDelivery(t *testing.T) {
+	tests := []struct {
+		name         string
+		ip           string
+		secondPeer   bool
+		failSecond   bool
+		status       int
+		failures     int32
+		canceled     bool
+		cancelDuring bool
+		wantErr      string
+		wantRequests int32
+	}{
+		{name: "two targets receive full route", ip: "127.0.0.1", secondPeer: true, wantRequests: 1},
+		{name: "IPv6 uses bracketed address", ip: "fd11:1111:1111::10", wantRequests: 1},
+		{name: "one failed target preserves other delivery", ip: "127.0.0.1", secondPeer: true, failSecond: true, wantErr: "no test target", wantRequests: 1},
+		{name: "4xx is not retried", ip: "127.0.0.1", status: http.StatusBadRequest, failures: 100, wantErr: "status code: 400", wantRequests: 1},
+		{name: "5xx retries until success", ip: "127.0.0.1", status: http.StatusInternalServerError, failures: 2, wantRequests: 3},
+		{name: "exhausted 5xx reports last error", ip: "127.0.0.1", status: http.StatusInternalServerError, failures: 100, wantErr: "status code: 500", wantRequests: int32(peerSyncRetrySteps)},
+		{name: "canceled context sends nothing", ip: "127.0.0.1", canceled: true, wantErr: "context canceled"},
+		{name: "cancellation during retry stops further attempts", ip: "127.0.0.1", status: http.StatusInternalServerError, failures: 100, cancelDuring: true, wantErr: "context canceled", wantRequests: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			route := *fullRoute("running", "1")
+			route.IP = "10.0.0.5"
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodPost, r.Method)
+				assert.Equal(t, Path, r.URL.Path)
+				var actual sandboxroute.Route
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&actual))
+				assert.Equal(t, route, actual)
+				if requests.Add(1) <= tt.failures {
+					if tt.cancelDuring {
+						cancel()
+					}
+					w.WriteHeader(tt.status)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			targets := map[string]string{net.JoinHostPort(tt.ip, strconv.Itoa(DefaultPort)): server.Listener.Addr().String()}
+			members := staticPeers{{Name: "sm-first", IP: tt.ip}, {Name: "sc-sender-only", IP: "invalid-controller-address"}}
+			var secondRequests atomic.Int32
+			if tt.secondPeer {
+				members = append(members, peers.Peer{Name: "sg-second", IP: "127.0.0.2"})
+				if !tt.failSecond {
+					second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						var actual sandboxroute.Route
+						assert.NoError(t, json.NewDecoder(r.Body).Decode(&actual))
+						assert.Equal(t, route, actual)
+						secondRequests.Add(1)
+						w.WriteHeader(http.StatusNoContent)
+					}))
+					defer second.Close()
+					targets["127.0.0.2:7789"] = second.Listener.Addr().String()
+				}
+			}
+			out := outboundForServers(t, targets)
+			if tt.canceled {
+				cancel()
+			}
+			err := SyncRouteWithPeers(ctx, members, route, out)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantErr)
+			}
+			if tt.canceled || tt.cancelDuring {
+				assert.ErrorIs(t, err, context.Canceled)
+			}
+			assert.Equal(t, tt.wantRequests, requests.Load())
+			if tt.secondPeer && !tt.failSecond {
+				assert.Equal(t, int32(1), secondRequests.Load())
+			}
+		})
+	}
+}
+
+func TestSyncRouteWithRealMemberlist(t *testing.T) {
+	reader := fake.NewClientBuilder().Build()
+	sender, port, err := peers.CreateTestPeer(t.Context(), reader, "sc-sender")
+	require.NoError(t, err)
+	require.NoError(t, sender.Start(t.Context(), "127.0.0.1", port))
+	t.Cleanup(func() { require.NoError(t, sender.Stop(context.Background())) })
+	cfg := memberlist.DefaultLANConfig()
+	cfg.Name, cfg.BindAddr, cfg.BindPort, cfg.LogOutput = "sm-receiver", "127.0.0.1", 0, io.Discard
+	receiver, err := memberlist.Create(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, receiver.Shutdown()) })
+	_, err = receiver.Join([]string{net.JoinHostPort(sender.LocalAddr().String(), strconv.Itoa(sender.LocalPort()))})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return len(sender.GetPeers()) == 1 }, time.Second, time.Millisecond)
+	store := sandboxroute.NewStore()
+	httpReceiver := httptest.NewServer(NewHandler(store, nil))
+	defer httpReceiver.Close()
+	out := outboundForServers(t, map[string]string{"127.0.0.1:7789": httpReceiver.Listener.Addr().String()})
+	route := *fullRoute("running", "1")
+	route.IP = "192.168.1.100"
+	require.NoError(t, SyncRouteWithPeers(t.Context(), sender, route, out))
+	got, ok := store.Get(route.ID)
+	require.True(t, ok)
+	assert.Equal(t, route, got)
 }
 
 func TestPeerOutboundMTLS(t *testing.T) {

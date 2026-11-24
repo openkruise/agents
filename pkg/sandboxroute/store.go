@@ -17,6 +17,7 @@ limitations under the License.
 package sandboxroute
 
 import (
+	"maps"
 	"sync"
 	"time"
 
@@ -112,6 +113,7 @@ func (s *Store) Upsert(route Route) MutationResult {
 		}
 	}
 
+	route.Labels = maps.Clone(route.Labels)
 	result := MutationResult{Result: EventResultApplied}
 	if s.installRouteLocked(key, route) {
 		result.Reason = ReasonIDTakeover
@@ -192,6 +194,7 @@ func (s *Store) Get(id string) (Route, bool) {
 	if !exists || record.ID != id {
 		return Route{}, false
 	}
+	record.Labels = maps.Clone(record.Labels)
 	return record, true
 }
 

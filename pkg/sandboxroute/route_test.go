@@ -282,6 +282,17 @@ func TestRouteFromSandboxDerivation(t *testing.T) {
 			assert.Equal(t, tt.expectToken, route.AccessToken)
 			assert.Equal(t, tt.expectAuth, route.RequireTrafficAuth)
 			assert.Equal(t, tt.expectWake, route.WakeOnTraffic)
+			assert.Equal(t, tt.sandbox.Status.Phase == agentsv1alpha1.SandboxFailed || tt.sandbox.Status.Phase == agentsv1alpha1.SandboxSucceeded, route.Terminal)
+			require.NotNil(t, route.Labels)
+			if tt.sandbox.Labels != nil {
+				assert.Equal(t, tt.sandbox.Labels, route.Labels)
+				route.Labels["test-only"] = "changed"
+				assert.NotContains(t, tt.sandbox.Labels, "test-only")
+			} else {
+				payload, err := json.Marshal(route)
+				require.NoError(t, err)
+				assert.Contains(t, string(payload), `"labels":{}`)
+			}
 		})
 	}
 }

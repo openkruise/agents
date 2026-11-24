@@ -141,6 +141,51 @@ func TestNewPeerNodeName(t *testing.T) {
 	}
 }
 
+func TestNormalizeBindPort(t *testing.T) {
+	tests := []struct {
+		name    string
+		port    int
+		want    int
+		wantErr bool
+	}{
+		{name: "negative uses default", port: -1, want: DefaultMemberlistBindPort},
+		{name: "zero uses default", port: 0, want: DefaultMemberlistBindPort},
+		{name: "min valid", port: 1, want: 1},
+		{name: "max valid", port: 65535, want: 65535},
+		{name: "too large", port: 65536, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeBindPort(tt.port)
+			if tt.wantErr {
+				assert.ErrorContains(t, err, "outside the range 1-65535")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestMemberlistPeersSelectorNormalization(t *testing.T) {
+	for _, selector := range []string{"", " \t\n", " app=peer "} {
+		t.Run(selector, func(t *testing.T) {
+			var lists atomic.Int32
+			reader := interceptList(func(context.Context, ctrlclient.ObjectList, ...ctrlclient.ListOption) error {
+				lists.Add(1)
+				return nil
+			})
+			peer := NewMemberlistPeers(reader, "test-node", Namespace, selector)
+			assert.Equal(t, strings.TrimSpace(selector), peer.peerSelector)
+			if strings.TrimSpace(selector) == "" {
+				assert.ErrorContains(t, peer.Start(t.Context(), "127.0.0.1", 0), "peer selector is empty")
+				assert.Zero(t, lists.Load(), "empty scope must fail before discovery")
+				assert.Nil(t, peer.LocalAddr())
+			}
+		})
+	}
+}
+
 // TestMemberlistPeers_Start_Stop tests basic start and stop functionality
 func TestMemberlistPeers_Start_Stop(t *testing.T) {
 	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
@@ -340,6 +385,7 @@ func TestMemberlistPeers_GetPeersFiltersMembers(t *testing.T) {
 	assert.Equal(t, []Peer{
 		{IP: "10.0.0.2", Name: NodePrefixSandboxManager + "a"},
 		{IP: "10.0.0.3", Name: NodePrefixSandboxGateway + "b"},
+		{IP: "10.0.0.4", Name: NodePrefixSandboxController + "c"},
 	}, peer.GetPeers())
 	assert.Len(t, peer.GetAllMembers(), 5)
 }
