@@ -28,6 +28,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
 	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
@@ -80,7 +81,7 @@ func TestCreateSandboxWithClaim_AccessToken(t *testing.T) {
 				route, err := sandboxroute.RouteFromSandbox(sbx)
 				require.NoError(t, err)
 				require.Equal(t, token, route.AccessToken)
-				require.Equal(t, agentsv1alpha1.SandboxStateRunning, route.State)
+				require.Equal(t, sandboxstate.Running, route.State)
 				if skipInit {
 					require.NotContains(t, sbx.Annotations, agentsv1alpha1.AnnotationInitRuntimeRequest)
 					require.Empty(t, initRequests)
