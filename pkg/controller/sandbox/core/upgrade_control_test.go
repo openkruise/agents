@@ -208,6 +208,7 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 		mockHookFunc    LifecycleHookFunc
 		expectErr       bool
 		expectPhase     agentsv1alpha1.SandboxPhase
+		expectReason    string
 		expectCondition map[string]metav1.ConditionStatus
 	}{
 		{
@@ -309,6 +310,26 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 				string(agentsv1alpha1.SandboxConditionReady):     metav1.ConditionFalse,
 				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
 			},
+		},
+		{
+			name: "Recreate PreUpgradeFailed retries the hook and advances to Checkpointing",
+			pod:  newRunningPod(),
+			box: newUpgradeTestSandbox(&agentsv1alpha1.SandboxLifecycle{
+				PreUpgrade: preUpgradeHook,
+			}, &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+				Conditions: []metav1.Condition{{
+					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed,
+					Message:            "preUpgrade hook failed",
+					LastTransitionTime: now,
+				}},
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "ok", "", nil),
+			expectPhase:  agentsv1alpha1.SandboxUpgrading,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonCheckpointing,
 		},
 		{
 			name: "delete pod after preUpgrade succeeded (Phase 2)",
@@ -459,6 +480,29 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 			},
 		},
 		{
+			name: "Recreate PostUpgradeFailed retries the hook and completes the upgrade",
+			pod:  newRunningPod(),
+			box: newUpgradeTestSandbox(&agentsv1alpha1.SandboxLifecycle{
+				PostUpgrade: postUpgradeHook,
+			}, &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+				Conditions: []metav1.Condition{{
+					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed,
+					Message:            "postUpgrade hook failed",
+					LastTransitionTime: now,
+				}},
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "ok", "", nil),
+			expectPhase:  agentsv1alpha1.SandboxRunning,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+			expectCondition: map[string]metav1.ConditionStatus{
+				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionTrue,
+			},
+		},
+		{
 			name: "postUpgrade succeeded with pod present transitions to Running",
 			pod:  newRunningPod(),
 			box:  newUpgradeTestSandbox(nil, nil),
@@ -541,7 +585,7 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 			},
 		},
 		{
-			name: "Recreate upgrade without lifecycle should still recreate pod",
+			name: "Recreate PreUpgrade selects Checkpointing without running an installer",
 			pod: func() *corev1.Pod {
 				p := newRunningPod()
 				p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old-revision"
@@ -557,7 +601,32 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 			mockHookFunc:    mockLifecycleHookFunc(0, "", "", nil),
 			expectErr:       false,
 			expectPhase:     agentsv1alpha1.SandboxUpgrading,
+			expectReason:    agentsv1alpha1.SandboxUpgradingReasonCheckpointing,
 			expectCondition: map[string]metav1.ConditionStatus{},
+		},
+		{
+			name: "Recreate Checkpointing skips installer and proceeds to UpgradePod",
+			pod: func() *corev1.Pod {
+				p := newRunningPod()
+				p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old-revision"
+				return p
+			}(),
+			box: newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
+				Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+			}),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase:          agentsv1alpha1.SandboxUpgrading,
+				UpdateRevision: "new-revision",
+				Conditions: []metav1.Condition{{
+					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxUpgradingReasonCheckpointing,
+					LastTransitionTime: now,
+				}},
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
+			expectPhase:  agentsv1alpha1.SandboxUpgrading,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
 		},
 		{
 			name: "old pod with mismatching revision should be deleted in phase 2",
@@ -687,6 +756,12 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 					t.Errorf("Expected condition %q status to be %q, got %q (reason: %s, message: %s)",
 						condType, expectedStatus, cond.Status, cond.Reason, cond.Message)
 				}
+			}
+
+			if tt.expectReason != "" {
+				cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				require.NotNil(t, cond)
+				assert.Equal(t, tt.expectReason, cond.Reason)
 			}
 
 			// For upgrade in-progress tests (pod nil with UpgradePod reason), verify Upgrading condition is preserved
@@ -2268,10 +2343,40 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			name:           "first injection creates the ephemeral container",
 			installer:      defaultInstaller(),
 			pod:            newInstallerRunningPod(),
+			expectTarget:   "sandbox",
 			lastTransition: now,
 			expectDone:     false,
 			expectPatches:  1,
 			expectReason:   agentsv1alpha1.SandboxUpgradingReasonInstalling,
+		},
+		{
+			name: "already injected pod is not injected twice",
+			pod: podWithEphemeral(
+				&corev1.EphemeralContainer{
+					EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")},
+					TargetContainerName:      "sandbox",
+				},
+				&corev1.ContainerStatus{
+					Name:  installerContainerName("ops-uid-1"),
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
+				}),
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonInstalling,
+		},
+		{
+			name:             "nil pod fails the install instead of panicking",
+			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+			expectMsgContain: "pod not found",
+		},
+		{
+			name: "terminating pod fails the install without injecting",
+			pod: func() *corev1.Pod {
+				pod := newInstallerRunningPod()
+				pod.DeletionTimestamp = &now
+				pod.Finalizers = []string{"e2e.test/keep-terminating-pod"}
+				return pod
+			}(),
+			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+			expectMsgContain: "terminating",
 		},
 		{
 			name: "explicit target container name resolves",
@@ -2580,7 +2685,10 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 				box.Spec.Template = nil
 				box.Spec.TemplateRef = &agentsv1alpha1.SandboxTemplateRef{Name: tt.templateRef}
 			}
-			objects := []client.Object{tt.pod.DeepCopy(), box.DeepCopy()}
+			objects := []client.Object{box.DeepCopy()}
+			if tt.pod != nil {
+				objects = append(objects, tt.pod.DeepCopy())
+			}
 			if tt.referencedTemplate != nil {
 				objects = append(objects, tt.referencedTemplate.DeepCopy())
 			}
@@ -2603,7 +2711,19 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 				var updated corev1.Pod
 				require.NoError(t, control.Get(t.Context(), client.ObjectKeyFromObject(tt.pod), &updated))
 				require.Len(t, updated.Spec.EphemeralContainers, 1)
-				assert.Equal(t, tt.expectTarget, updated.Spec.EphemeralContainers[0].TargetContainerName)
+				ec := updated.Spec.EphemeralContainers[0]
+				assert.Equal(t, installerContainerName("ops-uid-1"), ec.Name)
+				assert.Equal(t, installer.Image, ec.Image)
+				assert.Equal(t, tt.expectTarget, ec.TargetContainerName)
+				require.NotNil(t, ec.SecurityContext)
+				require.NotNil(t, ec.SecurityContext.Capabilities)
+				assert.Equal(t, []corev1.Capability{"SYS_PTRACE"}, ec.SecurityContext.Capabilities.Add)
+				envNames := map[string]string{}
+				for _, env := range ec.Env {
+					envNames[env.Name] = env.Value
+				}
+				assert.Equal(t, "/proc/1/root", envNames["SANDBOX_INSTALLER_TARGET_ROOT"])
+				assert.Equal(t, "ops-uid-1", envNames["SANDBOX_INSTALLER_PATCH_VERSION"])
 			}
 			if tt.expectReason != "" {
 				assert.Equal(t, tt.expectReason, upgradeCond.Reason)
@@ -2635,134 +2755,6 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 	}
 }
 
-func TestPerformInstallerUpgrade_SingleInjection(t *testing.T) {
-	installer := &agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"}
-
-	t.Run("already injected pod is not injected twice", func(t *testing.T) {
-		box := newInstallerTestSandbox(installer, "ops-uid-1")
-		ecName := installerContainerName("ops-uid-1")
-		pod := newInstallerRunningPod()
-		pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{
-			EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: ecName},
-			TargetContainerName:      "sandbox",
-		}}
-		pod.Status.EphemeralContainerStatuses = []corev1.ContainerStatus{{
-			Name:  ecName,
-			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
-		}}
-
-		control, patchCalls := newInstallerTestControl(t, nil, pod.DeepCopy(), box.DeepCopy())
-		newStatus := &agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxUpgrading,
-			Conditions: []metav1.Condition{{
-				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
-				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxUpgradingReasonInstalling,
-				LastTransitionTime: metav1.Now(),
-			}},
-		}
-		upgradeCond := &newStatus.Conditions[0]
-
-		done, err := control.performInstallerUpgrade(context.Background(),
-			EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}, upgradeCond)
-		assert.NoError(t, err)
-		assert.False(t, done)
-		assert.Equal(t, 0, *patchCalls)
-	})
-
-	t.Run("injected container carries the expected fields", func(t *testing.T) {
-		box := newInstallerTestSandbox(installer, "ops-uid-1")
-		pod := newInstallerRunningPod()
-
-		control, patchCalls := newInstallerTestControl(t, nil, pod.DeepCopy(), box.DeepCopy())
-		newStatus := &agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxUpgrading,
-			Conditions: []metav1.Condition{{
-				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
-				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxUpgradingReasonInstalling,
-				LastTransitionTime: metav1.Now(),
-			}},
-		}
-		upgradeCond := &newStatus.Conditions[0]
-
-		done, err := control.performInstallerUpgrade(context.Background(),
-			EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}, upgradeCond)
-		assert.NoError(t, err)
-		assert.False(t, done)
-		assert.Equal(t, 1, *patchCalls)
-
-		var updated corev1.Pod
-		err = control.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &updated)
-		assert.NoError(t, err)
-		require.Len(t, updated.Spec.EphemeralContainers, 1)
-		ec := updated.Spec.EphemeralContainers[0]
-		assert.Equal(t, installerContainerName("ops-uid-1"), ec.Name)
-		assert.Equal(t, "installer:1.4.0", ec.Image)
-		assert.Equal(t, "sandbox", ec.TargetContainerName)
-		assert.NotNil(t, ec.SecurityContext)
-		assert.Equal(t, []corev1.Capability{"SYS_PTRACE"}, ec.SecurityContext.Capabilities.Add)
-		envNames := map[string]string{}
-		for _, e := range ec.Env {
-			envNames[e.Name] = e.Value
-		}
-		assert.Equal(t, "/proc/1/root", envNames["SANDBOX_INSTALLER_TARGET_ROOT"])
-		assert.Equal(t, "ops-uid-1", envNames["SANDBOX_INSTALLER_PATCH_VERSION"])
-	})
-
-	t.Run("nil pod fails the install instead of panicking", func(t *testing.T) {
-		box := newInstallerTestSandbox(installer, "ops-uid-1")
-
-		control, patchCalls := newInstallerTestControl(t, nil, box.DeepCopy())
-		newStatus := &agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxUpgrading,
-			Conditions: []metav1.Condition{{
-				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
-				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxUpgradingReasonInstalling,
-				LastTransitionTime: metav1.Now(),
-			}},
-		}
-		upgradeCond := &newStatus.Conditions[0]
-
-		done, err := control.performInstallerUpgrade(context.Background(),
-			EnsureFuncArgs{Pod: nil, Box: box, NewStatus: newStatus}, upgradeCond)
-		assert.NoError(t, err)
-		assert.False(t, done)
-		assert.Equal(t, 0, *patchCalls)
-		assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonInstallingFailed, upgradeCond.Reason)
-		assert.Contains(t, upgradeCond.Message, "pod not found")
-	})
-
-	t.Run("terminating pod fails the install without injecting", func(t *testing.T) {
-		box := newInstallerTestSandbox(installer, "ops-uid-1")
-		pod := newInstallerRunningPod()
-		deletionTimestamp := metav1.Now()
-		pod.DeletionTimestamp = &deletionTimestamp
-		pod.Finalizers = []string{"e2e.test/keep-terminating-pod"}
-
-		control, patchCalls := newInstallerTestControl(t, nil, pod.DeepCopy(), box.DeepCopy())
-		newStatus := &agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxUpgrading,
-			Conditions: []metav1.Condition{{
-				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
-				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxUpgradingReasonInstalling,
-				LastTransitionTime: metav1.Now(),
-			}},
-		}
-		upgradeCond := &newStatus.Conditions[0]
-
-		done, err := control.performInstallerUpgrade(context.Background(),
-			EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}, upgradeCond)
-		assert.NoError(t, err)
-		assert.False(t, done)
-		assert.Equal(t, 0, *patchCalls)
-		assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonInstallingFailed, upgradeCond.Reason)
-		assert.Contains(t, upgradeCond.Message, "terminating")
-	})
-}
-
 func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {
 	now := metav1.Now()
 	installer := &agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"}
@@ -2780,19 +2772,37 @@ func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {
 		}
 	}
 
-	t.Run("ResumeSucceed proceeds to PreUpgrade without a template patch", func(t *testing.T) {
-		box := newInstallerTestSandbox(installer, "ops-uid-1")
-		box.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] = agentsv1alpha1.True
-		control, _ := newInstallerTestControl(t, nil, newInstallerRunningPod().DeepCopy(), box.DeepCopy())
-		newStatus := newStatusWithReason(agentsv1alpha1.SandboxUpgradingReasonResumeSucceed)
+	t.Run("ResumeSucceed waits for phase 2 before PreUpgrade", func(t *testing.T) {
+		for _, tt := range []struct {
+			name       string
+			firstEntry bool
+		}{
+			{name: "resumed through upgrade flow"},
+			{name: "user unpaused before upgrade flow", firstEntry: true},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				box := newInstallerTestSandbox(installer, "ops-uid-1")
+				box.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] = agentsv1alpha1.True
+				control, patchCalls := newInstallerTestControl(t, nil, newInstallerRunningPod().DeepCopy(), box.DeepCopy())
+				newStatus := newStatusWithReason(agentsv1alpha1.SandboxUpgradingReasonResumeSucceed)
+				if tt.firstEntry {
+					newStatus.Conditions = nil
+				}
+				args := EnsureFuncArgs{Pod: newInstallerRunningPod(), Box: box, NewStatus: newStatus}
+				require.NoError(t, control.EnsureSandboxUpgraded(t.Context(), args))
+				cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				require.NotNil(t, cond)
+				assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonResumeSucceed, cond.Reason)
+				assert.Zero(t, *patchCalls)
 
-		err := control.EnsureSandboxUpgraded(context.Background(), EnsureFuncArgs{
-			Pod: newInstallerRunningPod(), Box: box, NewStatus: newStatus,
-		})
-		assert.NoError(t, err)
-		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
-		require.NotNil(t, cond)
-		assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, cond.Reason)
+				delete(box.Annotations, agentsv1alpha1.AnnotationUpgradeResumeTrigger)
+				require.NoError(t, control.EnsureSandboxUpgraded(t.Context(), args))
+				cond = utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				require.NotNil(t, cond)
+				assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, cond.Reason)
+				assert.Zero(t, *patchCalls)
+			})
+		}
 	})
 
 	t.Run("ResumeSucceed abandons when the install already completed", func(t *testing.T) {

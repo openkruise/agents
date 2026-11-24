@@ -460,16 +460,8 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 				cond.Reason == agentsv1alpha1.SandboxUpgradingReasonInstallingFailed) {
 			return sandboxFailed
 		}
-		// Non-terminal: resume succeeded, waiting for phase 2 template patch.
-		// Reconcile applies the patch and removes the resume trigger annotation,
-		// which kicks off the actual pod-replacement upgrade.
-		// InstallerUpdate has no phase 2 — the sandbox controller advances from
-		// ResumeSucceed to PreUpgrade on its own — so such a sandbox is simply
-		// in progress.
+		// Phase 2 applies the template patch and consumes the resume trigger before either upgrade strategy proceeds.
 		if cond.Reason == agentsv1alpha1.SandboxUpgradingReasonResumeSucceed {
-			if isInstallerUpdateOps(ops) {
-				return sandboxUpdating
-			}
 			return sandboxResumeSucceed
 		}
 	}
@@ -489,9 +481,10 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	// resume trigger and the sandbox was un-paused (spec.Paused=false)
 	// before it reached ResumeSucceed, so the template patch was never
 	// applied. Treat it as resume-succeeded so Reconcile applies the
-	// pending template patch. InstallerUpdate has no phase-2 patch to apply,
-	// so it skips this heuristic and counts as in-progress.
-	if cond == nil && sbx.Status.Phase == agentsv1alpha1.SandboxRunning && !isInstallerUpdateOps(ops) {
+	// pending template patch. InstallerUpdate starts its own upgrade flow,
+	// but still needs phase 2 when the resume trigger has not been consumed.
+	if cond == nil && sbx.Status.Phase == agentsv1alpha1.SandboxRunning &&
+		(!isInstallerUpdateOps(ops) || sbx.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] == agentsv1alpha1.True) {
 		return sandboxResumeSucceed
 	}
 

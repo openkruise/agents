@@ -103,15 +103,16 @@ func isInstallerUpdateOps(ops *agentsv1alpha1.SandboxUpdateOps) bool {
 }
 
 // isSandboxOpsApplied reports whether the ops target and all declared hooks match the sandbox.
-// The InstallerUpdate target is this ops's completed patch version token rather than a template.
+// InstallerUpdate also requires this ops's completed patch version token.
 func isSandboxOpsApplied(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
 	if isInstallerUpdateOps(ops) {
 		if sbx.Status.CompletedPatchVersion != string(ops.UID) {
 			return false
 		}
-	} else if len(ops.Spec.Patch.Raw) == 0 {
+	}
+	if len(ops.Spec.Patch.Raw) == 0 {
 		// Legacy empty-patch ops require upgrade-state tracking rather than spec equality.
-		if !isPauseResumeOnly(ops) {
+		if !isInstallerUpdateOps(ops) && !isPauseResumeOnly(ops) {
 			return false
 		}
 	} else if !isSandboxTemplateMatchPatch(sbx, ops) {
@@ -146,6 +147,9 @@ func isSandboxOpsApplied(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.Sandbo
 // (e.g. "$patch": "delete") that would be lost if unmarshalled into a typed
 // Go struct first.
 func mergeTemplate(modified *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
+	if isInstallerUpdateOps(ops) && len(ops.Spec.Patch.Raw) > 0 && modified.Spec.Template == nil {
+		return fmt.Errorf("InstallerUpdate template patch requires an inline template")
+	}
 	merged, err := mergePodTemplate(modified.Spec.Template, ops.Spec.Patch.Raw)
 	if err != nil {
 		return err
@@ -193,6 +197,9 @@ func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1
 }
 
 func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
+	if isInstallerUpdateOps(ops) && len(ops.Spec.Patch.Raw) > 0 && sbx.Spec.Template == nil {
+		return fmt.Errorf("InstallerUpdate template patch requires an inline template")
+	}
 	modified := sbx.DeepCopy()
 	pauseResumeOnly := isPauseResumeOnly(ops)
 	upgrade := !pauseResumeOnly && (isInstallerUpdateOps(ops) || len(ops.Spec.Patch.Raw) == 0 ||
@@ -267,13 +274,8 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		return r.patchAndExpect(ctx, sbx, modified, "resume-trigger")
 	}
 
-	// Normal upgrade (Running): apply template patch. InstallerUpdate carries
-	// its payload in the installer image instead, so there is no template
-	// change to merge.
-	if !isInstallerUpdateOps(ops) {
-		if err := mergeTemplate(modified, ops); err != nil {
-			return err
-		}
+	if err := mergeTemplate(modified, ops); err != nil {
+		return err
 	}
 	return r.patchAndExpect(ctx, sbx, modified, "update")
 }

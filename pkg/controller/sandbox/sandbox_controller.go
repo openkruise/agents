@@ -462,6 +462,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		tracing.EndSpan(ctx, span, err)
 		if deadline := core.InstallerUpgradeDeadline(box, newStatus); !deadline.IsZero() {
 			requeueAfter = earlierRequeue(requeueAfter, max(time.Until(deadline), time.Millisecond))
+			if err != nil {
+				// Controller-runtime ignores RequeueAfter on errors, so schedule bounded retries explicitly.
+				klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box)).Error(err, "installer upgrade will retry before its deadline")
+				requeueAfter = earlierRequeue(requeueAfter, time.Second)
+				err = nil
+			}
 		}
 	case agentsv1alpha1.SandboxRecycling:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxRecycled)
@@ -472,18 +478,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 	if err != nil {
-		logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-		installerPending := !core.InstallerUpgradeDeadline(box, newStatus).IsZero()
 		if retErr := r.updateSandboxStatus(ctx, *newStatus, box); retErr != nil {
-			logger.Error(retErr, "failed to persist upgrade status on error")
-			if installerPending {
-				return reconcile.Result{}, retErr
-			}
-		}
-		if installerPending {
-			// Controller-runtime ignores RequeueAfter on errors, so schedule bounded retries explicitly.
-			logger.Error(err, "installer upgrade will retry before its deadline")
-			return reconcile.Result{RequeueAfter: earlierRequeue(requeueAfter, time.Second)}, nil
+			klog.FromContext(ctx).Error(retErr, "failed to persist upgrade status on error", "sandbox", klog.KObj(box))
 		}
 		return reconcile.Result{}, err
 	}

@@ -824,10 +824,7 @@ func TestClassifySandbox_InstallerUpdate(t *testing.T) {
 			expected: sandboxFailed,
 		},
 		{
-			// InstallerUpdate has no phase-2 template patch: ResumeSucceed is
-			// driven forward by the sandbox controller, so the ops just counts
-			// it as in progress instead of queueing a phase-2 patch.
-			name: "ops label + ResumeSucceed reason -> updating (no phase 2)",
+			name: "ops label + ResumeSucceed reason -> phase 2",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
 					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
@@ -839,11 +836,20 @@ func TestClassifySandbox_InstallerUpdate(t *testing.T) {
 					},
 				},
 			},
-			expected: sandboxUpdating,
+			expected: sandboxResumeSucceed,
 		},
 		{
-			// The "lost paused state" heuristic that routes to phase 2 must be
-			// skipped for installer ops: there is no template patch to apply.
+			name: "ops label + no condition + unpaused with trigger -> phase 2",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      map[string]string{agentsv1alpha1.LabelSandboxUpdateOps: opsName},
+					Annotations: map[string]string{agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True},
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+			},
+			expected: sandboxResumeSucceed,
+		},
+		{
 			name: "ops label + no condition + Running -> updating (no phase-2 heuristic)",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
@@ -2860,11 +2866,21 @@ func TestReconcile_UpgradeFailedLabelRemovedOnRecovery(t *testing.T) {
 func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 	action := &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"backup"}}}
 	tests := []struct {
-		name      string
-		patch     runtime.RawExtension
-		lifecycle *agentsv1alpha1.SandboxLifecycle
-		wantImage string
+		name        string
+		patch       runtime.RawExtension
+		lifecycle   *agentsv1alpha1.SandboxLifecycle
+		wantImage   string
+		installer   bool
+		wantVersion string
 	}{
+		{
+			name: "installer metadata patch",
+			patch: mustMarshalPatch(corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{"harness-version": "v2"}, Annotations: map[string]string{"harness-version": "v2"},
+			}}),
+			installer: true, wantImage: "busybox:1.0", wantVersion: "v2",
+		},
+		{name: "installer empty patch", installer: true, wantImage: "busybox:1.0"},
 		{name: "template patch", patch: mustMarshalPatch(corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}}}}), wantImage: "busybox:2.0"},
 		{name: "legacy nil lifecycle", wantImage: "busybox:1.0"},
 		{name: "legacy empty lifecycle", lifecycle: &agentsv1alpha1.SandboxLifecycle{}, wantImage: "busybox:1.0"},
@@ -2877,12 +2893,26 @@ func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 			ops.Finalizers = []string{finalizerName}
 			ops.Spec.Patch = tt.patch
 			ops.Spec.Lifecycle = tt.lifecycle.DeepCopy()
+			if tt.installer {
+				ops.UID = "current-ops-uid"
+				ops.Spec.UpdateStrategy.Type = agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate
+				ops.Spec.UpdateStrategy.Installer = &agentsv1alpha1.InstallerSpec{Image: "installer:v2"}
+			}
 			sbx := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxUpgrading, []metav1.Condition{
 				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonResumeSucceed, Status: metav1.ConditionFalse},
 			})
 			sbx.Spec.Lifecycle = tt.lifecycle.DeepCopy()
 			sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}
+			if tt.installer {
+				sbx.Spec.Paused = true
+				sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
+					Type:         agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate,
+					PatchVersion: string(ops.UID), Installer: ops.Spec.UpdateStrategy.Installer.DeepCopy(),
+				}
+				sbx.Status.UpgradingPatchVersion = string(ops.UID)
+			}
 			sbx.Annotations = map[string]string{agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True}
+			t.Cleanup(func() { ResourceVersionExpectations.Delete(sbx) })
 
 			r := newTestReconciler(ops, sbx)
 			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ops)}
@@ -2892,7 +2922,10 @@ func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 			updatedSbx := &agentsv1alpha1.Sandbox{}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updatedSbx))
 			assert.Equal(t, tt.wantImage, updatedSbx.Spec.Template.Spec.Containers[0].Image)
+			assert.Equal(t, tt.wantVersion, updatedSbx.Spec.Template.Labels["harness-version"])
+			assert.Equal(t, tt.wantVersion, updatedSbx.Spec.Template.Annotations["harness-version"])
 			assert.Empty(t, updatedSbx.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+			assert.Equal(t, sbx.Spec.Paused, updatedSbx.Spec.Paused)
 			assert.Equal(t, sbx.Spec.UpgradePolicy, updatedSbx.Spec.UpgradePolicy)
 			updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
 			require.NoError(t, r.Get(t.Context(), req.NamespacedName, updatedOps))

@@ -172,7 +172,7 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 			if agentsv1alpha1.IsPodIdentityLabel(k) {
 				continue
 			}
-			if pod.Labels[k] != v {
+			if current, exists := pod.Labels[k]; !exists || current != v {
 				labelsPatch[k] = v
 			}
 		}
@@ -209,7 +209,7 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 	// removes system-injected annotations (e.g., CNI status, in-place state).
 	if box.Spec.Template != nil {
 		for k, v := range box.Spec.Template.Annotations {
-			if pod.Annotations[k] != v {
+			if current, exists := pod.Annotations[k]; !exists || current != v {
 				annotationsPatch[k] = v
 			}
 		}

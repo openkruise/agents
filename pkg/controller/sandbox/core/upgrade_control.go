@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -100,6 +101,10 @@ func (r *UpgradeControl) recordUpgradeEvent(box *agentsv1alpha1.Sandbox, eventTy
 	r.recorder.Eventf(box, eventType, reason, messageFmt, args...)
 }
 
+func RequiresUpgrade(box *agentsv1alpha1.Sandbox) bool {
+	return RequiresPodReplacementUpgrade(box) || RequiresInstallerUpgrade(box)
+}
+
 // RequiresPodReplacementUpgrade returns true when the sandbox's upgrade policy
 // requires pod replacement (Recreate or CheckpointRestore). These policies enter
 // the full upgrade lifecycle (PreUpgrade → Checkpointing → UpgradePod → PostUpgrade).
@@ -139,6 +144,8 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		initialReason := agentsv1alpha1.SandboxUpgradingReasonPreUpgrade
 		if pausedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused)); pausedCond != nil {
 			initialReason = agentsv1alpha1.SandboxUpgradingReasonResuming
+		} else if isInstallerUpdate && box.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] == agentsv1alpha1.True {
+			initialReason = agentsv1alpha1.SandboxUpgradingReasonResumeSucceed
 		}
 		upgradeCond = &metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
@@ -148,16 +155,6 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		}
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
 		upgradeCond = utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
-	}
-
-	if isInstallerUpdate && upgradeCond.Status == metav1.ConditionFalse {
-		switch upgradeCond.Reason {
-		case agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed,
-			agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
-			agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed:
-			// A timed-out installer can exit successfully later without making the failed attempt safe to accept.
-			return nil
-		}
 	}
 
 	switch upgradeCond.Reason {
@@ -194,11 +191,12 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 	// never received the template patch. With no ops to drive phase 2,
 	// staying in ResumeSucceed would block forever.
 	case agentsv1alpha1.SandboxUpgradingReasonResumeSucceed:
-		// InstallerUpdate has no phase-2 template patch to wait for: the full
-		// policy was written before the resume started. Abandon only when the
-		// install for the current patch version already completed; otherwise
-		// proceed straight to PreUpgrade.
 		if isInstallerUpdate {
+			// An empty metadata patch still needs phase 2 to consume the resume trigger before re-pausing.
+			if box.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] == agentsv1alpha1.True {
+				logger.Info("Waiting for metadata template patch after resume")
+				return nil
+			}
 			if box.Spec.UpgradePolicy.PatchVersion == box.Status.CompletedPatchVersion {
 				logger.Info("Install already completed, abandoning upgrade after resume")
 				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
@@ -220,37 +218,14 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		}
 		logger.Info("Waiting for template patch after resume")
 		return nil
-	case agentsv1alpha1.SandboxUpgradingReasonInstalling:
-		// The installer container performs the file mutation; every non-zero
-		// outcome is terminal for this patch version. Re-evaluation is
-		// idempotent: once injected, the container name is a deterministic
-		// function of the patch version, so no second container is ever added.
-		done, err := r.performInstallerUpgrade(ctx, args, upgradeCond)
-		if err != nil {
-			logger.Error(err, "Installing step failed")
-			return err
-		}
-		if !done {
-			return nil // install in progress or failed
-		}
-
-		logger.Info("Installing step completed, transitioning to PostUpgrade")
-
-		// Record completion so the same patch version is never re-run and the
-		// upgrade trigger does not re-fire before SandboxUpdateOps clears the policy.
-		newStatus.CompletedPatchVersion = box.Spec.UpgradePolicy.PatchVersion
-		upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPostUpgrade
-		upgradeCond.Message = ""
-		utils.SetSandboxCondition(newStatus, *upgradeCond)
-		return nil
 	case agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed:
+		if isInstallerUpdate && upgradeCond.Status == metav1.ConditionFalse &&
+			upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed {
+			return nil
+		}
 		// Execute preUpgrade if configured
 		if hasUpgradeAction(box, true) {
-			var action *agentsv1alpha1.UpgradeAction
-			if box.Spec.Lifecycle != nil {
-				action = box.Spec.Lifecycle.PreUpgrade
-			}
-			result := r.executeUpgradeAction(ctx, pod, box, action)
+			result := r.executeUpgradeAction(ctx, pod, box, box.Spec.Lifecycle.PreUpgrade)
 			logger.Info("preUpgrade result", "succeeded", result.Succeeded, "message", result.Message)
 			if !result.Succeeded {
 				// Record preUpgrade action failed
@@ -282,7 +257,34 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonCheckpointing
 		upgradeCond.Message = ""
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
-		fallthrough
+		return nil
+	case agentsv1alpha1.SandboxUpgradingReasonInstalling, agentsv1alpha1.SandboxUpgradingReasonInstallingFailed:
+		// A timed-out installer can exit successfully later without making the failed attempt safe to accept.
+		if upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonInstallingFailed {
+			return nil
+		}
+		// The installer container performs the file mutation; every non-zero
+		// outcome is terminal for this patch version. Re-evaluation is
+		// idempotent: once injected, the container name is a deterministic
+		// function of the patch version, so no second container is ever added.
+		done, err := r.performInstallerUpgrade(ctx, args, upgradeCond)
+		if err != nil {
+			logger.Error(err, "Installing step failed")
+			return err
+		}
+		if !done {
+			return nil // install in progress or failed
+		}
+
+		logger.Info("Installing step completed, transitioning to PostUpgrade")
+
+		// Record completion so the same patch version is never re-run and the
+		// upgrade trigger does not re-fire before SandboxUpdateOps clears the policy.
+		newStatus.CompletedPatchVersion = box.Spec.UpgradePolicy.PatchVersion
+		upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPostUpgrade
+		upgradeCond.Message = ""
+		utils.SetSandboxCondition(newStatus, *upgradeCond)
+		return nil
 	case agentsv1alpha1.SandboxUpgradingReasonCheckpointing, agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed:
 		checkpointDone, cpName, err := r.checkpointControl.EnsureCheckpointForUpgrade(ctx, box)
 		if err != nil {
@@ -331,17 +333,17 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
 		fallthrough
 	case agentsv1alpha1.SandboxUpgradingReasonPostUpgrade, agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed:
+		if isInstallerUpdate && upgradeCond.Status == metav1.ConditionFalse &&
+			upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed {
+			return nil
+		}
 		// Execute postUpgrade if configured
 		if hasUpgradeAction(box, false) {
-			var action *agentsv1alpha1.UpgradeAction
-			if box.Spec.Lifecycle != nil {
-				action = box.Spec.Lifecycle.PostUpgrade
-			}
 			// Use a copy of box with the latest status so that GetRuntimeURL
 			// resolves the correct PodIP for the PostUpgrade hook.
 			boxForHook := box.DeepCopy()
 			boxForHook.Status = *newStatus
-			result := r.executeUpgradeAction(ctx, pod, boxForHook, action)
+			result := r.executeUpgradeAction(ctx, pod, boxForHook, box.Spec.Lifecycle.PostUpgrade)
 			logger.Info("postUpgrade result", "succeeded", result.Succeeded, "message", result.Message)
 			if !result.Succeeded {
 				// Record postUpgrade action failed
@@ -583,10 +585,7 @@ func InstallerUpgradeDeadline(box *agentsv1alpha1.Sandbox, status *agentsv1alpha
 		cond.Status != metav1.ConditionFalse || cond.LastTransitionTime.IsZero() {
 		return time.Time{}
 	}
-	timeoutSeconds := int32(defaultInstallerTimeoutSeconds)
-	if policy.Installer.TimeoutSeconds != nil {
-		timeoutSeconds = *policy.Installer.TimeoutSeconds
-	}
+	timeoutSeconds := ptr.Deref(policy.Installer.TimeoutSeconds, int32(defaultInstallerTimeoutSeconds))
 	return cond.LastTransitionTime.Add(time.Duration(timeoutSeconds) * time.Second)
 }
 
@@ -647,11 +646,12 @@ func (r *UpgradeControl) performInstallerUpgrade(ctx context.Context, args Ensur
 	// Step 1: resolve the target container. The selector may match sandboxes
 	// that did not exist at admission time, so this is resolved here rather
 	// than in the webhook.
+	deadline := InstallerUpgradeDeadline(box, newStatus)
 	targetName := installer.TargetContainerName
 	if targetName == "" {
 		template, err := utils.GetTemplateSpec(ctx, r.Client, box.Namespace, &box.Spec.EmbeddedSandboxTemplate)
 		if err != nil {
-			if deadline := InstallerUpgradeDeadline(box, newStatus); !deadline.IsZero() && !time.Now().Before(deadline) {
+			if !deadline.IsZero() && !time.Now().Before(deadline) {
 				r.setInstallingFailed(upgradeCond, newStatus, box, fmt.Sprintf(
 					"failed to resolve sandbox template before the install deadline: %v", err))
 				return false, nil
@@ -692,11 +692,7 @@ func (r *UpgradeControl) performInstallerUpgrade(ctx context.Context, args Ensur
 		return false, nil
 	}
 
-	timeoutSeconds := int32(defaultInstallerTimeoutSeconds)
-	if installer.TimeoutSeconds != nil {
-		timeoutSeconds = *installer.TimeoutSeconds
-	}
-	deadline := InstallerUpgradeDeadline(box, newStatus)
+	timeoutSeconds := ptr.Deref(installer.TimeoutSeconds, int32(defaultInstallerTimeoutSeconds))
 	ecName := installerContainerName(policy.PatchVersion)
 	for i := range pod.Spec.EphemeralContainers {
 		if pod.Spec.EphemeralContainers[i].Name == ecName {

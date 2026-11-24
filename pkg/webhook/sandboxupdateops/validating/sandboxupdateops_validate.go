@@ -17,6 +17,7 @@ limitations under the License.
 package validating
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -132,8 +133,7 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 	return admission.Allowed("")
 }
 
-// validateUpdateStrategy validates the installer configuration and the
-// no-image-change rule shared by the writable-layer-preserving strategies.
+// validateUpdateStrategy validates the installer configuration and strategy-specific patch restrictions.
 func (h *SandboxUpdateOpsValidatingHandler) validateUpdateStrategy(obj *agentsv1alpha1.SandboxUpdateOps, specPath *field.Path) field.ErrorList {
 	var errList field.ErrorList
 	strategy := obj.Spec.UpdateStrategy
@@ -149,19 +149,68 @@ func (h *SandboxUpdateOpsValidatingHandler) validateUpdateStrategy(obj *agentsv1
 		errList = append(errList, field.Forbidden(strategyPath.Child("installer"), "installer is only allowed when updateStrategy.type is InstallerUpdate"))
 	}
 
-	// CheckpointRestore and InstallerUpdate both preserve the writable layer;
-	// changing an image would invalidate the checkpoint or destroy the layer the
-	// install writes into.
 	if (strategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore ||
 		strategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate) && len(obj.Spec.Patch.Raw) > 0 {
 		patchTmpl := &corev1.PodTemplateSpec{}
 		if err := json.Unmarshal(obj.Spec.Patch.Raw, patchTmpl); err != nil {
 			errList = append(errList, field.Invalid(specPath.Child("patch"), obj.Spec.Patch, "failed to parse patch as PodTemplateSpec: "+err.Error()))
+		} else if strategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate {
+			errList = append(errList, validateInstallerTemplatePatch(obj.Spec.Patch.Raw, specPath.Child("patch"))...)
 		} else if msg := validateNoImageChange(patchTmpl, strategy.Type); msg != "" {
 			errList = append(errList, field.Forbidden(specPath.Child("patch"), msg))
 		}
 	}
 
+	return errList
+}
+
+func validateInstallerTemplatePatch(raw []byte, path *field.Path) field.ErrorList {
+	var patch map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &patch); err != nil {
+		return field.ErrorList{field.Invalid(path, string(raw), "failed to parse metadata-only template patch: "+err.Error())}
+	}
+	if patch == nil {
+		return field.ErrorList{field.Invalid(path, string(raw), "template patch must be an object")}
+	}
+	var errList field.ErrorList
+	for key, fields := range patch {
+		if key == "metadata" {
+			if fields == nil {
+				errList = append(errList, field.Forbidden(path.Child(key), "InstallerUpdate does not support metadata deletion or replacement"))
+				continue
+			}
+			for name, value := range fields {
+				if name == "creationTimestamp" && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+					continue
+				}
+				if name != "labels" && name != "annotations" {
+					errList = append(errList, field.Forbidden(path.Child(key, name), "InstallerUpdate only supports template labels and annotations"))
+					continue
+				}
+				var entries map[string]*string
+				if err := json.Unmarshal(value, &entries); err != nil {
+					errList = append(errList, field.Invalid(path.Child(key, name), string(value), err.Error()))
+					continue
+				}
+				// Pod metadata synchronization is additive and cannot apply template removals.
+				if entries == nil {
+					errList = append(errList, field.Forbidden(path.Child(key, name), "InstallerUpdate does not support metadata deletion or replacement"))
+				}
+				for entry, entryValue := range entries {
+					if entryValue == nil || strings.HasPrefix(entry, "$") {
+						errList = append(errList, field.Forbidden(path.Child(key, name).Key(entry), "InstallerUpdate does not support metadata deletion or replacement"))
+					}
+				}
+			}
+			continue
+		}
+		// A marshaled metadata-only PodTemplateSpec carries an empty spec with containers:null.
+		if key == "spec" && fields != nil && (len(fields) == 0 ||
+			(len(fields) == 1 && bytes.Equal(bytes.TrimSpace(fields["containers"]), []byte("null")))) {
+			continue
+		}
+		errList = append(errList, field.Forbidden(path.Child(key), "InstallerUpdate only supports metadata-only template patches"))
+	}
 	return errList
 }
 

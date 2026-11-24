@@ -4821,6 +4821,16 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 		Status: metav1.ConditionTrue,
 	}}
 
+	completedBox := newInstallerBox("v1", "v1")
+	completedBox.Spec.Paused = true
+	completedBox.Spec.Template.Labels = map[string]string{"harness-version": "v1"}
+	completedBox.Status.Conditions = []metav1.Condition{{
+		Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionTrue,
+		Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+	}}
+	cleanedUpBox := completedBox.DeepCopy()
+	cleanedUpBox.Spec.UpgradePolicy = nil
+
 	tests := []struct {
 		name                     string
 		box                      *agentsv1alpha1.Sandbox
@@ -4828,7 +4838,18 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 		expectCondGone           bool
 		expectedUpgradingVersion string
 		expectedShouldRequeue    bool
+		expectPauseStable        bool
 	}{
+		{
+			name: "completed metadata upgrade pauses without restarting upgrade",
+			box:  completedBox, expectedPhase: agentsv1alpha1.SandboxPaused,
+			expectedUpgradingVersion: "v1", expectPauseStable: true,
+		},
+		{
+			name: "completed metadata upgrade remains paused after policy cleanup",
+			box:  cleanedUpBox, expectedPhase: agentsv1alpha1.SandboxPaused,
+			expectedUpgradingVersion: "v1", expectPauseStable: true,
+		},
 		{
 			name:                     "pending patch version triggers Upgrading",
 			box:                      newInstallerBox("v1", ""),
@@ -4901,6 +4922,19 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 			upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 			if tt.expectCondGone {
 				assert.Nil(t, upgradeCond, "Upgrading condition must be removed on a fresh installer trigger")
+			} else if tt.expectPauseStable {
+				require.NotNil(t, upgradeCond)
+				assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonSucceeded, upgradeCond.Reason)
+				utils.SetSandboxCondition(newStatus, metav1.Condition{
+					Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue,
+				})
+				args.NewStatus = newStatus
+				newStatus, shouldRequeue = reconciler.calculateStatus(t.Context(), args)
+				assert.Equal(t, agentsv1alpha1.SandboxPaused, newStatus.Phase)
+				assert.False(t, shouldRequeue)
+				upgradeCond = utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				require.NotNil(t, upgradeCond)
+				assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonSucceeded, upgradeCond.Reason)
 			} else if upgradeCond != nil {
 				assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonInstallingFailed, upgradeCond.Reason)
 			}
@@ -6375,6 +6409,7 @@ func TestReconcile_InstallerUpdateDeadline(t *testing.T) {
 			name:           "status persistence errors are not swallowed",
 			injectionError: apierrors.NewConflict(corev1.Resource("pods"), "sandbox", fmt.Errorf("object was modified")),
 			statusError:    apierrors.NewInternalError(fmt.Errorf("status write failed")),
+			wantDelay:      time.Second,
 			wantPatches:    1,
 		},
 	}
@@ -6470,7 +6505,7 @@ func TestReconcile_InstallerUpdateDeadline(t *testing.T) {
 			assert.Equal(t, tt.wantPatches, patchCalls)
 			if tt.statusError != nil {
 				require.ErrorIs(t, err, tt.statusError)
-				assert.Equal(t, time.Duration(0), result.RequeueAfter)
+				assert.Equal(t, tt.wantDelay, result.RequeueAfter)
 				return
 			}
 			require.NoError(t, err)
@@ -6496,6 +6531,9 @@ func TestReconcile_InstallerUpdateDeadline(t *testing.T) {
 			if tt.wantReason == agentsv1alpha1.SandboxUpgradingReasonPostUpgrade {
 				assert.Equal(t, "ops-uid-1", updated.Status.CompletedPatchVersion)
 			}
+			readyCond := utils.GetSandboxCondition(&updated.Status, string(agentsv1alpha1.SandboxConditionReady))
+			require.NotNil(t, readyCond)
+			assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
 		})
 	}
 }

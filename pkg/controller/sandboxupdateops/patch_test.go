@@ -1192,11 +1192,10 @@ func newInstallerOpsAndSandbox() (*agentsv1alpha1.SandboxUpdateOps, *agentsv1alp
 					Command:             []string{"/install.sh"},
 				},
 			},
-			// A patch present on an installer ops must be ignored for the
-			// template: the payload lives in the installer image.
 			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "main", Image: "nginx:9.9"}},
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      map[string]string{"harness-version": "v2"},
+					Annotations: map[string]string{"harness-version": "v2"},
 				},
 			}),
 		},
@@ -1210,6 +1209,10 @@ func newInstallerOpsAndSandbox() (*agentsv1alpha1.SandboxUpdateOps, *agentsv1alp
 		Spec: agentsv1alpha1.SandboxSpec{
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels:      map[string]string{"harness-version": "v1", "app": "test"},
+						Annotations: map[string]string{"harness-version": "v1", "keep": "value"},
+					},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "main", Image: "nginx:1.0"}},
 					},
@@ -1223,22 +1226,41 @@ func newInstallerOpsAndSandbox() (*agentsv1alpha1.SandboxUpdateOps, *agentsv1alp
 func TestApplySandboxPatch_InstallerUpdate(t *testing.T) {
 	prePause := &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}
 	tests := []struct {
-		name   string
-		mutate func(*agentsv1alpha1.SandboxUpdateOps)
+		name        string
+		mutate      func(*agentsv1alpha1.SandboxUpdateOps)
+		paused      bool
+		templateRef bool
+		wantVersion string
 	}{
-		{name: "patch is ignored"},
+		{name: "TemplateRef patch rejected before claiming", templateRef: true},
+		{name: "paused TemplateRef patch rejected before waking", templateRef: true, paused: true},
+		{name: "metadata patch applied", wantVersion: "v2"},
+		{name: "paused metadata patch deferred until resume", paused: true, wantVersion: "v2"},
 		{
-			name: "pause and resume hooks alone still upgrade",
+			name:        "paused empty patch still consumes resume trigger",
+			paused:      true,
+			wantVersion: "v1",
+			mutate: func(ops *agentsv1alpha1.SandboxUpdateOps) {
+				ops.Spec.Patch.Raw = nil
+			},
+		},
+		{
+			name:        "pause and resume hooks alone still upgrade",
+			wantVersion: "v1",
 			mutate: func(ops *agentsv1alpha1.SandboxUpdateOps) {
 				ops.Spec.Patch.Raw = nil
 				ops.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{PrePause: prePause}
 			},
 		},
 		{
-			name: "matching template still upgrades",
+			name:        "matching metadata still upgrades",
+			wantVersion: "v1",
 			mutate: func(ops *agentsv1alpha1.SandboxUpdateOps) {
 				ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:1.0"}}},
+					ObjectMeta: metav1.ObjectMeta{
+						Labels:      map[string]string{"harness-version": "v1"},
+						Annotations: map[string]string{"harness-version": "v1"},
+					},
 				})
 				ops.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{PrePause: prePause}
 			},
@@ -1250,11 +1272,42 @@ func TestApplySandboxPatch_InstallerUpdate(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(ops)
 			}
+			if tt.paused {
+				sbx.Status.Phase = agentsv1alpha1.SandboxPaused
+				sbx.Spec.Paused = true
+			}
+			if tt.templateRef {
+				sbx.Spec.Template = nil
+				sbx.Spec.TemplateRef = &agentsv1alpha1.SandboxTemplateRef{Name: "shared-template"}
+			}
+			t.Cleanup(func() { ResourceVersionExpectations.Delete(sbx) })
 			r := newTestReconciler(sbx)
-			require.NoError(t, r.applySandboxPatch(context.Background(), sbx, ops))
+			if tt.templateRef {
+				err := r.applySandboxPatch(t.Context(), sbx, ops)
+				require.ErrorContains(t, err, "requires an inline template")
+				updated := &agentsv1alpha1.Sandbox{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+				assert.Equal(t, sbx.Spec, updated.Spec)
+				assert.Equal(t, sbx.Labels, updated.Labels)
+				assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+				require.ErrorContains(t, r.applyTemplatePatch(t.Context(), sbx, ops), "requires an inline template")
+				return
+			}
+			require.NoError(t, r.applySandboxPatch(t.Context(), sbx, ops))
 
 			updated := &agentsv1alpha1.Sandbox{}
-			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated))
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+			if tt.paused {
+				assert.Equal(t, sbx.Spec.Template, updated.Spec.Template)
+				assert.Equal(t, agentsv1alpha1.True, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+				require.NoError(t, r.applyTemplatePatch(t.Context(), updated, ops))
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+			}
+			assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+			assert.Equal(t, tt.wantVersion, updated.Spec.Template.Labels["harness-version"])
+			assert.Equal(t, tt.wantVersion, updated.Spec.Template.Annotations["harness-version"])
+			assert.Equal(t, "test", updated.Spec.Template.Labels["app"])
+			assert.Equal(t, "value", updated.Spec.Template.Annotations["keep"])
 
 			require.NotNil(t, updated.Spec.UpgradePolicy)
 			assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate, updated.Spec.UpgradePolicy.Type)
@@ -1262,28 +1315,14 @@ func TestApplySandboxPatch_InstallerUpdate(t *testing.T) {
 			require.NotNil(t, updated.Spec.UpgradePolicy.Installer)
 			assert.Equal(t, "installer:1.4.0", updated.Spec.UpgradePolicy.Installer.Image)
 			assert.Equal(t, "main", updated.Spec.UpgradePolicy.Installer.TargetContainerName)
-			// Template untouched: no merge for installer ops even with a patch set.
-			assert.Equal(t, "nginx:1.0", updated.Spec.Template.Spec.Containers[0].Image)
+			assert.Equal(t, sbx.Spec.Template.Spec, updated.Spec.Template.Spec)
 			assert.Equal(t, "ops-installer", updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
 			assert.Equal(t, ops.Spec.Lifecycle, updated.Spec.Lifecycle)
+			// Mutating the persisted copy must not alias back into the ops spec.
+			updated.Spec.UpgradePolicy.Installer.Image = "mutated:0.0"
+			assert.Equal(t, "installer:1.4.0", ops.Spec.UpdateStrategy.Installer.Image)
 		})
 	}
-}
-
-func TestApplySandboxPatch_InstallerDeepCopied(t *testing.T) {
-	ops, sbx := newInstallerOpsAndSandbox()
-	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
-	assert.NoError(t, err)
-
-	updated := &agentsv1alpha1.Sandbox{}
-	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated)
-	assert.NoError(t, err)
-
-	require.NotNil(t, updated.Spec.UpgradePolicy.Installer)
-	// Mutating the persisted copy must not alias back into the ops spec.
-	updated.Spec.UpgradePolicy.Installer.Image = "mutated:0.0"
-	assert.Equal(t, "installer:1.4.0", ops.Spec.UpdateStrategy.Installer.Image)
 }
 
 func TestIsSandboxOpsApplied_InstallerUpdate(t *testing.T) {
@@ -1291,8 +1330,11 @@ func TestIsSandboxOpsApplied_InstallerUpdate(t *testing.T) {
 	ops.UID = types.UID("ops-uid-1")
 
 	sbx.Status.CompletedPatchVersion = "ops-uid-1"
+	assert.False(t, isSandboxOpsApplied(sbx, ops), "completed install still needs its metadata patch")
+	sbx.Spec.Template.Labels["harness-version"] = "v2"
+	sbx.Spec.Template.Annotations["harness-version"] = "v2"
 	assert.True(t, isSandboxOpsApplied(sbx, ops),
-		"sandbox that completed this patch version must be skipped")
+		"sandbox that completed this patch version and metadata must be skipped")
 
 	sbx.Status.CompletedPatchVersion = "ops-uid-other"
 	assert.False(t, isSandboxOpsApplied(sbx, ops),
@@ -1302,11 +1344,9 @@ func TestIsSandboxOpsApplied_InstallerUpdate(t *testing.T) {
 	assert.False(t, isSandboxOpsApplied(sbx, ops),
 		"sandbox that never installed must not be skipped")
 
-	// The template-matching path is not consulted for installer ops: even a
-	// template that would match the (ignored) patch must not cause a skip.
 	sbx.Status.CompletedPatchVersion = ""
-	sbx.Spec.Template.Spec.Containers[0].Image = "nginx:9.9"
-	assert.False(t, isSandboxOpsApplied(sbx, ops))
+	assert.True(t, isSandboxTemplateMatchPatch(sbx, ops))
+	assert.False(t, isSandboxOpsApplied(sbx, ops), "matching metadata alone must not skip installation")
 
 	// Declared hooks must also be present once the install completed.
 	sbx.Status.CompletedPatchVersion = "ops-uid-1"

@@ -544,6 +544,7 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 	tests := []struct {
 		name    string
 		mutate  func(*v1alpha1.SandboxUpdateOps)
+		patch   string
 		allow   bool
 		wantMsg string
 	}{
@@ -623,17 +624,41 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 				})
 			},
 			allow:   false,
-			wantMsg: "InstallerUpdate strategy does not support modifying container images",
+			wantMsg: "InstallerUpdate only supports metadata-only template patches",
 		},
 		{
-			name: "non-image patch allowed",
+			name: "environment patch rejected",
 			mutate: func(o *v1alpha1.SandboxUpdateOps) {
 				o.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{{Name: "FOO", Value: "bar"}}}}},
 				})
 			},
+			wantMsg: "metadata-only template patches",
+		},
+		{
+			name: "typed metadata-only patch allowed",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"harness-version": "v2"}, Annotations: map[string]string{"harness-version": "v2"},
+				}})
+			},
 			allow: true,
 		},
+		{name: "raw metadata patch allowed", patch: `{"metadata":{"labels":{"harness-version":"v2"}}}`, allow: true},
+		{name: "empty metadata values allowed", patch: `{"metadata":{"labels":{"custom":""},"annotations":{"custom":""}}}`, allow: true},
+		{name: "metadata deletion rejected", patch: `{"metadata":{"annotations":{"old":null}}}`, wantMsg: "metadata deletion or replacement"},
+		{name: "label map deletion rejected", patch: `{"metadata":{"labels":null}}`, wantMsg: "metadata deletion or replacement"},
+		{name: "metadata map deletion rejected", patch: `{"metadata":null}`, wantMsg: "metadata deletion or replacement"},
+		{name: "label map replacement rejected", patch: `{"metadata":{"labels":{"$patch":"replace","harness-version":"v2"}}}`, wantMsg: "metadata deletion or replacement"},
+		{name: "empty patch allowed", patch: `{}`, allow: true},
+		{name: "empty spec allowed", patch: `{"spec":{}}`, allow: true},
+		{name: "spec deletion rejected", patch: `{"spec":null}`, wantMsg: "metadata-only template patches"},
+		{name: "container deletion rejected", patch: `{"spec":{"containers":[{"name":"main","$patch":"delete"}]}}`, wantMsg: "metadata-only template patches"},
+		{name: "spec replacement rejected", patch: `{"spec":{"$patch":"replace"}}`, wantMsg: "metadata-only template patches"},
+		{name: "unknown spec field rejected", patch: `{"spec":{"unknownField":"value"}}`, wantMsg: "metadata-only template patches"},
+		{name: "root replacement rejected", patch: `{"$patch":"replace","metadata":{"labels":{"harness-version":"v2"}}}`, wantMsg: "metadata-only template patch"},
+		{name: "template identity rejected", patch: `{"metadata":{"name":"replacement"}}`, wantMsg: "only supports template labels and annotations"},
+		{name: "null patch decoded as omitted", patch: `null`, allow: true},
 	}
 
 	for _, tt := range tests {
@@ -641,6 +666,9 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 			obj := installerOps()
 			if tt.mutate != nil {
 				tt.mutate(obj)
+			}
+			if tt.patch != "" {
+				obj.Spec.Patch.Raw = []byte(tt.patch)
 			}
 			resp := newTestHandler().Handle(t.Context(), makeCreateRequest(t, obj))
 			if tt.allow {
@@ -664,10 +692,27 @@ func TestUpdate_InstallerImmutable(t *testing.T) {
 }
 
 func TestUpdate_InstallerUnchangedAllowed(t *testing.T) {
-	oldObj := installerOps()
-	newObj := oldObj.DeepCopy()
-	newObj.Spec.Paused = true
-	h := newTestHandler()
-	resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
-	require.True(t, resp.Allowed)
+	for _, tt := range []struct {
+		name  string
+		patch string
+		allow bool
+	}{
+		{name: "no patch", allow: true},
+		{name: "metadata patch", patch: `{"metadata":{"labels":{"harness-version":"v2"}}}`, allow: true},
+		{name: "spec patch rejected on update", patch: `{"spec":{"containers":[{"name":"main","env":[{"name":"FOO","value":"bar"}]}]}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			oldObj := installerOps()
+			if tt.patch != "" {
+				oldObj.Spec.Patch.Raw = []byte(tt.patch)
+			}
+			newObj := oldObj.DeepCopy()
+			newObj.Spec.Paused = true
+			resp := newTestHandler().Handle(t.Context(), makeUpdateRequest(t, oldObj, newObj))
+			require.Equal(t, tt.allow, resp.Allowed)
+			if !tt.allow {
+				require.Contains(t, resp.Result.Message, "metadata-only template patches")
+			}
+		})
+	}
 }
