@@ -1,5 +1,5 @@
 # Build the manager binary
-FROM golang:1.26 AS builder
+FROM golang:1.26@sha256:4165ee6bf3b7811fd7b40373290405c83d0167dcb87ee5f29c427cdcef45ff8f AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -31,7 +31,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM alpine:3.20
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 WORKDIR /
 RUN mkdir -p /home/nonroot/sandbox-controller-webhook-certs && \
     chmod 777 /home/nonroot/sandbox-controller-webhook-certs && \

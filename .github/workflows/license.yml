@@ -26,6 +26,9 @@ jobs:
         with:
           ruby-version: 2.6
       - name: Install dependencies
-        run: gem install license_finder
+        # A Gemfile/Gemfile.lock cannot replace this: license_finder caps
+        # rubyzip below the version that fixes CVE-2026-85396, so a committed
+        # lockfile would add a HIGH Trivy finding instead.
+        run: gem install license_finder -v 7.2.1 --no-document  # zizmor: ignore[adhoc-packages] -- no lockfile avoids the vulnerable rubyzip
       - name: Run tests
         run: license_finder --decisions_file .license/dependency_decisions.yml

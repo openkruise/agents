@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.26 AS builder
+FROM golang:1.26@sha256:4165ee6bf3b7811fd7b40373290405c83d0167dcb87ee5f29c427cdcef45ff8f AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -23,7 +23,7 @@ COPY ../test ./test
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -installsuffix cgo -o sandbox-manager ./cmd/sandbox-manager
 
 # Final stage
-FROM alpine:3.20 AS runtime
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS runtime
 
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
     apk --no-cache add ca-certificates && \
