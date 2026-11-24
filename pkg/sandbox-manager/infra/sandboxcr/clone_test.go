@@ -1569,6 +1569,7 @@ func TestCloneSandbox(t *testing.T) {
 		postCheck             func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics)
 		expectError           string
 		expectTerminal        bool
+		expectInterrupted     bool
 		readyBeforeFailure    bool
 	}{
 		{
@@ -1713,6 +1714,30 @@ func TestCloneSandbox(t *testing.T) {
 			},
 			sbxOverride:        sbxOverride{Name: "test-sandbox-clone-5"},
 			expectError:        "failed to init runtime",
+			readyBeforeFailure: true,
+		},
+		{
+			name: "re-init runtime cancellation is preserved",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+				CloneTimeout:     2 * time.Second,
+			},
+			initRuntime: &config.InitRuntimeOptions{
+				AccessToken: "test-access-token",
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately:  true,
+				InitBlockUntilCanceled: true,
+			},
+			sbxOverride:        sbxOverride{Name: "test-sandbox-clone-interrupted"},
+			expectError:        "context deadline exceeded",
+			expectInterrupted:  true,
 			readyBeforeFailure: true,
 		},
 		{
@@ -2039,6 +2064,11 @@ func TestCloneSandbox(t *testing.T) {
 				if tt.expectTerminal {
 					var retryErr claim.RetriableError
 					assert.False(t, errors.As(err, &retryErr), "a deterministic init failure must stop the clone retry loop")
+				}
+				if tt.expectInterrupted {
+					assert.ErrorIs(t, err, context.DeadlineExceeded)
+					var retryErr retriableError
+					assert.False(t, errors.As(err, &retryErr), "cancellation must surface as-is, not as a retriable failure")
 				}
 			} else {
 				require.NoError(t, err)
