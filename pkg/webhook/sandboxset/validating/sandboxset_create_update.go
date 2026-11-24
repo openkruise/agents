@@ -24,9 +24,11 @@ import (
 	"strconv"
 	"strings"
 
+	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kubernetes/pkg/apis/core"
 	corev1conv "k8s.io/kubernetes/pkg/apis/core/v1"
@@ -60,9 +62,17 @@ func (h *SandboxSetValidatingHandler) Handle(_ context.Context, req admission.Re
 	if err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
+	var oldObj *agentsv1alpha1.SandboxSet
+	if req.Operation == admissionv1.Update {
+		oldObj = &agentsv1alpha1.SandboxSet{}
+		if err := h.Decoder.DecodeRaw(req.OldObject, oldObj); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+	}
 	var errList field.ErrorList
 	errList = append(errList, validateSandboxSetMetadata(obj.ObjectMeta, field.NewPath("metadata"))...)
 	errList = append(errList, validateSandboxSetSpec(obj.Spec, field.NewPath("spec"))...)
+	errList = append(errList, validateLabelValueNames(obj, oldObj)...)
 	if len(errList) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())
 	}
@@ -72,6 +82,30 @@ func (h *SandboxSetValidatingHandler) Handle(_ context.Context, req admission.Re
 func validateSandboxSetMetadata(metadata metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
 	var errList field.ErrorList
 	errList = append(errList, validation.ValidateObjectMeta(&metadata, true, validation.NameIsDNSSubdomain, fldPath)...)
+	return errList
+}
+
+// validateLabelValueNames rejects names that pool Sandboxes copy into label
+// values: the SandboxSet name (agents.kruise.io/sandbox-pool) and the
+// templateRef name (agents.kruise.io/sandbox-template). Both must fit the
+// 63-character label value limit, or every Sandbox create is rejected. Only
+// new or changed names are checked, so existing objects can still be updated
+// and deleted.
+func validateLabelValueNames(obj, oldObj *agentsv1alpha1.SandboxSet) field.ErrorList {
+	var errList field.ErrorList
+	if oldObj == nil {
+		for _, msg := range utilvalidation.IsValidLabelValue(obj.Name) {
+			errList = append(errList, field.Invalid(field.NewPath("metadata", "name"), obj.Name,
+				"must be a valid label value because it is used as the "+agentsv1alpha1.LabelSandboxPool+" label: "+msg))
+		}
+	}
+	ref := obj.Spec.TemplateRef
+	if ref != nil && (oldObj == nil || oldObj.Spec.TemplateRef == nil || oldObj.Spec.TemplateRef.Name != ref.Name) {
+		for _, msg := range utilvalidation.IsValidLabelValue(ref.Name) {
+			errList = append(errList, field.Invalid(field.NewPath("spec", "templateRef", "name"), ref.Name,
+				"must be a valid label value because it is used as the "+agentsv1alpha1.LabelSandboxTemplate+" label: "+msg))
+		}
+	}
 	return errList
 }
 

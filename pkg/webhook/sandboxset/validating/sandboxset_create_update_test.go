@@ -19,6 +19,7 @@ package validating
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,8 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 	tests := []struct {
 		name       string
 		sandboxSet *v1alpha1.SandboxSet
+		// oldSandboxSet defaults to sandboxSet when nil.
+		oldSandboxSet *v1alpha1.SandboxSet
 		// operation defaults to Create when empty.
 		operation    admissionv1.Operation
 		expectAllow  bool
@@ -306,6 +309,108 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			expectAllow:  false,
 			expectError:  true,
 			errorMessage: "subdomain must consist of lower case alphanumeric characters, '-' or '.'",
+		},
+		{
+			name: "Name and templateRef at the 63-character label value limit",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      strings.Repeat("a", 63),
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: strings.Repeat("a", 63)},
+					},
+				},
+			},
+			expectAllow: true,
+		},
+		{
+			name: "Name longer than 63 characters",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      strings.Repeat("a", 64),
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "test-template"},
+					},
+				},
+			},
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "used as the agents.kruise.io/sandbox-pool label",
+		},
+		{
+			name: "TemplateRef name longer than 63 characters",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: strings.Repeat("a", 64)},
+					},
+				},
+			},
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "used as the agents.kruise.io/sandbox-template label",
+		},
+		{
+			// Existing objects with long names must stay updatable, e.g. to
+			// remove finalizers or scale them down.
+			name:      "Update keeps an existing long name and templateRef",
+			operation: admissionv1.Update,
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      strings.Repeat("a", 64),
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: strings.Repeat("a", 64)},
+					},
+				},
+			},
+			expectAllow: true,
+		},
+		{
+			name:      "Update changes templateRef to a name longer than 63 characters",
+			operation: admissionv1.Update,
+			oldSandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "test-template"},
+					},
+				},
+			},
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: strings.Repeat("a", 64)},
+					},
+				},
+			},
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "used as the agents.kruise.io/sandbox-template label",
 		},
 		{
 			name: "Negative replicas",
@@ -924,6 +1029,11 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			// Construct admission request
 			sbsRaw, err := json.Marshal(tt.sandboxSet)
 			require.NoError(t, err)
+			oldRaw := sbsRaw
+			if tt.oldSandboxSet != nil {
+				oldRaw, err = json.Marshal(tt.oldSandboxSet)
+				require.NoError(t, err)
+			}
 
 			operation := tt.operation
 			if operation == "" {
@@ -936,7 +1046,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 						Raw: sbsRaw,
 					},
 					OldObject: runtime.RawExtension{
-						Raw: sbsRaw,
+						Raw: oldRaw,
 					},
 				},
 			}
