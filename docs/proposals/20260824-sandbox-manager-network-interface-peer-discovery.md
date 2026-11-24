@@ -4,7 +4,7 @@ authors:
   - "@AiRanthem"
 reviewers: []
 creation-date: 2026-08-24
-last-updated: 2026-11-23
+last-updated: 2026-11-24
 status: implementable
 ---
 
@@ -102,71 +102,166 @@ flowchart LR
 - Both listeners bind synchronously during startup. A bind failure of either
   enabled listener fails startup before the process serves requests.
 
-### Controller 主动路由同步
+### Controller-initiated route synchronization
 
-Sandbox controller 在 Sandbox status Patch 成功后，对比更新前后
-`Route.CanRouteTraffic()`。仅当该布尔值发生变化时，向 memberlist 中的
-manager/gateway 推送一次更新后的 route；调用内部继续使用既有的并行发送、
-超时与重试策略。投影统一使用 `sandboxroute.RouteFromSandbox`，推送携带
-API server 返回对象的 UID、resourceVersion 和完整路由属性，避免发送写入前的版本。
-status merge patch 显式写入 `podInfo.podIP`（包括空字符串），防止 `omitempty`
-在地址清空时仍保留已存储的旧 IP；其余 PodInfo 字段沿用现有序列化规则。
+After a successful Sandbox status patch, the controller compares the old and
+new `Route.CanRouteTraffic()` values and IP addresses. A change to either
+triggers a route update to the receiving memberlist peers. Both projections
+use `sandboxroute.RouteFromSandbox`; the outgoing route carries the API server's
+returned UID, resourceVersion, and full route attributes, never the pre-write
+version. The status merge patch explicitly writes `podInfo.podIP`, including an
+empty string, so `omitempty` cannot preserve a stale address. Other PodInfo
+fields retain their existing serialization rules.
 
-- 同步是尽力加速。Patch 失败、NotFound 或 status 未改变时不发送；路由投影
-  或发送失败只记录错误，不回滚 status，也不以该错误重试 reconcile。
-  manager/gateway 的 Sandbox informer 仍负责最终收敛。
-- 触发条件不是 phase、IP 或整个 route 的任意变化。两个不同的非空 IP、
-  message 或 resourceVersion 变化，只要 `CanRouteTraffic()` 不变就不推送。
-  spec、Ready condition、池归属等仍由统一投影决定流量可路由性。
-- controller 用 `sc-<node-name>` 加入 memberlist，参与 TCP/UDP gossip，
-  但不启动 `:7789/refresh`。所有成员的 `GetPeers()` 排除 `sc-` 前缀，
-  `GetAllMembers()` 仍保留这些节点用于观察成员关系。controller 不加入
-  manager/gateway 的 seed Pod labels。
-- controller 通过默认关闭的 Alpha FeatureGate `SandboxRouteSync` 启用。
-  gate 关闭时不解析网卡或 selector、不创建 peer cache，也不启动 peer listener。
-  `--peer-selector` 默认值为线上
-  `agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager`，
-  非空 selector 本身不再启用功能；显式设置为空仍可关闭同步。
-  启用后使用公共 namespace `sandbox-system` 发现 peers。
-  controller 通过 `--memberlist-bind-port` 配置 memberlist 端口，默认 7946；
-  非正数沿用默认值，超过 65535 时启动失败。gate 关闭时跳过端口校验。
-  自定义端口同时作为未配置 `memberlist-url` annotation 的 seed 默认端口，须与对端一致。
-  三组件复用相同的节点名获取逻辑：`HOSTNAME → POD_NAME`；均未设置时，
-  manager/controller 使用八字符 UUID 前缀，gateway 保留报错行为。
-- controller 的 `--network-interface` 默认值为 `eni1`，复用 Manager 的网卡地址解析能力。
-  所选地址用于 memberlist 绑定和广播，覆盖 `POD_IP`。
-  gate 开启后，网卡不存在、未启用、没有合格地址或首选地址族中存在多个地址时启动失败；
-  显式设置 `--network-interface=` 才沿用 `POD_IP → 第一个非回环 IPv4` 的回退。
-  此参数不改变 HTTP refresh 的出站路由，网络路由和安全组仍须保证可达。
-  selector、网卡和端口 flags 保留给其他环境覆盖，均不能单独启用同步；上述默认值使 ACK 线上只需在既有
-  `options.featureGate` 中追加 `SandboxRouteSync=true`，无需修改 Deployment YAML。
-  gate 由进程启动时的 `--feature-gates` 读取，不提供运行时热切换。
-- controller 新增独立 Pod informer，仅 watch `sandbox-system` 中符合 selector 的 Pods。
-  它不复用可能开启 Sandbox Pod 标签过滤的主缓存，也不使用 APIReader List。
-  不加载或 watch peer Secrets，不新增 Secrets RBAC 权限。
-- controller 使用明文 memberlist 和 HTTP refresh，适用于未启用 peer 加密的部署。
-  manager/gateway 既有的 gossip 加密和 peer mTLS 能力不变；启用这些安全能力的
-  部署不能使用当前 controller 主动同步通道。
-- manager 生命周期先启动并同步 peer cache，随后启动 controllers；发送回调
-  等待 outbound client 发布，避免与组件启动竞态。退出时取消发现、
-  完成 memberlist Leave/Shutdown，并关闭 idle HTTP connections。
+- Synchronization is best-effort acceleration. Failed patches, NotFound, and
+  unchanged status do not send. Projection and delivery errors are logged without
+  rolling back status or retrying reconcile for that error. Manager and gateway
+  Sandbox informers still provide eventual convergence.
+- Delivery runs before `recordSandboxLifecycleCompletions` and
+  `recordSandboxMetrics`, so metric locks cannot delay dispatch. The local status
+  is updated before invoking the sender; completion accounting retains the old
+  status for transition detection.
+- Sending remains synchronous to avoid an unbounded background queue or
+  detached goroutines. The controller supplies a **200ms total context budget**
+  covering sender readiness, parallel fanout, requests, and retry backoff;
+  cancellation or an earlier reconcile deadline can shorten it. Network waiting
+  adds at most this budget, subject to scheduling, rather than the shared
+  sender's approximately 1.1s retry budget. Manager/gateway retry behavior is
+  unchanged. During sustained outages, workers may still pay up to 200ms per
+  triggered update; this is an explicit trade-off, not non-blocking delivery.
+- An empty receiving-peer snapshot is skipped immediately. The sender logs
+  `route sync skipped: no peers discovered` at most once per minute per process,
+  including the first attempt. Successful deliveries log the count from the
+  same snapshot used for fanout; a skip never emits a delivery-success log.
+- Changes to message or resourceVersion alone do not send. Two different
+  nonempty IP addresses do send, even if routability is unchanged. Spec, Ready
+  conditions, and pool ownership still determine routability through the shared
+  projection; an IP change is an independent trigger.
+- The controller joins memberlist as `sc-<node-name>` and participates in TCP/UDP
+  gossip, but does not serve `:7789/refresh`. Every member's `GetPeers()` excludes
+  the `sc-` prefix; `GetAllMembers()` retains these nodes for membership
+  inspection. The controller does not need the manager/gateway seed Pod labels.
+- The Alpha FeatureGate `SandboxRouteSync` is disabled by default. With the gate
+  disabled, the controller does not resolve the interface or selector, create
+  the peer client, or start the peer listener. `--peer-selector` defaults to
+  `agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager`; a nonempty
+  selector alone cannot enable synchronization, and an explicit empty selector
+  disables it. Peer discovery uses the shared namespace `sandbox-system`.
+  `--memberlist-bind-port` defaults to 7946; non-positive values use that default,
+  and values above 65535 fail enabled startup. A disabled gate skips port
+  validation. Custom ports also provide the seed port for Pods without a
+  `memberlist-url` annotation and must match receivers. All three components
+  share `HOSTNAME -> POD_NAME` lookup; with neither set, manager/controller use
+  an eight-character UUID prefix, while gateway retains its startup error.
+- `--network-interface` defaults to `eni1` and reuses the manager's address
+  resolver. The selected address overrides `POD_IP` for memberlist binding and
+  advertising. Enabled startup fails for a missing/down interface, no eligible
+  address, or multiple addresses in the preferred family. Explicitly setting
+  `--network-interface=` retains `POD_IP -> first non-loopback IPv4` fallback.
+  The flag does not control outbound HTTP routing; network routes and security
+  groups must still permit connectivity. Selector, interface, and port flags
+  remain optional overrides and cannot individually enable synchronization.
+  For ACK deployments using plaintext peers, these defaults allow adding only
+  `SandboxRouteSync=true` to existing `options.featureGate`, without editing
+  Deployment YAML. Encrypted or mTLS-enabled peers require matching explicit
+  security configuration. The gate is read through `--feature-gates` at process
+  startup and cannot be changed live.
+- The controller uses the same peer path as manager/gateway: a separate
+  controller-runtime client built from the process `rest.Config` is passed to
+  `peers.NewMemberlistPeers` and `peersecurity.Load`. No dedicated Pod/Secret
+  informer is added, and the manager's `APIReader` is not used. Filtering in the
+  main Sandbox Pod cache does not affect peer discovery. Shared discovery lists
+  only selector-matching seed Pods in `sandbox-system`, at most once per retry
+  cycle while unjoined, and stops listing after a successful join. Security
+  material is retrieved by referenced Secret Get, never by Secret List.
+- Security configuration directly reuses `peersecurity.Inputs + Load`, without
+  controller-specific inputs or loaders or changes to manager/gateway security
+  policy. All three controller flags default to empty strings:
+  `--peer-key-secret`, `--peer-tls-server-secret`, and `--peer-tls-client-secret`.
+  Empty references are valid. With all three empty, `Load` reads no Secrets,
+  memberlist gossip is unencrypted, and refresh uses plaintext HTTP without
+  mTLS. This does not disable discovery or route synchronization when the gate
+  is enabled. A key reference independently enables gossip encryption; TLS
+  requires both server and client references, or neither.
+- When explicitly enabling security, reuse the same material as the receiving
+  manager/gateway. For example, KDM `v0.6.8-release.*` configures `sandbox-api`
+  with these references; they are optional overrides, not controller defaults:
+  - `--peer-key-secret=sandbox-system/ack-sandbox-manager-peer-key`
+  - `--peer-tls-server-secret=ack-agent-identity/ack-agent-identity-agent-runtime-server-cert`
+  - `--peer-tls-client-secret=ack-agent-identity/ack-agent-identity-agent-runtime-sandbox-manager-client-cert`
+  Configured references are read through the controller's existing user-cluster
+  kubeconfig; the sandbox-api kubeconfig targets the same user cluster. Existing
+  ACK controller RBAC allows Secret Get; other deployments must provide the
+  corresponding read permissions. The controller does not create Secrets or
+  generate an independent key or certificate identity.
+- When configured, the shared `Load` validates the 32-byte gossip key and the
+  server/client certificate chains, validity periods, usages, and identity
+  separation. The server Secret's `ca.crt` verifies client identity; the client
+  Secret's `ca.crt` trusts receiving servers. The two may use different CAs.
+  The controller uses only the returned key and client TLS configuration and
+  does not serve refresh requests, but still performs full TLS-pair validation.
+  HTTPS retains the fixed SNI `agentruntime.sandbox.agents.kruise.io` and TLS
+  >= 1.2. Missing or invalid explicitly configured material never causes a
+  fallback to plaintext or skipped certificate verification. Explicitly empty
+  references disable the corresponding security capability by configuration.
+- Peer security does not depend on the controller's runtime certificate mounts;
+  the existing `--runtime-client-cert-dir` behavior is unchanged. Runtime,
+  ingress, and OIDC TLS do not replace peer security. Gate-only enablement with
+  empty security references requires compatible plaintext receivers and the
+  necessary network connectivity, not pre-existing Secrets. When security is
+  configured, the referenced Secrets must exist, be readable, and pass shared
+  validation. Gossip encryption requires a matching receiver key; mTLS requires
+  receivers to accept the existing sandbox-manager client identity. Template
+  references do not prove runtime interoperability. The controller gate does
+  not trigger KDM key creation.
+- RouteSync remains a non-leader-elected runnable. Waiting for material pauses
+  only RouteSync, not other controllers. Each startup load uses a cancelable
+  30-second context; failures retry after 10 seconds. No gossip listener,
+  outbound client, or ready signal is published before loading succeeds.
+  Empty security inputs succeed without Secret reads. After loading, RouteSync
+  installs the key, constructs the shared `PeerOutbound`, calls the shared
+  memberlist `Start`, and publishes ready. Subsequent seed discovery and join
+  retries belong entirely to the shared peers lifecycle. The sending callback
+  waits for ready within the existing 200ms total budget.
+- Keys and TLS configurations are startup snapshots. Reads retried before
+  startup support late-arriving Secrets; successful startup does not enable hot
+  rotation. Material changes require coordinated restarts; peers with different
+  key generations cannot communicate. Unsent updates are not queued for replay;
+  receiving informers provide eventual convergence. Shutdown cancels material
+  waiting and shared discovery, performs memberlist Leave/Shutdown, and closes
+  idle outbound connections.
 
-发送实现 `SyncRouteWithPeers` 和 `PeerOutbound` 从 `pkg/proxy` 迁至中立的
-`pkg/sandboxroute/refresh`。proxy 保留实例方法包装，gateway 与 controller
-共享同一发送实现；本次新增同步链路的依赖闭包不包含 API 或 sandbox-manager。
-已有 `sandbox_peers`、`sandbox_peer_outbound_tls_errors_total` 随实现迁移，
-未新增指标名称；controller 进程也会注册这些既有指标。
+`SyncRouteWithPeers` and `PeerOutbound` move from `pkg/proxy` into the neutral
+`pkg/sandboxroute/refresh` package. Proxy keeps its instance wrapper;
+manager/gateway and controller share the sending implementation. The controller
+uses `SyncRouteWithPeerList` to keep logging and delivery on one membership
+snapshot. This new dependency closure contains neither API-layer nor
+sandbox-manager packages. Existing `sandbox_peers` and
+`sandbox_peer_outbound_tls_errors_total` move with the implementation; no new
+metric names are introduced, and the controller registers these existing metrics.
 
-`POD_NAME`/`POD_IP` 不是必须新增的配置；双网卡部署默认选择 `eni1`，其他网卡名需覆盖，
-允许 controller 与 peers 双向 TCP/UDP 7946，并允许 controller 向接收方发起 TCP 7789。
-启用功能前必须先更新接收方的
-`sc-` 过滤逻辑；旧版本接收方会把 controller 误当作 refresh 目标。
-`config/manager/manager.yaml` 仅保留 gate 与可选覆盖参数的注释示例，不自动启用该能力，
-无需为 controller 添加 refresh Service，也不改变既有 probe 配置。
+Neither `POD_NAME` nor `POD_IP` requires a new configuration entry. Dual-interface
+deployments use `eni1` by default; other interface names need an override. Allow
+bidirectional controller/peer TCP/UDP 7946 and controller-to-receiver TCP 7789.
+Update receivers' `sc-` filtering before enabling the gate: older receivers
+mistake the controller for a refresh target. `config/manager/manager.yaml`
+provides commented gate/override examples only; it does not enable the feature,
+add a controller refresh Service, or change probes.
 
-验证覆盖：布尔值双向变化、Ready/IP/phase 组合、布尔值不变、发送失败、
-Patch 失败/NotFound、回传 resourceVersion、功能关闭、配置校验、startup 取消、
-以及 memberlist 发送方过滤。普通开发验证不执行集群部署或 E2E。
+Targeted coverage includes routability changes in both directions, Ready/IP/phase
+combinations, nonempty IP changes, unchanged routability, sending failures and
+deadlines, failed/NotFound patches, returned resourceVersion, gate/configuration
+validation, startup cancellation, empty-peer log rate limiting, and sender-only
+member filtering. Security cases use referenced Secret Get through the real
+shared client, covering late-arriving key and certificate Secrets and Secret
+permission errors that do not block other controllers. Shared security tests
+retain invalid/expired certificates and independent-CA trust verification;
+controller cases retain real memberlist joins with matching/mismatched keys.
+Refresh cases retain real mTLS and rejection of missing client identity, wrong
+server names, and untrusted servers. This describes coverage, not a passing
+validation result: tests, builds, and lint were not run in this round, and the
+previous status test remains paused. Ordinary validation does not deploy a
+cluster or run E2E tests.
 
 ### Bounded peer listing
 
@@ -354,10 +449,12 @@ discovery intentionally stops its Kubernetes retry loop.
 
 ### Compatibility and ownership
 
-This proposal adds two optional CLI flags, `--network-interface` and
-`--disable-envoy-ext-proc`. It does not change CRDs, HTTP models, Secrets, or
-the memberlist wire protocol. Both in-cluster configuration and `KUBECONFIG`
-continue to supply the sandbox-cluster Kubernetes client.
+The original Manager address design adds two optional CLI flags,
+`--network-interface` and `--disable-envoy-ext-proc`. The controller extension
+also adds the optional peer-security overrides described above. Neither changes
+CRDs, HTTP models, Secret schemas, or the memberlist wire protocol. Both
+in-cluster configuration and `KUBECONFIG` continue to supply the sandbox-cluster
+Kubernetes client.
 
 Process peer discovery and peer lifecycle belong to the Manager layer because
 they coordinate Sandbox Manager processes rather than implement a Sandbox
@@ -374,9 +471,10 @@ Pods across all namespaces. The reference manifest under
 must set them before upgrading, and the release notes for the first release
 containing this change must call this out.
 
-The following are outside this proposal:
+The following are outside the original Manager address design:
 
-- memberlist encryption and peer-route mTLS;
+- changes to memberlist encryption and peer-route mTLS policy; the controller
+  extension above reuses the existing security implementation and materials;
 - changing the address or port of the `9002` ext-proc listener;
 - metrics, pprof, or observability listener isolation;
 - Deployment, RBAC, KDM, or rollout configuration;

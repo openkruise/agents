@@ -125,17 +125,20 @@ func (o *PeerOutbound) CloseIdleConnections() {
 // outbound is this process's peer-owner client. Callers must not construct a
 // second client with an independent security decision.
 func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route sandboxroute.Route, outbound *PeerOutbound) error {
-	body, err := json.Marshal(route)
-	if err != nil {
-		return err
-	}
-
-	// Get peers from Peers - no manual locking needed
 	var peerList []peers.Peer
 	if peersManager != nil {
 		peerList = peersManager.GetPeers()
 	}
+	return SyncRouteWithPeerList(ctx, peerList, route, outbound)
+}
 
+// SyncRouteWithPeerList sends to the caller's snapshot, keeping target counts consistent.
+// An empty snapshot remains a no-op; the caller owns skip logging.
+func SyncRouteWithPeerList(ctx context.Context, peerList []peers.Peer, route sandboxroute.Route, outbound *PeerOutbound) error {
+	body, err := json.Marshal(route) // #nosec G117 -- AccessToken is serialized for peer /refresh authentication sync, never logged; the peer owner configures transport security.
+	if err != nil {
+		return err
+	}
 	peerCount.Set(float64(len(peerList)))
 
 	if len(peerList) == 0 {

@@ -17,14 +17,28 @@ limitations under the License.
 package sandbox
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
+	"github.com/hashicorp/memberlist"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -32,16 +46,20 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
@@ -105,20 +123,24 @@ func TestSetupRouteSyncValidation(t *testing.T) {
 		selector    string
 		bindAddress string
 		bindPort    int
+		security    peersecurity.Inputs
 		wantErr     string
 	}{
-		{name: "默认关闭且默认参数不启用同步", selector: "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", bindPort: 7946},
-		{name: "gate 关闭不校验 selector、绑定地址或端口", selector: "component in (", bindAddress: "invalid-address", bindPort: 65536},
-		{name: "自定义端口不能单独启用同步", selector: "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", bindPort: 9000},
-		{name: "gate 开启但 selector 为空仍关闭", gateEnabled: true, bindPort: 65536},
-		{name: "gate 开启后 selector 必须合法", gateEnabled: true, selector: "component in (", bindPort: 7946, wantErr: "parse peer selector"},
-		{name: "gate 开启后端口不能越界", gateEnabled: true, selector: "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", bindPort: 65536, wantErr: "--memberlist-bind-port must be in the range 1-65535"},
+		{name: "defaults do not enable sync", selector: "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", bindPort: 7946},
+		{name: "disabled gate skips selector address and port validation", selector: "component in (", bindAddress: "invalid-address", bindPort: 65536},
+		{name: "custom port does not enable sync", selector: "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", bindPort: 9000},
+		{name: "empty selector disables sync with gate enabled", gateEnabled: true, bindPort: 65536},
+		{name: "enabled gate validates TLS pair", gateEnabled: true, selector: "component=manager", security: peersecurity.Inputs{TLSServerSecret: types.NamespacedName{Namespace: "ns", Name: "server"}}, wantErr: "both server and client"},
+		{name: "enabled gate validates Secret reference", gateEnabled: true, selector: "component=manager", security: peersecurity.Inputs{PeerKeySecret: types.NamespacedName{Name: "key"}}, wantErr: "reference is incomplete"},
+		{name: "disabled gate skips security validation", selector: "component=manager", security: peersecurity.Inputs{TLSServerSecret: types.NamespacedName{Namespace: "ns", Name: "server"}}},
+		{name: "enabled gate validates selector", gateEnabled: true, selector: "component in (", bindPort: 7946, wantErr: "parse peer selector"},
+		{name: "enabled gate validates port range", gateEnabled: true, selector: "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", bindPort: 65536, wantErr: "--memberlist-bind-port must be in the range 1-65535"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxRouteSyncGate, tt.gateEnabled)
 			// All cases must return before accessing the manager or starting listeners.
-			sender, err := SetupRouteSync(nil, tt.selector, tt.bindAddress, tt.bindPort)
+			sender, err := SetupRouteSync(nil, tt.selector, tt.bindAddress, tt.bindPort, tt.security)
 			assert.Nil(t, sender)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
@@ -131,28 +153,36 @@ func TestSetupRouteSyncValidation(t *testing.T) {
 
 func TestRouteSyncLifecycle(t *testing.T) {
 	tests := []struct {
-		name         string
-		hostname     string
-		podName      string
-		wantNodeName string
-		bindAddress  string
-		podIP        string
-		peerSelector string
-		cancelSync   bool
-		setupOnly    bool
-		bindPort     int
-		wantBindPort int
+		name          string
+		hostname      string
+		podName       string
+		wantNodeName  string
+		bindAddress   string
+		podIP         string
+		peerSelector  string
+		cancelSync    bool
+		setupOnly     bool
+		bindPort      int
+		wantBindPort  int
+		lateKey       bool
+		lateTLS       bool
+		forbiddenKey  bool
+		encryptedJoin bool
 	}{
-		{name: "默认端口", setupOnly: true, bindPort: 7946, wantBindPort: 7946},
-		{name: "零端口回退默认值", setupOnly: true, wantBindPort: 7946},
-		{name: "负端口回退默认值", setupOnly: true, bindPort: -1, wantBindPort: 7946},
-		{name: "端口上限合法", setupOnly: true, bindPort: 65535, wantBindPort: 65535},
-		{name: "覆盖默认 selector", peerSelector: "component=sandbox-manager"},
-		{name: "HOSTNAME 优先", hostname: "controller-hostname", podName: "controller-pod", wantNodeName: "controller-hostname"},
-		{name: "POD_NAME 回退", podName: "controller-route-sync-test", wantNodeName: "controller-route-sync-test"},
-		{name: "环境变量均为空时使用 UUID"},
-		{name: "指定绑定地址覆盖 POD_IP", bindAddress: "127.0.0.1", podIP: "192.0.2.1"},
-		{name: "缓存未同步时可以取消", cancelSync: true},
+		{name: "default port", setupOnly: true, bindPort: 7946, wantBindPort: 7946},
+		{name: "zero port falls back to default", setupOnly: true, wantBindPort: 7946},
+		{name: "negative port falls back to default", setupOnly: true, bindPort: -1, wantBindPort: 7946},
+		{name: "maximum port is valid", setupOnly: true, bindPort: 65535, wantBindPort: 65535},
+		{name: "override default selector", peerSelector: "component=sandbox-manager"},
+		{name: "HOSTNAME takes precedence", hostname: "controller-hostname", podName: "controller-pod", wantNodeName: "controller-hostname"},
+		{name: "POD_NAME fallback", podName: "controller-route-sync-test", wantNodeName: "controller-route-sync-test"},
+		{name: "UUID fallback without environment names"},
+		{name: "explicit bind address overrides POD_IP", bindAddress: "127.0.0.1", podIP: "192.0.2.1"},
+		{name: "Secret loading is cancelable", cancelSync: true},
+		{name: "key arriving after controller startup", lateKey: true},
+		{name: "TLS arriving after controller startup", lateTLS: true},
+		{name: "Secret permissions do not block other controllers", forbiddenKey: true},
+		{name: "memberlist accepts only matching encryption key", encryptedJoin: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -170,49 +200,80 @@ func TestRouteSyncLifecycle(t *testing.T) {
 			t.Setenv("POD_IP", podIP)
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
-			listStarted := make(chan struct{}, 1)
-			// Use real informer/cache/memberlist implementations; only simulate API HTTP responses.
+			requestStarted := make(chan struct{}, 1)
+			allowKey := make(chan struct{})
+			allowTLS := make(chan struct{})
+			keyRequested := make(chan struct{}, 1)
+			security, secrets := routeSyncTestTLS(t)
+			// Use the real peer client, loader, and memberlist; stub only Kubernetes API HTTP responses.
 			apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/api/v1/namespaces/sandbox-system/pods" {
-					t.Errorf("unexpected API request: %s", r.URL.String())
-					http.NotFound(w, r)
-					return
-				}
-				assert.Equal(t, peerSelector, r.URL.Query().Get("labelSelector"))
-				list := &corev1.PodList{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"}, ListMeta: metav1.ListMeta{ResourceVersion: "1"}, Items: []corev1.Pod{}}
+				assert.Equal(t, http.MethodGet, r.Method)
+				assert.Empty(t, r.URL.Query().Get("watch"))
 				select {
-				case listStarted <- struct{}{}:
+				case requestStarted <- struct{}{}:
 				default:
 				}
 				if tt.cancelSync {
 					<-r.Context().Done()
 					return
 				}
-				w.Header().Set("Content-Type", "application/json")
-				encoder := json.NewEncoder(w)
-				if r.URL.Query().Get("watch") != "true" {
-					if err := encoder.Encode(list); err != nil && r.Context().Err() == nil {
-						t.Errorf("failed to encode List response: %v", err)
+				var response interface{}
+				if r.URL.Path == "/api/v1/namespaces/sandbox-system/pods" {
+					assert.Equal(t, peerSelector, r.URL.Query().Get("labelSelector"))
+					response = &corev1.PodList{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"}, Items: []corev1.Pod{}}
+				} else {
+					assert.Empty(t, r.URL.RawQuery)
+					for ref, secret := range secrets {
+						if r.URL.Path != "/api/v1/namespaces/"+ref.Namespace+"/secrets/"+ref.Name {
+							continue
+						}
+						if ref == security.PeerKeySecret {
+							select {
+							case keyRequested <- struct{}{}:
+							default:
+							}
+							if tt.forbiddenKey {
+								http.Error(w, "forbidden", http.StatusForbidden)
+								return
+							}
+							if tt.lateKey {
+								select {
+								case <-allowKey:
+								default:
+									http.NotFound(w, r)
+									return
+								}
+							}
+						} else if tt.lateTLS {
+							select {
+							case <-allowTLS:
+							default:
+								http.NotFound(w, r)
+								return
+							}
+						}
+						response = secret
+						break
 					}
+				}
+				if response == nil {
+					t.Errorf("unexpected API request: %s", r.URL.String())
+					http.NotFound(w, r)
 					return
 				}
-				if r.URL.Query().Get("sendInitialEvents") == "true" {
-					bookmark := map[string]interface{}{
-						"apiVersion": "v1", "kind": "Pod",
-						"metadata": map[string]interface{}{"resourceVersion": "1", "annotations": map[string]string{"k8s.io/initial-events-end": "true"}},
-					}
-					if err := encoder.Encode(map[string]interface{}{"type": "BOOKMARK", "object": bookmark}); err != nil {
-						return
-					}
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(response); err != nil && r.Context().Err() == nil {
+					t.Errorf("failed to encode API response: %v", err)
 				}
-				w.(http.Flusher).Flush()
-				<-r.Context().Done()
 			}))
 			defer apiServer.Close()
 			scheme := runtime.NewScheme()
 			require.NoError(t, clientgoscheme.AddToScheme(scheme))
 			mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
 			mapper.Add(corev1.SchemeGroupVersion.WithKind("Pod"), meta.RESTScopeNamespace)
+			mapper.AddSpecific(corev1.SchemeGroupVersion.WithKind("PodList"), corev1.SchemeGroupVersion.WithResource("pods"), corev1.SchemeGroupVersion.WithResource("pod"), meta.RESTScopeNamespace)
+			mapper.Add(corev1.SchemeGroupVersion.WithKind("Secret"), meta.RESTScopeNamespace)
+			mapper.AddSpecific(corev1.SchemeGroupVersion.WithKind("SecretList"), corev1.SchemeGroupVersion.WithResource("secrets"), corev1.SchemeGroupVersion.WithResource("secret"), meta.RESTScopeNamespace)
 			mgr, err := ctrl.NewManager(&rest.Config{Host: apiServer.URL}, ctrl.Options{
 				Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0",
 				MapperProvider: func(*rest.Config, *http.Client) (meta.RESTMapper, error) { return mapper, nil },
@@ -228,24 +289,65 @@ func TestRouteSyncLifecycle(t *testing.T) {
 				require.NoError(t, listener.Close())
 				wantPort = port
 			}
-			sender, err := SetupRouteSync(mgr, peerSelector, tt.bindAddress, port)
+			sender, err := SetupRouteSync(mgr, peerSelector, tt.bindAddress, port, security)
 			require.NoError(t, err)
 			require.NotNil(t, sender)
 			assert.Equal(t, wantPort, sender.bindPort)
 			assert.Equal(t, tt.bindAddress, sender.bindAddress)
-			assert.NotSame(t, mgr.GetCache(), sender.GetCache())
+			assert.NotSame(t, mgr.GetClient(), sender.peerReader)
+			assert.False(t, sender.NeedLeaderElection())
+			assert.Equal(t, peers.DefaultJoinRetryInterval, sender.securityRetryInterval)
 			if tt.setupOnly {
 				return
 			}
+			sender.securityRetryInterval = 10 * time.Millisecond
 			done := make(chan error, 1)
-			go func() { done <- sender.Start(ctx) }()
-			// Ensure assertion failures also cancel the informer and allow the component to exit.
-			defer cancel()
-			if tt.cancelSync {
+			managed := tt.lateKey || tt.lateTLS || tt.forbiddenKey
+			if managed {
+				controllerStarted := make(chan struct{})
+				require.NoError(t, mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+					close(controllerStarted)
+					<-ctx.Done()
+					return nil
+				})))
+				go func() { done <- mgr.Start(ctx) }()
 				select {
-				case <-listStarted:
+				case <-controllerStarted:
 				case <-ctx.Done():
-					t.Fatal("timed out waiting for informer request")
+					t.Fatal("security wait blocked controller startup")
+				}
+				select {
+				case <-sender.ready:
+					t.Fatal("missing security must not publish ready")
+				default:
+				}
+				select {
+				case <-keyRequested:
+				case <-ctx.Done():
+					t.Fatal("timed out waiting for scoped Secret request")
+				}
+				pendingCtx, stop := context.WithTimeout(ctx, 20*time.Millisecond)
+				assert.ErrorIs(t, sender.SyncRouteWithPeers(pendingCtx, sandboxroute.Route{}), context.DeadlineExceeded)
+				stop()
+				assert.Empty(t, sender.peers.GetAllMembers())
+				if tt.lateKey {
+					close(allowKey)
+				}
+				if tt.lateTLS {
+					close(allowTLS)
+				}
+			} else {
+				go func() { done <- sender.Start(ctx) }()
+			}
+			// Cancel peer work even if an assertion fails, so background tasks cannot block test cleanup.
+			defer cancel()
+			if tt.forbiddenKey {
+				cancel()
+			} else if tt.cancelSync {
+				select {
+				case <-requestStarted:
+				case <-ctx.Done():
+					t.Fatal("timed out waiting for Secret request")
 				}
 				cancel()
 			} else {
@@ -256,7 +358,7 @@ func TestRouteSyncLifecycle(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal("timed out waiting for peer startup")
 				}
-				assert.Equal(t, "http", sender.outbound.Scheme())
+				assert.Equal(t, "https", sender.outbound.Scheme())
 				members := sender.peers.GetAllMembers()
 				require.Len(t, members, 1)
 				assert.Equal(t, "127.0.0.1", members[0].IP)
@@ -268,7 +370,57 @@ func TestRouteSyncLifecycle(t *testing.T) {
 					assert.Regexp(t, "^"+peers.NodePrefixSandboxController+"[0-9a-f]{8}$", members[0].Name)
 				}
 				assert.Empty(t, sender.peers.GetPeers())
-				require.NoError(t, sender.SyncRouteWithPeers(ctx, sandboxroute.Route{}))
+				var logs bytes.Buffer
+				var logMu sync.Mutex
+				logCtx := klog.NewContext(ctx, funcr.NewJSON(func(line string) {
+					logMu.Lock()
+					defer logMu.Unlock()
+					logs.WriteString(line)
+				}, funcr.Options{}))
+				var sends sync.WaitGroup
+				for range 20 {
+					sends.Add(1)
+					go func() {
+						defer sends.Done()
+						assert.NoError(t, sender.SyncRouteWithPeers(logCtx, sandboxroute.Route{}))
+					}()
+				}
+				sends.Wait()
+				assert.Equal(t, 1, strings.Count(logs.String(), "route sync skipped: no peers discovered"))
+				assert.NotContains(t, logs.String(), "synced Sandbox route with peers")
+				sender.lastNoPeersLog.Store(time.Now().Add(-time.Minute).UnixNano())
+				require.NoError(t, sender.SyncRouteWithPeers(logCtx, sandboxroute.Route{}))
+				assert.Equal(t, 2, strings.Count(logs.String(), "route sync skipped: no peers discovered"))
+				canceled, stop := context.WithCancel(ctx)
+				stop()
+				assert.ErrorIs(t, sender.SyncRouteWithPeers(canceled, sandboxroute.Route{}), context.Canceled)
+				if tt.encryptedJoin {
+					for _, matching := range []bool{true, false} {
+						config := memberlist.DefaultLANConfig()
+						config.Name = peers.NodePrefixSandboxManager + strconv.FormatBool(matching)
+						config.BindAddr, config.AdvertiseAddr = "127.0.0.1", "127.0.0.1"
+						config.BindPort, config.AdvertisePort = 0, 0
+						config.TCPTimeout = 200 * time.Millisecond
+						config.LogOutput = io.Discard
+						config.SecretKey = bytes.Repeat([]byte{'k'}, 32)
+						if !matching {
+							config.SecretKey = bytes.Repeat([]byte{'x'}, 32)
+						}
+						receiver, err := memberlist.Create(config)
+						require.NoError(t, err)
+						t.Cleanup(func() { assert.NoError(t, receiver.Shutdown()) })
+						joined, err := receiver.Join([]string{net.JoinHostPort("127.0.0.1", strconv.Itoa(port))})
+						if matching {
+							require.NoError(t, err)
+							assert.Equal(t, 1, joined)
+							assert.Len(t, receiver.Members(), 2)
+							require.Eventually(t, func() bool { return len(sender.peers.GetPeers()) == 1 }, time.Second, 10*time.Millisecond)
+						} else {
+							require.Error(t, err)
+							assert.Zero(t, joined)
+						}
+					}
+				}
 				cancel()
 			}
 			select {
@@ -281,7 +433,7 @@ func TestRouteSyncLifecycle(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("component did not exit in time")
 			}
-			if tt.cancelSync {
+			if tt.cancelSync || tt.forbiddenKey {
 				select {
 				case <-sender.ready:
 					t.Fatal("canceled startup must not publish ready")
@@ -293,4 +445,59 @@ func TestRouteSyncLifecycle(t *testing.T) {
 			}
 		})
 	}
+}
+
+// routeSyncTestTLS provides the three Secrets required by the shared Load function without reading cluster certificates.
+func routeSyncTestTLS(t *testing.T) (peersecurity.Inputs, map[types.NamespacedName]*corev1.Secret) {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	ca := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "route-sync-test-ca"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, ca, ca, &caKey.PublicKey, caKey)
+	require.NoError(t, err)
+	ca, err = x509.ParseCertificate(caDER)
+	require.NoError(t, err)
+	inputs := peersecurity.Inputs{
+		PeerKeySecret:   types.NamespacedName{Namespace: "sandbox-system", Name: "peer-key"},
+		TLSServerSecret: types.NamespacedName{Namespace: "peer-security", Name: "server"},
+		TLSClientSecret: types.NamespacedName{Namespace: "peer-security", Name: "manager-client"},
+	}
+	secrets := map[types.NamespacedName]*corev1.Secret{
+		inputs.PeerKeySecret: {
+			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+			ObjectMeta: metav1.ObjectMeta{Namespace: inputs.PeerKeySecret.Namespace, Name: inputs.PeerKeySecret.Name},
+			Data:       map[string][]byte{"key": bytes.Repeat([]byte{'k'}, 32)},
+		},
+	}
+	for i, ref := range []types.NamespacedName{inputs.TLSServerSecret, inputs.TLSClientSecret} {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		require.NoError(t, err)
+		cert := &x509.Certificate{
+			SerialNumber: big.NewInt(int64(i + 2)), Subject: pkix.Name{CommonName: "sandbox-manager"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+			KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		}
+		if ref == inputs.TLSServerSecret {
+			cert.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+			cert.DNSNames = []string{"agentruntime.sandbox.agents.kruise.io"}
+		}
+		certDER, err := x509.CreateCertificate(rand.Reader, cert, ca, &key.PublicKey, caKey)
+		require.NoError(t, err)
+		keyDER, err := x509.MarshalECPrivateKey(key)
+		require.NoError(t, err)
+		secrets[ref] = &corev1.Secret{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+			ObjectMeta: metav1.ObjectMeta{Namespace: ref.Namespace, Name: ref.Name},
+			Data: map[string][]byte{
+				"ca.crt":  pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}),
+				"tls.crt": pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}),
+				"tls.key": pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+			},
+		}
+	}
+	return inputs, secrets
 }

@@ -18,18 +18,19 @@ package sandbox
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
+	"k8s.io/klog/v2"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"github.com/openkruise/agents/pkg/utils"
@@ -39,18 +40,21 @@ import (
 // RouteSync manages peer discovery and publishes route refreshes without serving them.
 // ready publishes the read-only outbound client after startup succeeds.
 type RouteSync struct {
-	cache       ctrlcache.Cache
-	peers       *peers.MemberlistPeers
-	bindAddress string
-	bindPort    int
-	ready       chan struct{}
-	outbound    *refresh.PeerOutbound
+	peerReader            ctrlclient.Reader
+	peers                 *peers.MemberlistPeers
+	bindAddress           string
+	bindPort              int
+	ready                 chan struct{}
+	outbound              *refresh.PeerOutbound
+	lastNoPeersLog        atomic.Int64
+	security              peersecurity.Inputs
+	securityRetryInterval time.Duration
 }
 
-// SetupRouteSync registers a dedicated peer cache and the plaintext sender lifecycle.
-// A disabled SandboxRouteSync gate or an empty selector skips validation and setup.
-// An empty bindAddress falls back to peers.FindPodIP; a non-positive bindPort uses 7946.
-func SetupRouteSync(mgr manager.Manager, peerSelector, bindAddress string, bindPort int) (*RouteSync, error) {
+// SetupRouteSync reuses the manager/gateway peer client, security configuration, and sender.
+// A disabled gate or empty selector skips validation, material loading, and listener startup.
+// An empty bindAddress uses peers.FindPodIP; a non-positive bindPort uses 7946.
+func SetupRouteSync(mgr manager.Manager, peerSelector, bindAddress string, bindPort int, security peersecurity.Inputs) (*RouteSync, error) {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxRouteSyncGate) || peerSelector == "" {
 		return nil, nil
 	}
@@ -60,36 +64,28 @@ func SetupRouteSync(mgr manager.Manager, peerSelector, bindAddress string, bindP
 	if bindPort > 65535 {
 		return nil, fmt.Errorf("--memberlist-bind-port must be in the range 1-65535, got %d", bindPort)
 	}
-	selector, err := labels.Parse(peerSelector)
-	if err != nil {
+	if _, err := labels.Parse(peerSelector); err != nil {
 		return nil, fmt.Errorf("parse peer selector: %w", err)
+	}
+	if err := security.Validate(); err != nil {
+		return nil, fmt.Errorf("validate controller peer security: %w", err)
 	}
 	nodeName := peers.NewPeerNodeName(true)
 
-	// The main Pod cache may exclude manager/gateway Pods; peer discovery uses a separate filter scope.
-	peerCache, err := ctrlcache.New(mgr.GetConfig(), ctrlcache.Options{
-		Scheme:                      mgr.GetScheme(),
-		Mapper:                      mgr.GetRESTMapper(),
-		ReaderFailOnMissingInformer: true,
-		ByObject: map[ctrlclient.Object]ctrlcache.ByObject{
-			&corev1.Pod{}: {
-				Namespaces: map[string]ctrlcache.Config{utils.DefaultSandboxDeployNamespace: {}},
-				Label:      selector,
-			},
-		},
-	})
+	// Like manager/gateway, build the peer client from the process rest.Config.
+	// The shared path only lists seed Pods and gets referenced Secrets, without adding informers.
+	peerClient, err := ctrlclient.New(mgr.GetConfig(), ctrlclient.Options{Scheme: mgr.GetScheme(), Mapper: mgr.GetRESTMapper()})
 	if err != nil {
-		return nil, fmt.Errorf("create peer cache: %w", err)
-	}
-	if _, err := peerCache.GetInformer(context.Background(), &corev1.Pod{}, ctrlcache.BlockUntilSynced(false)); err != nil {
-		return nil, fmt.Errorf("register peer informer: %w", err)
+		return nil, fmt.Errorf("create peer client: %w", err)
 	}
 	sender := &RouteSync{
-		cache:       peerCache,
-		peers:       peers.NewMemberlistPeers(peerCache, peers.NodePrefixSandboxController+nodeName, utils.DefaultSandboxDeployNamespace, peerSelector),
-		bindAddress: bindAddress,
-		bindPort:    bindPort,
-		ready:       make(chan struct{}),
+		security:              security,
+		securityRetryInterval: peers.DefaultJoinRetryInterval,
+		peerReader:            peerClient,
+		peers:                 peers.NewMemberlistPeers(peerClient, peers.NodePrefixSandboxController+nodeName, utils.DefaultSandboxDeployNamespace, peerSelector),
+		bindAddress:           bindAddress,
+		bindPort:              bindPort,
+		ready:                 make(chan struct{}),
 	}
 	if err := mgr.Add(sender); err != nil {
 		return nil, fmt.Errorf("register controller route sync: %w", err)
@@ -97,26 +93,36 @@ func SetupRouteSync(mgr manager.Manager, peerSelector, bindAddress string, bindP
 	return sender, nil
 }
 
-// GetCache lets the manager start and synchronize the peer cache before starting controllers.
-func (s *RouteSync) GetCache() ctrlcache.Cache { return s.cache }
+// NeedLeaderElection lets all replicas maintain membership without blocking other controllers on security material.
+func (s *RouteSync) NeedLeaderElection() bool { return false }
 
-// Start discovers peers from the synchronized Pod cache, joins memberlist, and waits for manager shutdown.
-func (s *RouteSync) Start(ctx context.Context) (err error) {
-	ctx, cancel := context.WithCancel(ctx)
-	cacheDone := make(chan error, 1)
-	go func() {
-		cacheErr := s.cache.Start(ctx)
-		cancel()
-		cacheDone <- cacheErr
-	}()
-	defer func() {
-		cancel()
-		err = errors.Join(err, <-cacheDone)
-	}()
-	if !s.cache.WaitForCacheSync(ctx) {
-		return fmt.Errorf("synchronize controller peer cache: %w", ctx.Err())
+// Start waits for peer Secrets through the shared loader, then starts the shared memberlist lifecycle.
+func (s *RouteSync) Start(ctx context.Context) error {
+	for attempt := 1; ; attempt++ {
+		loadCtx, loadCancel := context.WithTimeout(ctx, peersecurity.LoadTimeout)
+		key, _, clientTLS, loadErr := peersecurity.Load(loadCtx, s.peerReader, s.security)
+		loadCancel()
+		if loadErr == nil {
+			s.peers.SetSecretKey(key)
+			s.outbound = refresh.NewPeerOutbound(clientTLS)
+			break
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		logger := logf.FromContext(ctx)
+		if attempt > 1 {
+			logger = logger.V(2)
+		}
+		logger.Error(loadErr, "controller route sync waiting for valid security material", "retryInterval", s.securityRetryInterval)
+		retry := time.NewTimer(s.securityRetryInterval)
+		select {
+		case <-ctx.Done():
+			retry.Stop()
+			return ctx.Err()
+		case <-retry.C:
+		}
 	}
-	s.outbound = refresh.NewPeerOutbound(nil)
 	defer s.outbound.CloseIdleConnections()
 	if err := s.peers.Start(ctx, s.bindAddress, s.bindPort); err != nil {
 		return fmt.Errorf("start controller peers: %w", err)
@@ -134,6 +140,25 @@ func (s *RouteSync) SyncRouteWithPeers(ctx context.Context, route sandboxroute.R
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-s.ready:
-		return refresh.SyncRouteWithPeers(ctx, s.peers, route, s.outbound)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	peerList := s.peers.GetPeers()
+	if err := refresh.SyncRouteWithPeerList(ctx, peerList, route, s.outbound); err != nil {
+		return err
+	}
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KRef(route.Namespace, route.Name))
+	if len(peerList) == 0 {
+		// Skip when no receivers are discovered; limit logging across concurrent reconciles to once per minute.
+		now := time.Now().UnixNano()
+		previous := s.lastNoPeersLog.Load()
+		if (previous == 0 || now-previous >= int64(time.Minute)) && s.lastNoPeersLog.CompareAndSwap(previous, now) {
+			logger.Info("route sync skipped: no peers discovered", "peerCount", 0)
+		}
+		return nil
+	}
+	logger.Info("synced Sandbox route with peers", "peerCount", len(peerList),
+		"canRouteTraffic", route.CanRouteTraffic(), "resourceVersion", route.ResourceVersion)
+	return nil
 }

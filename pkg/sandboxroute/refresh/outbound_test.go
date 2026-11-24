@@ -18,15 +18,26 @@ package refresh
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
+	"log"
+	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -133,14 +144,101 @@ func TestSyncRouteWithPeers(t *testing.T) {
 	// The peerCount gauge is process-global: rows run serially and reset it.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			peerCount.Set(-1)
-			err := SyncRouteWithPeers(t.Context(), tt.peers, route, tt.outbound)
-			if tt.expectErr == "" {
-				assert.NoError(t, err)
-			} else {
-				assert.ErrorContains(t, err, tt.expectErr)
+			for _, snapshot := range []bool{false, true} {
+				peerCount.Set(-1)
+				var err error
+				if snapshot {
+					var peerList []peers.Peer
+					if tt.peers != nil {
+						peerList = tt.peers.GetPeers()
+					}
+					err = SyncRouteWithPeerList(t.Context(), peerList, route, tt.outbound)
+				} else {
+					err = SyncRouteWithPeers(t.Context(), tt.peers, route, tt.outbound)
+				}
+				if tt.expectErr == "" {
+					assert.NoError(t, err, "snapshot=%t", snapshot)
+				} else {
+					assert.ErrorContains(t, err, tt.expectErr, "snapshot=%t", snapshot)
+				}
+				assert.Equal(t, tt.expectPeerCount, testutil.ToFloat64(peerCount), "snapshot=%t", snapshot)
 			}
-			assert.Equal(t, tt.expectPeerCount, testutil.ToFloat64(peerCount))
+		})
+	}
+}
+
+func TestPeerOutboundMTLS(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	identity := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "controller-test"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, identity, identity, &key.PublicKey, key)
+	require.NoError(t, err)
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	require.NoError(t, err)
+	clientCert, err := tls.X509KeyPair(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
+	require.NoError(t, err)
+	identity, err = x509.ParseCertificate(der)
+	require.NoError(t, err)
+	clientTrust := x509.NewCertPool()
+	clientTrust.AddCert(identity)
+	route := sandboxroute.Route{ID: "sb-1", Namespace: "ns", Name: "sb-1", IP: "192.0.2.1", ResourceVersion: "2"}
+	var received atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, Path, r.URL.Path)
+		assert.NotEmpty(t, r.TLS.VerifiedChains)
+		var actual sandboxroute.Route
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&actual))
+		assert.Equal(t, route, actual)
+		received.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.Config.ErrorLog = log.New(io.Discard, "", 0)
+	server.TLS = &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientTrust, MinVersion: tls.VersionTLS12}
+	server.StartTLS()
+	defer server.Close()
+	serverTrust := x509.NewCertPool()
+	serverTrust.AddCert(server.Certificate())
+	validTLS := &tls.Config{RootCAs: serverTrust, Certificates: []tls.Certificate{clientCert}, ServerName: server.Certificate().DNSNames[0], MinVersion: tls.VersionTLS12}
+	tests := []struct {
+		name    string
+		modify  func(*tls.Config)
+		wantErr bool
+	}{
+		{name: "authenticated HTTPS refresh"},
+		{name: "missing client identity", modify: func(c *tls.Config) { c.Certificates = nil }, wantErr: true},
+		{name: "wrong server name", modify: func(c *tls.Config) { c.ServerName = "wrong.example" }, wantErr: true},
+		{name: "untrusted server", modify: func(c *tls.Config) { c.RootCAs = x509.NewCertPool() }, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := validTLS.Clone()
+			if tt.modify != nil {
+				tt.modify(config)
+			}
+			out := NewPeerOutbound(config)
+			defer out.CloseIdleConnections()
+			transport := out.client.Transport.(*http.Transport)
+			// Redirect only TCP dialing for the fixed port, preserving real TLS verification and shared fanout.
+			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				assert.Equal(t, "127.0.0.1:7789", address)
+				return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+			}
+			before := received.Load()
+			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+			defer cancel()
+			err := SyncRouteWithPeerList(ctx, []peers.Peer{{Name: "sm-test", IP: "127.0.0.1"}}, route, out)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Equal(t, before, received.Load())
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, before+1, received.Load())
+			}
 		})
 	}
 }

@@ -120,12 +120,12 @@ func TestNewPeerNodeName(t *testing.T) {
 		randomFallback bool
 		want           string
 	}{
-		{name: "HOSTNAME 优先", hostname: "host", podName: "pod", want: "host"},
-		{name: "允许随机回退时 HOSTNAME 仍优先", hostname: "host", podName: "pod", randomFallback: true, want: "host"},
-		{name: "POD_NAME 回退", podName: "pod", want: "pod"},
-		{name: "允许随机回退时仍使用 POD_NAME", podName: "pod", randomFallback: true, want: "pod"},
-		{name: "缺少环境变量时返回空值"},
-		{name: "缺少环境变量时允许 UUID 回退", randomFallback: true},
+		{name: "HOSTNAME takes precedence", hostname: "host", podName: "pod", want: "host"},
+		{name: "HOSTNAME takes precedence with random fallback enabled", hostname: "host", podName: "pod", randomFallback: true, want: "host"},
+		{name: "POD_NAME fallback", podName: "pod", want: "pod"},
+		{name: "POD_NAME is used with random fallback enabled", podName: "pod", randomFallback: true, want: "pod"},
+		{name: "missing environment names return an empty value"},
+		{name: "missing environment names allow UUID fallback", randomFallback: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

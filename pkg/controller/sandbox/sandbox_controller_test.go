@@ -868,41 +868,57 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 	withPodMetadata.PodInfo.Annotations = map[string]string{"example.com/key": "value"}
 	clearedIPWithMetadata := *withPodMetadata.DeepCopy()
 	clearedIPWithMetadata.PodInfo.PodIP = ""
+	pauseTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	pauseStarted := *running.DeepCopy()
+	pauseStarted.Conditions = append(pauseStarted.Conditions, metav1.Condition{
+		Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionFalse,
+		LastTransitionTime: metav1.NewTime(pauseTime),
+	})
+	pauseCompleted := status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true)
+	pauseCompleted.Conditions = append(pauseCompleted.Conditions, metav1.Condition{
+		Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(pauseTime.Add(time.Second)),
+	})
 	tests := []struct {
-		name       string
-		oldStatus  agentsv1alpha1.SandboxStatus
-		newStatus  agentsv1alpha1.SandboxStatus
-		wantSync   bool
-		disabled   bool
-		paused     bool
-		pool       bool
-		invalidUID bool
-		patchErr   error
-		syncErr    error
+		name             string
+		oldStatus        agentsv1alpha1.SandboxStatus
+		newStatus        agentsv1alpha1.SandboxStatus
+		wantSync         bool
+		disabled         bool
+		paused           bool
+		pool             bool
+		invalidUID       bool
+		patchErr         error
+		syncErr          error
+		waitForDeadline  bool
+		verifyCompletion bool
 	}{
-		{name: "原有无地址状态更新", oldStatus: status(agentsv1alpha1.SandboxPending, "", false), newStatus: status(agentsv1alpha1.SandboxRunning, "", false)},
-		{name: "启动后可路由", oldStatus: pending, newStatus: running, wantSync: true},
-		{name: "Ready 变为真", oldStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.1", false), newStatus: running, wantSync: true},
-		{name: "Ready 变为假", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.1", false), wantSync: true},
-		{name: "首次获得地址", oldStatus: status(agentsv1alpha1.SandboxRunning, "", true), newStatus: running, wantSync: true},
-		{name: "失去地址", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "", true), wantSync: true},
-		{name: "清空地址保留 Pod 元信息", oldStatus: withPodMetadata, newStatus: clearedIPWithMetadata, wantSync: true},
-		{name: "关闭同步仍清空地址", oldStatus: withPodMetadata, newStatus: clearedIPWithMetadata, disabled: true},
-		{name: "两个非空地址不触发", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.2", true)},
-		{name: "进入暂停", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true), wantSync: true},
-		{name: "恢复完成", oldStatus: status(agentsv1alpha1.SandboxResuming, "10.0.0.1", true), newStatus: running, wantSync: true},
-		{name: "升级开始", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxUpgrading, "10.0.0.1", true), wantSync: true},
-		{name: "终态不可路由", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxFailed, "10.0.0.1", false), wantSync: true},
-		{name: "不可路由状态之间不触发", oldStatus: pending, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", false)},
-		{name: "仅消息改变不触发", oldStatus: running, newStatus: messageChanged},
-		{name: "相同状态不 Patch", oldStatus: running, newStatus: running},
-		{name: "spec 已暂停时不触发", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true), paused: true},
-		{name: "未交付池实例不触发", oldStatus: pending, newStatus: running, pool: true},
-		{name: "关闭主动同步", oldStatus: pending, newStatus: running, disabled: true},
-		{name: "投影无效不影响状态写入", oldStatus: pending, newStatus: running, invalidUID: true},
-		{name: "发送失败不影响状态写入", oldStatus: pending, newStatus: running, wantSync: true, syncErr: fmt.Errorf("peer unavailable")},
-		{name: "Patch NotFound 不发送", oldStatus: pending, newStatus: running, patchErr: apierrors.NewNotFound(agentsv1alpha1.Resource("sandboxes"), "test-sandbox")},
-		{name: "Patch 失败不发送", oldStatus: pending, newStatus: running, patchErr: apierrors.NewForbidden(agentsv1alpha1.Resource("sandboxes"), "test-sandbox", fmt.Errorf("denied"))},
+		{name: "addressless status update", oldStatus: status(agentsv1alpha1.SandboxPending, "", false), newStatus: status(agentsv1alpha1.SandboxRunning, "", false)},
+		{name: "routable after startup", oldStatus: pending, newStatus: running, wantSync: true},
+		{name: "Ready becomes true", oldStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.1", false), newStatus: running, wantSync: true},
+		{name: "Ready becomes false", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.1", false), wantSync: true},
+		{name: "first traffic address", oldStatus: status(agentsv1alpha1.SandboxRunning, "", true), newStatus: running, wantSync: true},
+		{name: "traffic address removed", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "", true), wantSync: true},
+		{name: "clearing address preserves Pod metadata", oldStatus: withPodMetadata, newStatus: clearedIPWithMetadata, wantSync: true},
+		{name: "clearing address with sync disabled", oldStatus: withPodMetadata, newStatus: clearedIPWithMetadata, disabled: true},
+		{name: "nonempty address changes", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.2", true), wantSync: true},
+		{name: "address changes while unroutable", oldStatus: pending, newStatus: status(agentsv1alpha1.SandboxPending, "10.0.0.2", false), wantSync: true},
+		{name: "entering pause", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true), wantSync: true},
+		{name: "resume completes", oldStatus: status(agentsv1alpha1.SandboxResuming, "10.0.0.1", true), newStatus: running, wantSync: true},
+		{name: "upgrade starts", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxUpgrading, "10.0.0.1", true), wantSync: true},
+		{name: "terminal phase is unroutable", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxFailed, "10.0.0.1", false), wantSync: true},
+		{name: "unroutable transitions do not sync", oldStatus: pending, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", false)},
+		{name: "message-only change does not sync", oldStatus: running, newStatus: messageChanged},
+		{name: "identical status does not patch", oldStatus: running, newStatus: running},
+		{name: "already paused spec does not sync", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true), paused: true},
+		{name: "undelivered pool instance does not sync", oldStatus: pending, newStatus: running, pool: true},
+		{name: "active sync disabled", oldStatus: pending, newStatus: running, disabled: true},
+		{name: "invalid projection preserves status write", oldStatus: pending, newStatus: running, invalidUID: true},
+		{name: "send failure preserves status write", oldStatus: pending, newStatus: running, wantSync: true, syncErr: fmt.Errorf("peer unavailable")},
+		{name: "send deadline preserves status write", oldStatus: pending, newStatus: running, wantSync: true, waitForDeadline: true},
+		{name: "sync precedes completion accounting", oldStatus: pauseStarted, newStatus: pauseCompleted, wantSync: true, verifyCompletion: true},
+		{name: "Patch NotFound does not send", oldStatus: pending, newStatus: running, patchErr: apierrors.NewNotFound(agentsv1alpha1.Resource("sandboxes"), "test-sandbox")},
+		{name: "Patch failure does not send", oldStatus: pending, newStatus: running, patchErr: apierrors.NewForbidden(agentsv1alpha1.Resource("sandboxes"), "test-sandbox", fmt.Errorf("denied"))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -915,6 +931,15 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 				Status: tt.oldStatus,
 			}
 			box.Spec.Paused = tt.paused
+			if tt.verifyCompletion {
+				box.Namespace = "route-sync-completion"
+				t.Cleanup(func() {
+					forgetSandboxCreationResult(box.Namespace, box.Name)
+					DeleteSandboxMetrics(box.Namespace, box.Name)
+					sandboxPauseTotal.DeleteLabelValues(box.Namespace, metricResultSuccess)
+					sandboxPauseDuration.DeleteLabelValues(box.Namespace)
+				})
+			}
 			if tt.pool {
 				box.OwnerReferences = []metav1.OwnerReference{{APIVersion: agentsv1alpha1.GroupVersion.String(), Kind: "SandboxSet", Name: "pool", UID: "pool-uid", Controller: ptr.To(true)}}
 			}
@@ -946,7 +971,18 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 					assert.NotEqual(t, "10", route.ResourceVersion)
 					assert.Equal(t, persisted.ResourceVersion, box.ResourceVersion)
 					assert.Equal(t, tt.newStatus, box.Status, "local status must be updated before invoking the callback")
+					if tt.verifyCompletion {
+						assert.Zero(t, counterValue(t, sandboxPauseTotal, box.Namespace, metricResultSuccess), "completion must be counted after route sync")
+					}
+					deadline, ok := ctx.Deadline()
+					assert.True(t, ok, "active sync must have a deadline")
+					assert.LessOrEqual(t, time.Until(deadline), controllerRouteSyncTimeout)
 					sent = append(sent, route)
+					if tt.waitForDeadline {
+						<-ctx.Done()
+						assert.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+						return ctx.Err()
+					}
 					return tt.syncErr
 				}
 			}
@@ -961,7 +997,10 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 				wantCount = 1
 			}
 			assert.Len(t, sent, wantCount)
-			if tt.oldStatus.Phase == tt.newStatus.Phase && tt.name == "相同状态不 Patch" {
+			if tt.verifyCompletion {
+				assert.Equal(t, float64(1), counterValue(t, sandboxPauseTotal, box.Namespace, metricResultSuccess), "old status must remain available for completion accounting")
+			}
+			if tt.oldStatus.Phase == tt.newStatus.Phase && tt.name == "identical status does not patch" {
 				assert.Zero(t, patches)
 			} else {
 				assert.Equal(t, 1, patches)
@@ -7253,10 +7292,7 @@ func TestRejectCleanup(t *testing.T) {
 
 func TestDetermineUpgradeResumeReason(t *testing.T) {
 	// Enable the feature gate so the switch statement is exercised.
-	_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxUpgradeResumeFromFailedStepGate=true")
-	defer func() {
-		_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxUpgradeResumeFromFailedStepGate=false")
-	}()
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxUpgradeResumeFromFailedStepGate, true)
 
 	newStatus := &agentsv1alpha1.SandboxStatus{UpdateRevision: "new-hash"}
 	podWithHash := func(hash string) *corev1.Pod {

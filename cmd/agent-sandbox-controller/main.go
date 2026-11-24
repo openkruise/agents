@@ -53,6 +53,7 @@ import (
 	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxmetricsgc"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -96,6 +97,8 @@ func main() {
 	var peerSelector string
 	var networkInterface string
 	var memberlistBindPort int
+	var peerKeySecret, peerTLSServerSecret, peerTLSClientSecret string
+	var peerSecurity peersecurity.Inputs
 
 	// New variables for pprof
 	var enablePprof bool
@@ -143,6 +146,10 @@ func main() {
 	flag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip; only used when SandboxRouteSync is enabled; non-positive values use 7946.")
 	flag.StringVar(&peerSelector, "peer-selector", "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", "Label selector of memberlist seed Pods in sandbox-system; only used when SandboxRouteSync is enabled; empty disables sync.")
 	flag.StringVar(&networkInterface, "network-interface", "eni1", "Network interface whose single global-unicast address (IPv4 preferred, IPv6 otherwise) binds and advertises controller memberlist; only used when SandboxRouteSync is enabled; empty uses POD_IP or the first non-loopback IPv4.")
+
+	flag.StringVar(&peerKeySecret, "peer-key-secret", "", "Existing 32-byte memberlist key Secret (namespace/name); only used when SandboxRouteSync is enabled.")
+	flag.StringVar(&peerTLSServerSecret, "peer-tls-server-secret", "", "Peer TLS server Secret (namespace/name), shared with sandbox-manager; only used when SandboxRouteSync is enabled.")
+	flag.StringVar(&peerTLSClientSecret, "peer-tls-client-secret", "", "Peer TLS client Secret (namespace/name), shared with sandbox-manager; only used when SandboxRouteSync is enabled.")
 
 	var metricsAsyncWorkers int
 	var metricsAsyncQueueCap int
@@ -194,6 +201,21 @@ func main() {
 
 	var bindAddress string
 	if utilfeature.DefaultFeatureGate.Enabled(features.SandboxRouteSyncGate) && peerSelector != "" {
+		peerSecurity.PeerKeySecret, err = utils.ParseSecretRef(peerKeySecret)
+		if err != nil {
+			setupLog.Error(err, "invalid --peer-key-secret")
+			os.Exit(1)
+		}
+		peerSecurity.TLSServerSecret, err = utils.ParseSecretRef(peerTLSServerSecret)
+		if err != nil {
+			setupLog.Error(err, "invalid --peer-tls-server-secret")
+			os.Exit(1)
+		}
+		peerSecurity.TLSClientSecret, err = utils.ParseSecretRef(peerTLSClientSecret)
+		if err != nil {
+			setupLog.Error(err, "invalid --peer-tls-client-secret")
+			os.Exit(1)
+		}
 		bindAddress, err = network.ResolveNetworkInterfaceAddress(networkInterface)
 		if err != nil {
 			setupLog.Error(err, "invalid --network-interface", "interface", networkInterface)
@@ -380,7 +402,7 @@ func main() {
 		setupLog.Info("runtime client TLS disabled, using legacy plaintext runtime paths")
 	}
 
-	routeSync, err := sandboxctrl.SetupRouteSync(mgr, peerSelector, bindAddress, memberlistBindPort)
+	routeSync, err := sandboxctrl.SetupRouteSync(mgr, peerSelector, bindAddress, memberlistBindPort, peerSecurity)
 	if err != nil {
 		setupLog.Error(err, "unable to setup controller route sync")
 		os.Exit(1)

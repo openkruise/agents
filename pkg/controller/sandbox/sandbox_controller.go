@@ -93,6 +93,9 @@ const (
 	maximumPendingTimeout         = 3590 * time.Second
 	checkpointCreationWaitTimeout = 5 * time.Minute
 	checkpointWaitRequeueInterval = 5 * time.Second
+	// The total sync budget covers sender readiness, parallel requests, and retries,
+	// bounding the additional network waiting in reconcile.
+	controllerRouteSyncTimeout = 200 * time.Millisecond
 	// staleCacheRequeueInterval bounds the retry after the resourceVersion
 	// expectation guard times out, so a pending transition (e.g. a wake) is
 	// retried shortly instead of being deferred to the next informer resync.
@@ -718,6 +721,7 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	if reflect.DeepEqual(box.Status, newStatus) {
 		return nil
 	}
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	oldPhase := box.Status.Phase
 	var oldRoute sandboxroute.Route
 	var oldRouteErr error
@@ -773,31 +777,33 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 		return nil
 	}
 	if err != nil {
-		klog.FromContext(ctx).Error(err, "update sandbox status failed", "sandbox", klog.KObj(box), "patchStatus", string(patchBytes))
+		logger.Error(err, "update sandbox status failed", "patchStatus", string(patchBytes))
 		return err
 	}
 	core.ResourceVersionExpectations.Expect(rcvObject)
-	recordSandboxLifecycleCompletions(box, rcvObject.Status, newStatus)
-	klog.FromContext(ctx).Info("update sandbox status success", "sandbox", klog.KObj(box), "status", utils.DumpJson(newStatus))
+	// Preserve the old status for completion accounting, while exposing the successfully written status to the sender callback.
+	previous := *box
 	box.ResourceVersion = rcvObject.ResourceVersion
 	box.Status = newStatus
-	r.recordSandboxPhaseEvent(box, oldPhase, newStatus)
-	// Update metrics after status change (pod=nil: container metrics already recorded in Reconcile)
-	recordSandboxMetrics(box, nil)
 	if r.syncRouteWithPeers != nil {
 		newRoute, routeErr := sandboxroute.RouteFromSandbox(rcvObject)
 		if routeErr := cmp.Or(oldRouteErr, routeErr); routeErr != nil {
-			klog.FromContext(ctx).Error(routeErr, "failed to project Sandbox route, skipping peer sync", "sandbox", klog.KObj(box))
-		} else if oldRoute.CanRouteTraffic() != newRoute.CanRouteTraffic() {
+			logger.Error(routeErr, "failed to project Sandbox route, skipping peer sync")
+		} else if oldRoute.CanRouteTraffic() != newRoute.CanRouteTraffic() || oldRoute.IP != newRoute.IP {
 			// Status is already persisted; peer sync is best-effort acceleration, while informers ensure eventual convergence.
-			if err := r.syncRouteWithPeers(ctx, newRoute); err != nil {
-				klog.FromContext(ctx).Error(err, "failed to sync Sandbox route with peers", "sandbox", klog.KObj(box))
-			} else {
-				klog.FromContext(ctx).Info("synced Sandbox route with peers", "sandbox", klog.KObj(box),
-					"canRouteTraffic", newRoute.CanRouteTraffic(), "resourceVersion", newRoute.ResourceVersion)
+			syncCtx, cancel := context.WithTimeout(ctx, controllerRouteSyncTimeout)
+			err := r.syncRouteWithPeers(syncCtx, newRoute)
+			cancel()
+			if err != nil {
+				logger.Error(err, "failed to sync Sandbox route with peers")
 			}
 		}
 	}
+	recordSandboxLifecycleCompletions(&previous, rcvObject.Status, newStatus)
+	logger.Info("update sandbox status success", "status", utils.DumpJson(newStatus))
+	r.recordSandboxPhaseEvent(box, oldPhase, newStatus)
+	// Update metrics after status change (pod=nil: container metrics already recorded in Reconcile)
+	recordSandboxMetrics(box, nil)
 	return nil
 }
 
