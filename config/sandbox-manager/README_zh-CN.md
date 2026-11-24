@@ -33,21 +33,22 @@ docker build -t sandbox-manager:latest .
 注解模式下，客户端可以同时传入 `network.rules` 和 `e2b.agents.kruise.io/security-profile` 元数据，后续更新 E2B 网络配置时会保留原生 profile。
 默认模式使用旧 `security-rules` 注解保存 `network.rules` 中的 HTTP 请求头改写规则，与原生 profile 同时配置时会返回 HTTP 400。
 
-例如，创建沙箱时将 `allow_internet_access` 设为 `false`，将 `network.allowOut` 设为 `["192.0.2.10"]`。
-用 Sandbox 在 Kubernetes 中的命名空间和资源名称读取注解。
+按 SDK 示例创建沙箱后，用 Sandbox 在 Kubernetes 中的命名空间和资源名称读取两种策略。[SDK 配置示例](../../sdk/customized_e2b/README.md#outbound-network-policy)
 
 ```shell
 kubectl get sandboxes.agents.kruise.io "$SANDBOX_NAME" -n "$NAMESPACE" \
-  -o go-template='{{index .metadata.annotations "agents.kruise.io/e2b-network"}}{{"\n"}}'
+  -o go-template='e2b-network={{index .metadata.annotations "agents.kruise.io/e2b-network"}}{{"\n"}}security-profile={{index .metadata.annotations "agents.kruise.io/security-profile"}}{{"\n"}}'
 ```
 
-注解模式下，该命令输出以下 JSON。
+注解模式下，输出的每一行对应一个注解的 JSON 值。
 
-```json
-{"allowInternetAccess":false,"network":{"allowOut":["192.0.2.10"]}}
+```text
+e2b-network={"allowInternetAccess":false,"network":{"allowOut":["192.0.2.10"]}}
+security-profile={"tcpRules":[{"name":"deny-ssh","match":[{"ports":[22]}],"action":"Deny"}]}
 ```
 
-完整的创建请求、生成的 Sandbox YAML，以及更新策略时需要传入的字段，见 [E2B 网络注解说明](../../docs/proposals/20261121-e2b-inline-security-profile.md#e2b-network-annotation)。
+注解模式下，`e2b-network` 中的 `allowInternetAccess: false` 会拒绝未命中前序规则的 TCP 流量，Sandbox 和 Pod 上的 `agents.kruise.io/allow-internet-access` 标签仍为 `"true"`。
+网络更新时各字段的替换、清空和保留行为见 proposal。[读取和更新网络策略](../../docs/proposals/20261121-e2b-inline-security-profile.md#reading-and-updating-the-network-policy)
 
 ## API Key Quota
 

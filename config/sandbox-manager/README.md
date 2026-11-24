@@ -35,20 +35,22 @@ Existing sandboxes continue to use the backend selected at creation.
 In annotation mode, a client can send both `network.rules` and the `e2b.agents.kruise.io/security-profile` metadata key, and later network updates preserve the native profile.
 In the default mode, HTTP header transforms in `network.rules` use the legacy `security-rules` annotation and return HTTP 400 when combined with a native profile.
 
-For a sandbox created with `allow_internet_access` set to `false` and `network.allowOut` set to `["192.0.2.10"]`, read the annotation using the Sandbox's Kubernetes namespace and object name.
+To inspect both policies on the Sandbox created by the SDK example, use its Kubernetes namespace and object name. [SDK example](../../sdk/customized_e2b/README.md#outbound-network-policy)
 
 ```shell
 kubectl get sandboxes.agents.kruise.io "$SANDBOX_NAME" -n "$NAMESPACE" \
-  -o go-template='{{index .metadata.annotations "agents.kruise.io/e2b-network"}}{{"\n"}}'
+  -o go-template='e2b-network={{index .metadata.annotations "agents.kruise.io/e2b-network"}}{{"\n"}}security-profile={{index .metadata.annotations "agents.kruise.io/security-profile"}}{{"\n"}}'
 ```
 
-In annotation mode, the command prints the following JSON.
+In annotation mode, the command prints one JSON value per annotation.
 
-```json
-{"allowInternetAccess":false,"network":{"allowOut":["192.0.2.10"]}}
+```text
+e2b-network={"allowInternetAccess":false,"network":{"allowOut":["192.0.2.10"]}}
+security-profile={"tcpRules":[{"name":"deny-ssh","match":[{"ports":[22]}],"action":"Deny"}]}
 ```
 
-The proposal includes a create request, the resulting Sandbox YAML, and the fields to send when updating a policy. [E2B network annotation](../../docs/proposals/20261121-e2b-inline-security-profile.md#e2b-network-annotation)
+The `agents.kruise.io/allow-internet-access` label stays `"true"` in annotation mode even when `e2b-network` requests a final TCP deny.
+The proposal shows which fields a network update replaces, clears, or preserves. [Reading and updating the network policy](../../docs/proposals/20261121-e2b-inline-security-profile.md#reading-and-updating-the-network-policy)
 
 ## API Key Quota
 

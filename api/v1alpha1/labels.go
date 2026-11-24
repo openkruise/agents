@@ -62,9 +62,9 @@ const (
 	// value, so unlike LabelSandboxName the controller writes it on every pod and
 	// TrafficPolicy prefers to select by it.
 	LabelSandboxUID = InternalPrefix + "sandbox-uid"
-	// LabelAllowInternetAccess indicates whether the sandbox is allowed internet access.
-	// Default is "true"; set to "false" when the user explicitly disables internet access.
-	// GlobalTrafficPolicy uses this label to select pods and apply egress rules.
+	// LabelAllowInternetAccess lets a GlobalTrafficPolicy select Pods with internet access disabled.
+	// For E2B sandboxes it defaults to "true". An explicit false sets it to "false" in TrafficPolicy mode.
+	// In annotation mode the label stays "true" and the e2b-network annotation carries the setting.
 	LabelAllowInternetAccess = InternalPrefix + "allow-internet-access"
 	// LabelSandboxID stores the authoritative ID of a Sandbox when it has one.
 	LabelSandboxID = InternalPrefix + "sandbox-id"

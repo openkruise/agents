@@ -42,8 +42,28 @@ if __name__ == "__main__":
         sbx.run_code("print('hello world')")
 ```
 
-For outbound network policy, supply `allow_internet_access` and `network` in the E2B create request.
-With annotation mode enabled, sandbox-manager writes these settings to `agents.kruise.io/e2b-network` on the delivered Sandbox. [Example request and resulting Sandbox annotation](../../docs/proposals/20261121-e2b-inline-security-profile.md#e2b-network-annotation)
+## Outbound network policy
+
+Pass E2B settings to `Sandbox.create` through `allow_internet_access` and `network`, and pass a native SecurityProfile as a JSON string in `metadata`.
+This example works with either sandbox-manager network mode.
+
+```python
+import json
+from e2b import Sandbox
+
+profile = {"tcpRules": [{"name": "deny-ssh", "match": [{"ports": [22]}], "action": "Deny"}]}
+sandbox = Sandbox.create(
+    template="my-template",
+    allow_internet_access=False,
+    network={"allow_out": ["192.0.2.10"]},
+    metadata={"e2b.agents.kruise.io/security-profile": json.dumps(profile)},
+)
+```
+
+The Python SDK uses `allow_out` and `deny_out` inside `network`, and the HTTP API uses `allowOut` and `denyOut`.
+Sandbox-manager writes the native profile to `agents.kruise.io/security-profile` in either mode.
+With `--e2b-network-annotation=true`, it also writes the E2B settings to `agents.kruise.io/e2b-network`.
+To add HTTP header transforms alongside the profile, use annotation mode and Python `e2b>=2.24.0` for `network["rules"]`. [Combined Python example](../../docs/proposals/20261121-e2b-inline-security-profile.md#inline-securityprofile-for-e2b-sandboxes)
 
 ## Traffic JWT Refresh
 
