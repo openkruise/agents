@@ -97,7 +97,9 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 // depending on this package's concrete type.
 func (s *Sandbox) RefreshFunc() runtime.RefreshFunc {
 	return func(ctx context.Context) (*v1alpha1.Sandbox, error) {
-		if err := s.InplaceRefresh(ctx, false); err != nil {
+		// Post-init steps may update annotations on this wrapper. Keep newer
+		// informer state private instead of sharing its maps with those writes.
+		if err := s.InplaceRefresh(ctx, true); err != nil {
 			return nil, err
 		}
 		return s.Sandbox, nil

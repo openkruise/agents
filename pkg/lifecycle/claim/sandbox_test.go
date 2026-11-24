@@ -17,11 +17,19 @@ limitations under the License.
 package claim
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 )
@@ -226,4 +234,45 @@ func TestWakeOnIngressTrafficRoundTripPrunesToFreshSpec(t *testing.T) {
 	ClearWakeOnIngressTraffic(sbx)
 	assert.Equal(t, fresh.Spec.AutoPausePolicy, sbx.Spec.AutoPausePolicy,
 		"arm then clear must leave a pooled spec byte-identical to a fresh one")
+}
+
+func TestSandbox_RefreshFuncKeepsCachedFieldsReadOnly(t *testing.T) {
+	cached := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "runtime-refresh-readonly",
+			Namespace:       "default",
+			UID:             "runtime-refresh-readonly",
+			ResourceVersion: "2",
+			Annotations:     map[string]string{"token": "old"},
+		},
+		Spec: v1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"identity": "old"}},
+				},
+			},
+		},
+	}
+	before := cached.DeepCopy()
+	scheme := k8sruntime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+			// Match UnsafeDisableDeepCopy: Get copies the top-level struct,
+			// while nested maps and the pod template still belong to the cache.
+			*obj.(*v1alpha1.Sandbox) = *cached
+			return nil
+		},
+	}).Build()
+	initial := cached.DeepCopy()
+	initial.ResourceVersion = "1"
+	s := NewSandbox(initial, &apiReaderOverrideCache{client: fc})
+
+	refreshed, err := s.RefreshFunc()(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "2", refreshed.ResourceVersion)
+	require.Equal(t, cached, refreshed)
+	refreshed.Annotations["token"] = "fresh"
+	refreshed.Spec.Template.Labels["identity"] = "fresh"
+	assert.Equal(t, before, cached, "runtime post-processing must not mutate informer fields")
 }
