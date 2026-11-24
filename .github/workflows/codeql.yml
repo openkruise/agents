@@ -87,10 +87,10 @@ jobs:
           queries: security-extended
           config: |
             paths-ignore:
-              - test
-              - examples
-              - vendor
-              - third_party
+              - "**/test/**"
+              - "**/examples/**"
+              - "**/vendor/**"
+              - "**/third_party/**"
             ${{ matrix.extra-config }}
 
       - name: Autobuild

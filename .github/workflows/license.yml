@@ -25,7 +25,6 @@ jobs:
         uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
         with:
           ruby-version: 2.6
-      - name: Install dependencies
-        run: gem install license_finder
+          bundler-cache: true
       - name: Run tests
-        run: license_finder --decisions_file .license/dependency_decisions.yml
+        run: bundle exec license_finder --decisions_file .license/dependency_decisions.yml
