@@ -1,5 +1,5 @@
 # Build the commit-job binary
-FROM golang:1.26 AS builder
+FROM golang:1.26@sha256:4165ee6bf3b7811fd7b40373290405c83d0167dcb87ee5f29c427cdcef45ff8f AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION
@@ -22,7 +22,7 @@ WORKDIR /workspace/nerdctl-builder
 RUN git clone -b ${NERDCTL_BRANCH:-v2.1.3} https://github.com/containerd/nerdctl.git
 RUN cd nerdctl && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} make
 
-FROM alpine:3.20
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 WORKDIR /
 
 COPY --from=builder /workspace/commit-job .
