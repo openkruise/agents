@@ -84,6 +84,9 @@ func (r *Reconciler) buildSandboxTemplateSpec(ctx context.Context, sbs *agentsv1
 
 func (r *Reconciler) validateTemplateRef(ctx context.Context, tpl *agentsv1alpha1.SandboxTemplate) error {
 	if !sandboxtemplate.IsBuildVersion(tpl) {
+		if tpl.DeletionTimestamp != nil {
+			return fmt.Errorf("sandbox template %s/%s is being deleted", tpl.Namespace, tpl.Name)
+		}
 		return nil
 	}
 	if tpl.DeletionTimestamp != nil || !sandboxtemplate.IsStaticReady(tpl) {

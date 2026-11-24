@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils/fieldindex"
 )
 
 // newExecProbe builds a minimal valid exec probe for the validation cases.
@@ -916,7 +917,8 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 
 			// Create fake client
 			objs := []runtime.Object{}
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithRuntimeObjects(objs...).Build()
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithRuntimeObjects(objs...).
+				WithIndex(&v1alpha1.SandboxTemplate{}, fieldindex.IndexNameForTemplateName, fieldindex.TemplateNameIndexFunc).Build()
 
 			// Create decoder
 			decoder := admission.NewDecoder(scheme.Scheme)
@@ -972,7 +974,10 @@ func TestSandboxSetManagedTemplateAdmission(t *testing.T) {
 		missingBuild bool
 		getError     bool
 		malformed    bool
+		malformedOld bool
 		listError    error
+		operation    admissionv1.Operation
+		oldRef       *v1alpha1.SandboxTemplateRef
 		code         int32
 		message      string
 	}{
@@ -1002,6 +1007,27 @@ func TestSandboxSetManagedTemplateAdmission(t *testing.T) {
 		}},
 		{name: "missing reference retains existing behavior", missingBuild: true},
 		{name: "reference lookup unavailable", getError: true, code: 503, message: "read referenced template"},
+		{name: "deleting non-build template", code: 422, message: "being deleted", mutate: func(v *v1alpha1.SandboxTemplate) {
+			v.Labels = nil
+			v.Status = v1alpha1.SandboxTemplateStatus{}
+			v.DeletionTimestamp = ptr.To(metav1.Now())
+			v.Finalizers = []string{"test/retain"}
+		}},
+		{name: "unchanged templateRef skips the guard while the Version is deleting", operation: admissionv1.Update, mutate: func(v *v1alpha1.SandboxTemplate) {
+			v.DeletionTimestamp = ptr.To(metav1.Now())
+			v.Finalizers = []string{"test/retain"}
+		}},
+		{name: "templateRef switch to a deleting Version is rejected", operation: admissionv1.Update,
+			oldRef: &v1alpha1.SandboxTemplateRef{Name: "st-older"}, code: 422, message: "only Ready static Versions", mutate: func(v *v1alpha1.SandboxTemplate) {
+				v.DeletionTimestamp = ptr.To(metav1.Now())
+				v.Finalizers = []string{"test/retain"}
+			}},
+		{name: "templateRef switch to a stale Ready Version is rejected", operation: admissionv1.Update,
+			oldRef: &v1alpha1.SandboxTemplateRef{Name: "st-older"}, code: 422, message: "only Ready static Versions", mutate: func(v *v1alpha1.SandboxTemplate) {
+				v.Status.ObservedGeneration = 0
+			}},
+		{name: "occupied name allows UPDATE", operation: admissionv1.Update, mutate: func(v *v1alpha1.SandboxTemplate) { v.Labels[v1alpha1.LabelTemplateName] = "pool" }},
+		{name: "malformed old object", operation: admissionv1.Update, malformedOld: true, code: 400, message: "unexpected end of JSON input"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := runtime.NewScheme()
@@ -1015,7 +1041,8 @@ func TestSandboxSetManagedTemplateAdmission(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(version)
 			}
-			builder := fake.NewClientBuilder().WithScheme(s)
+			builder := fake.NewClientBuilder().WithScheme(s).
+				WithIndex(&v1alpha1.SandboxTemplate{}, fieldindex.IndexNameForTemplateName, fieldindex.TemplateNameIndexFunc)
 			if !tt.missingBuild {
 				builder = builder.WithObjects(version)
 			}
@@ -1039,8 +1066,22 @@ func TestSandboxSetManagedTemplateAdmission(t *testing.T) {
 			if tt.malformed {
 				raw = []byte("{")
 			}
+			oldRaw := raw
+			if tt.oldRef != nil {
+				oldPool := pool.DeepCopy()
+				oldPool.Spec.TemplateRef = tt.oldRef
+				oldRaw, err = json.Marshal(oldPool)
+				require.NoError(t, err)
+			}
+			if tt.malformedOld {
+				oldRaw = []byte("{")
+			}
+			operation := tt.operation
+			if operation == "" {
+				operation = admissionv1.Create
+			}
 			handler := &SandboxSetValidatingHandler{Client: builder.Build(), Decoder: admission.NewDecoder(s)}
-			response := handler.Handle(t.Context(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Create, Object: runtime.RawExtension{Raw: raw}}})
+			response := handler.Handle(t.Context(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: operation, Object: runtime.RawExtension{Raw: raw}, OldObject: runtime.RawExtension{Raw: oldRaw}}})
 			if tt.code == 0 {
 				require.True(t, response.Allowed, "%v", response.Result)
 			} else {

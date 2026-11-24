@@ -24,11 +24,14 @@ import (
 	"strconv"
 	"strings"
 
+	admissionv1 "k8s.io/api/admission/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kubernetes/pkg/apis/core"
 	corev1conv "k8s.io/kubernetes/pkg/apis/core/v1"
@@ -39,6 +42,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/autopause"
 	"github.com/openkruise/agents/pkg/sandboxtemplate"
+	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
 )
 
@@ -69,23 +73,45 @@ func (h *SandboxSetValidatingHandler) Handle(ctx context.Context, req admission.
 	if len(errList) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())
 	}
-	versions := &agentsv1alpha1.SandboxTemplateList{}
-	if err := h.Client.List(ctx, versions, client.InNamespace(obj.Namespace), client.MatchingLabels{agentsv1alpha1.LabelTemplateName: obj.Name}); err != nil {
-		if !meta.IsNoMatchError(err) {
-			return admission.Errored(http.StatusServiceUnavailable, fmt.Errorf("check pool name: %w", err))
+	// Occupancy is a creation-time concern: names are immutable, so re-checking
+	// an acknowledged pool on UPDATE would turn the create-time name race into
+	// a permanent 409 lockout. Names that are not valid label values can never
+	// equal the template-name label (DNS1123 label, <=63 chars), so the List is
+	// skipped for them entirely.
+	if req.Operation == admissionv1.Create && len(utilvalidation.IsValidLabelValue(obj.Name)) == 0 {
+		versions := &agentsv1alpha1.SandboxTemplateList{}
+		if err := h.Client.List(ctx, versions, client.InNamespace(obj.Namespace), client.MatchingFields{fieldindex.IndexNameForTemplateName: obj.Name}); err != nil {
+			if !meta.IsNoMatchError(err) {
+				return admission.Errored(http.StatusServiceUnavailable, fmt.Errorf("check pool name: %w", err))
+			}
+		} else if len(versions.Items) > 0 {
+			return admission.Errored(http.StatusConflict, fmt.Errorf("name %q is occupied by template Builds", obj.Name))
 		}
-	} else if len(versions.Items) > 0 {
-		return admission.Errored(http.StatusConflict, fmt.Errorf("name %q is occupied by template Builds", obj.Name))
 	}
-	if obj.Spec.TemplateRef != nil {
+	// Only guard binding changes: an already-bound pool must stay manageable
+	// (scaling, relabeling) while its referenced Version is terminating or
+	// temporarily not Ready. The /scale subresource bypasses this webhook, so
+	// the controller-side validateTemplateRef is the steady-state backstop.
+	templateRefChanged := true
+	if req.Operation == admissionv1.Update {
+		old := &agentsv1alpha1.SandboxSet{}
+		if err := h.Decoder.DecodeRaw(req.OldObject, old); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+		templateRefChanged = !equality.Semantic.DeepEqual(old.Spec.TemplateRef, obj.Spec.TemplateRef)
+	}
+	if obj.Spec.TemplateRef != nil && templateRefChanged {
 		template := &agentsv1alpha1.SandboxTemplate{}
 		err := h.Client.Get(ctx, client.ObjectKey{Namespace: obj.Namespace, Name: obj.Spec.TemplateRef.Name}, template)
-		if err == nil && sandboxtemplate.IsBuildVersion(template) {
-			if template.DeletionTimestamp != nil || !sandboxtemplate.IsStaticReady(template) {
-				return admission.Errored(http.StatusUnprocessableEntity, field.Forbidden(field.NewPath("spec", "templateRef"), "only Ready static Versions can be referenced"))
+		if err == nil {
+			if sandboxtemplate.IsBuildVersion(template) {
+				if template.DeletionTimestamp != nil || !sandboxtemplate.IsStaticReady(template) {
+					return admission.Errored(http.StatusUnprocessableEntity, field.Forbidden(field.NewPath("spec", "templateRef"), "only Ready static Versions can be referenced"))
+				}
+			} else if template.DeletionTimestamp != nil {
+				return admission.Errored(http.StatusUnprocessableEntity, field.Forbidden(field.NewPath("spec", "templateRef"), "referenced template is being deleted"))
 			}
-		}
-		if err != nil && !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
+		} else if !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
 			return admission.Errored(http.StatusServiceUnavailable, fmt.Errorf("read referenced template: %w", err))
 		}
 	}

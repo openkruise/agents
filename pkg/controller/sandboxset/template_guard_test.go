@@ -47,7 +47,8 @@ func TestTemplateGuardBeforeMaterialization(t *testing.T) {
 	}
 	pool := &api.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: template.Namespace}, Spec: api.SandboxSetSpec{EmbeddedSandboxTemplate: api.EmbeddedSandboxTemplate{TemplateRef: &api.SandboxTemplateRef{Name: template.Name}}}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template).WithStatusSubresource(&api.SandboxTemplate{}).Build()
-	r := &Reconciler{Client: c, Scheme: scheme}
+	recorder := record.NewFakeRecorder(4)
+	r := &Reconciler{Client: c, Scheme: scheme, Recorder: recorder}
 	_, err := r.buildSandboxTemplateSpec(context.Background(), pool)
 	require.NoError(t, err)
 	current := &api.SandboxTemplate{}
@@ -56,6 +57,13 @@ func TestTemplateGuardBeforeMaterialization(t *testing.T) {
 	require.NoError(t, c.Status().Update(context.Background(), current))
 	_, err = r.createSandbox(context.Background(), pool, "revision")
 	require.ErrorContains(t, err, "not a Ready static Version")
+	select {
+	case event := <-recorder.Events:
+		require.Contains(t, event, EventCreateSandboxFailed)
+		require.Contains(t, event, "not a Ready static Version")
+	default:
+		t.Fatal("expected a create-sandbox-failed event for the rejected templateRef")
+	}
 	boxes := &api.SandboxList{}
 	require.NoError(t, c.List(context.Background(), boxes))
 	require.Empty(t, boxes.Items)
@@ -93,6 +101,19 @@ func TestManagedTemplateRefMaterialization(t *testing.T) {
 			v.Labels = nil
 			v.OwnerReferences = []metav1.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: "Checkpoint", Name: "capture", UID: "checkpoint-uid", Controller: ptr.To(true)}}
 			v.Status = api.SandboxTemplateStatus{}
+		}},
+		{name: "deleting unmanaged template", errorMessage: "is being deleted", mutate: func(v *api.SandboxTemplate) {
+			v.Labels = nil
+			v.Status = api.SandboxTemplateStatus{}
+			v.DeletionTimestamp = ptr.To(metav1.Now())
+			v.Finalizers = []string{"test/retain"}
+		}},
+		{name: "deleting ordinary Snapshot template", errorMessage: "is being deleted", mutate: func(v *api.SandboxTemplate) {
+			v.Labels = nil
+			v.OwnerReferences = []metav1.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: "Checkpoint", Name: "capture", UID: "checkpoint-uid", Controller: ptr.To(true)}}
+			v.Status = api.SandboxTemplateStatus{}
+			v.DeletionTimestamp = ptr.To(metav1.Now())
+			v.Finalizers = []string{"test/retain"}
 		}},
 		{name: "Draft", errorMessage: "not a Ready static Version", mutate: func(v *api.SandboxTemplate) { v.Status.Phase = api.SandboxTemplatePhasePending }},
 		{name: "stale Ready", errorMessage: "not a Ready static Version", mutate: func(v *api.SandboxTemplate) { v.Status.ObservedGeneration = 0 }},
