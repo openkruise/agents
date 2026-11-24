@@ -32,6 +32,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/pkg/identity/aead"
 )
@@ -612,10 +613,12 @@ func TestFormattingARecordRedactsIt(t *testing.T) {
 	}
 }
 
-// TestFinishRecordsATerminalStatus covers the other half of the state machine.
-// Without it a completed session stays Exchanging forever and nothing can tell
-// a finished round trip from one still in flight.
-func TestFinishRecordsATerminalStatus(t *testing.T) {
+// TestFinishEndsTheSession covers the other half of the state machine: a
+// finished session is deleted, reports its outcome back to the caller, and
+// leaves nothing a replayed callback could claim. Without it a completed
+// session would sit in Exchanging until the sweep reached it, one leftover
+// Secret per authorization.
+func TestFinishEndsTheSession(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
@@ -649,32 +652,45 @@ func TestFinishRecordsATerminalStatus(t *testing.T) {
 				if err == nil {
 					t.Fatalf("Finish accepted %q", tt.status)
 				}
+				// A refused Finish must remove nothing.
+				got, getErr := sessions.Get(ctx, testSessionKey())
+				if getErr != nil {
+					t.Fatalf("Get after a refused Finish: %v", getErr)
+				}
+				if got.Status != StatusExchanging {
+					t.Errorf("status is %q after a refused Finish, want it left Exchanging", got.Status)
+				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("Finish: %v", err)
 			}
 
-			got, err := sessions.Get(ctx, testSessionKey())
-			if err != nil {
-				t.Fatalf("Get: %v", err)
+			if claimed.Status != tt.status {
+				t.Errorf("reported outcome is %q, want %q", claimed.Status, tt.status)
 			}
-			if got.Status != tt.status {
-				t.Errorf("stored status is %q, want %q", got.Status, tt.status)
+			if claimed.Version != "" {
+				t.Errorf("a deleted session still reports version %q", claimed.Version)
 			}
-			// A finished session cannot be claimed again.
-			if _, err := sessions.BeginExchange(ctx, testSessionKey(), now); !errors.Is(err, ErrNotPending) {
-				t.Errorf("claiming a finished session returned %v, want ErrNotPending", err)
+			if _, err := sessions.Get(ctx, testSessionKey()); !errors.Is(err, ErrNotFound) {
+				t.Errorf("Get on a finished session returned %v, want ErrNotFound", err)
+			}
+			// A replayed callback resolves nothing and claims nothing.
+			if _, err := sessions.ResolveStateDigest(ctx, testSessionKey().StateDigest); !errors.Is(err, ErrNotFound) {
+				t.Errorf("resolving a finished session returned %v, want ErrNotFound", err)
+			}
+			if _, err := sessions.BeginExchange(ctx, testSessionKey(), now); !errors.Is(err, ErrNotFound) {
+				t.Errorf("claiming a finished session returned %v, want ErrNotFound", err)
 			}
 		})
 	}
 }
 
 // TestFinishRefusesAPendingSession covers the state machine guard directly: a
-// session that was never claimed must not reach a terminal status. Every case
-// in TestFinishRecordsATerminalStatus calls BeginExchange first, so without
-// this, a caller could skip straight from Pending to Completed and never pass
-// through BeginExchange's single-use check at all.
+// session that was never claimed must not be finished. Every case in
+// TestFinishEndsTheSession calls BeginExchange first, so without this, a
+// caller could skip straight from Pending to Completed and never pass through
+// BeginExchange's single-use check at all.
 func TestFinishRefusesAPendingSession(t *testing.T) {
 	sessions, _, _ := newStores(t)
 	ctx := context.Background()
@@ -781,42 +797,116 @@ func TestFinishIsCompareAndSwap(t *testing.T) {
 	}
 }
 
-// TestFinishPrefersConflictToAStaleStatusRead covers the gap zmberg's review
-// found: the version comparison above and the status guard below both run
-// against the same read, but a client backed by an informer cache can still
-// serve the pre-exchange Secret here even after BeginExchange's own write
-// landed directly against the API server. Checking status first would read
-// that stale copy's Pending and refuse with the terminal ErrNotPending, when
-// the session actually already exchanged its token successfully and can
-// then never be finished. Checking the version first means any mismatch,
-// whatever status the stale read happens to show, gets the retryable
-// ErrConflict instead.
-//
-// The store here is never actually stale; the fake client always serves the
-// current Secret, genuinely still Pending. What stands in for the cache
-// lagging behind is the caller's side of the same race: a Version from a
-// BeginExchange call the store has not seen yet.
-func TestFinishPrefersConflictToAStaleStatusRead(t *testing.T) {
-	sessions, _, _ := newStores(t)
+// TestFinishDeleteIsCompareAndSwap covers the window the version check in
+// Finish cannot: a writer landing after Finish's read but before its delete.
+// The delete carries the caller's version as a precondition, so it must lose
+// to that writer with ErrConflict and remove nothing, rather than delete a
+// session that has moved on underneath it.
+func TestFinishDeleteIsCompareAndSwap(t *testing.T) {
+	sessions, _, c := newStores(t)
 	ctx := context.Background()
 	now := time.Now()
 
 	if err := sessions.Create(ctx, testSession(now)); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-
-	aheadOfTheStore := &Session{Key: testSessionKey(), Version: "a-version-the-store-never-wrote"}
-	err := sessions.Finish(ctx, aheadOfTheStore, StatusCompleted)
-	if !errors.Is(err, ErrConflict) {
-		t.Errorf("Finish with a version mismatched against a Pending read returned %v, want ErrConflict", err)
+	claimed, err := sessions.BeginExchange(ctx, testSessionKey(), now)
+	if err != nil {
+		t.Fatalf("BeginExchange: %v", err)
 	}
 
+	secretKey := client.ObjectKey{Namespace: storeNamespace, Name: SessionSecretName(testSessionKey())}
+	racing := interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			// Another writer gets in first, between Finish's read and this
+			// delete.
+			current := &corev1.Secret{}
+			if err := cl.Get(ctx, secretKey, current); err != nil {
+				return err
+			}
+			current.Labels["written-by-a-concurrent-writer"] = "true"
+			if err := cl.Update(ctx, current); err != nil {
+				return err
+			}
+			return cl.Delete(ctx, obj, opts...)
+		},
+	})
+	racingStore, err := NewSecretSessionStore(racing, testKeyring(t), storeNamespace)
+	if err != nil {
+		t.Fatalf("NewSecretSessionStore: %v", err)
+	}
+
+	if err := racingStore.Finish(ctx, claimed, StatusCompleted); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Finish racing a concurrent writer returned %v, want ErrConflict", err)
+	}
+	if _, err := sessions.Get(ctx, testSessionKey()); err != nil {
+		t.Errorf("the losing Finish deleted the session anyway: %v", err)
+	}
+}
+
+// TestFinishPrefersConflictToAStaleStatusRead covers the gap zmberg's review
+// found: a client backed by an informer cache can still serve the
+// pre-exchange Secret to Finish even after BeginExchange's own write landed.
+// Checking status first would read that stale copy's Pending and refuse with
+// the terminal ErrNotPending, so a session that already exchanged its token
+// could never be finished. Checking the version first turns the same read
+// into the retryable ErrConflict.
+//
+// The lag is real here, not stood in for: an interceptor serves the copy of
+// the Secret taken before BeginExchange, exactly what a cache that has not
+// caught up yet would return, while the caller holds the version
+// BeginExchange actually wrote.
+func TestFinishPrefersConflictToAStaleStatusRead(t *testing.T) {
+	sessions, _, c := newStores(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if err := sessions.Create(ctx, testSession(now)); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	preExchange := &corev1.Secret{}
+	secretKey := client.ObjectKey{Namespace: storeNamespace, Name: SessionSecretName(testSessionKey())}
+	if err := c.Get(ctx, secretKey, preExchange); err != nil {
+		t.Fatalf("read the pre-exchange secret: %v", err)
+	}
+	claimed, err := sessions.BeginExchange(ctx, testSessionKey(), now)
+	if err != nil {
+		t.Fatalf("BeginExchange: %v", err)
+	}
+	if claimed.Version == preExchange.ResourceVersion {
+		t.Fatal("BeginExchange did not move the version, so this test could not tell a stale read from a current one")
+	}
+
+	lagging := interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey,
+			obj client.Object, opts ...client.GetOption) error {
+			if secret, ok := obj.(*corev1.Secret); ok && key == secretKey {
+				preExchange.DeepCopyInto(secret)
+				return nil
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	laggingStore, err := NewSecretSessionStore(lagging, testKeyring(t), storeNamespace)
+	if err != nil {
+		t.Fatalf("NewSecretSessionStore: %v", err)
+	}
+
+	if err := laggingStore.Finish(ctx, claimed, StatusCompleted); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Finish against a cache still serving the pre-exchange copy returned %v, want ErrConflict", err)
+	}
 	got, err := sessions.Get(ctx, testSessionKey())
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("the refused Finish removed the session: %v", err)
 	}
-	if got.Status != StatusPending {
+	if got.Status != StatusExchanging {
 		t.Errorf("status is %q, the refused Finish must not have moved it", got.Status)
+	}
+
+	// ErrConflict is only worth returning if retrying works: once the cache
+	// has caught up, the same caller with the same claimed copy finishes.
+	if err := sessions.Finish(ctx, claimed, StatusCompleted); err != nil {
+		t.Errorf("Finish once the read is current: %v", err)
 	}
 }
 

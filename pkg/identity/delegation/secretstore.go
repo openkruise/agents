@@ -43,8 +43,11 @@ const (
 	DelegationSecretType corev1.SecretType = "identity.agents.kruise.io/user-delegation"
 )
 
-// Labels carried on every record. The values are addresses, never secrets: a
-// principal ID is already opaque and an agent identity is a resource name.
+// Labels carried on records. The values are addresses, never secrets: an
+// agent identity and a provider are resource names, a namespace is a
+// namespace, and a state digest is what section 6.4 stores in place of the
+// state precisely because it cannot complete a flow on its own. No label
+// carries a user identifier; those stay inside the sealed payload.
 const (
 	LabelRecordKind         = "identity.agents.kruise.io/record"
 	LabelAgentIdentity      = "identity.agents.kruise.io/agent-identity"
@@ -172,8 +175,9 @@ var (
 const expiresAtAnnotation = "identity.agents.kruise.io/expires-at"
 
 // sessionPayload is the sealed part of a session. Outside it, a session
-// Secret carries only its name, the three labels above, and the ExpiresAt
-// annotation.
+// Secret carries only its name, the labels above (record kind, agent
+// identity, credential provider, and the namespace and state digest
+// ResolveStateDigest looks it up by), and the ExpiresAt annotation.
 type sessionPayload struct {
 	Verifier           string    `json:"verifier"`
 	AgentIdentity      string    `json:"agentIdentity"`
@@ -202,11 +206,11 @@ type delegationPayload struct {
 
 // SessionSecretName is the Secret name for a session key.
 //
-// Derived rather than composed, because a state digest is base64url and a
-// namespace can be up to 253 characters, so neither fits a name directly. The
-// parts are length-prefixed before hashing for the same reason the principal ID
-// is: concatenation would let two different addresses collide, and a collision
-// here means one session overwriting another.
+// Derived rather than composed, because a state digest is mixed-case
+// base64url, which a Secret name does not allow. The parts are
+// length-prefixed before hashing for the same reason DelegationSecretName's
+// are: concatenation would let two different addresses collide, and a
+// collision here means one session overwriting another.
 func SessionSecretName(key SessionKey) string {
 	return sessionNamePrefix + digestOf(key.Namespace, key.StateDigest)
 }
@@ -507,21 +511,30 @@ func (s *SecretSessionStore) Finish(ctx context.Context, session *Session, statu
 	if SessionStatus(payload.Status) != StatusExchanging {
 		return ErrNotPending
 	}
-	payload.Status = string(status)
-	sealed, err := s.seal(payload, sessionContext(session.Key)...)
-	if err != nil {
-		return err
-	}
-	secret.Data[payloadKey] = sealed
-	secret.ResourceVersion = session.Version
-	if err := s.client.Update(ctx, secret); err != nil {
+
+	// A terminal session is deleted rather than rewritten with its outcome,
+	// because nothing ever reads one: background retries look for the
+	// delegation, not the session, and only an unexpired Pending session can
+	// be reused (section 6.3). Keeping it until SweepExpiredSessions reached
+	// it would only be one more Secret per authorization attempt.
+	//
+	// The delete is conditioned on the version the caller holds, so it is the
+	// same compare-and-swap the terminal write used to be: a caller whose copy
+	// has moved on gets ErrConflict and removes nothing.
+	if err := s.client.Delete(ctx, secret, client.Preconditions{ResourceVersion: &session.Version}); err != nil {
 		if apierrors.IsConflict(err) {
 			return ErrConflict
+		}
+		if apierrors.IsNotFound(err) {
+			// Removed between the read above and this delete, which only a
+			// concurrent Finish or Delete can do. Either way this caller did
+			// not end it.
+			return ErrNotPending
 		}
 		return fmt.Errorf("delegation: finish session: %w", err)
 	}
 	session.Status = status
-	session.Version = secret.ResourceVersion
+	session.Version = ""
 	return nil
 }
 
@@ -540,13 +553,12 @@ func (s *SecretSessionStore) Delete(ctx context.Context, key SessionKey) error {
 
 // SweepExpiredSessions deletes session Secrets whose window has closed.
 //
-// Nothing else in this package reclaims one on its own. An authorization a
-// user starts and never finishes, closing the page, declining, or simply
-// walking away, never reaches Finish at all, so cleanup cannot live there:
-// deleting inside Finish would only cover sessions that complete, and the
-// count of oauth-session Secrets would still grow with every attempt that
-// does not. A single sweep over expiresAt handles every case uniformly,
-// Pending, Exchanging, Completed or Failed, once its window has passed.
+// Finish deletes every session that reaches it, so this is for the ones that
+// never do. An authorization a user starts and abandons, closing the page or
+// simply walking away, stays Pending forever, and one whose callback crashed
+// between BeginExchange and Finish stays Exchanging; without this, the count
+// of oauth-session Secrets would grow with every such attempt. A single sweep
+// over expiresAt reclaims both, once their window has passed.
 //
 // The expiry is read from the plaintext annotation rather than decrypted from
 // each payload, so sweeping needs no key and scales with the number of

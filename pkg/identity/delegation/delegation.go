@@ -52,6 +52,10 @@ const (
 	// this and stops.
 	StatusExchanging SessionStatus = "Exchanging"
 	// StatusCompleted means the exchange succeeded and a delegation exists.
+	//
+	// It and StatusFailed are outcomes a caller hands to Finish, not states a
+	// stored session is ever read back in: Finish deletes the session it
+	// ends, because nothing reads a finished one.
 	StatusCompleted SessionStatus = "Completed"
 	// StatusFailed means the user declined, the session expired, or the
 	// exchange failed.
@@ -83,11 +87,14 @@ var (
 	// decision it made may no longer apply to what is now stored.
 	ErrConflict = errors.New("delegation: record was modified concurrently")
 
-	// ErrNotPending means a session was claimed by someone else, or has already
-	// completed or failed. A replayed callback is the expected cause, and the
-	// reasons are deliberately not distinguishable: a caller cannot act
-	// differently on them, and saying which would tell an attacker whether
-	// their guessed state ever existed.
+	// ErrNotPending means a session was already claimed by another callback and
+	// is still being exchanged. A replayed callback is the expected cause.
+	//
+	// A session that has finished is deleted, so a callback arriving after that
+	// gets ErrNotFound instead, the same answer as for a state that never
+	// existed. That is deliberate: telling "finished" apart from "never
+	// existed" would tell an attacker whether their guessed state was ever
+	// real, and a caller cannot act differently on the two anyway.
 	ErrNotPending = errors.New("delegation: session is not pending")
 
 	// ErrExpired means the session's window closed before the callback arrived.
@@ -268,17 +275,22 @@ type SessionStore interface {
 	// BeginExchange atomically moves a Pending session to Exchanging and
 	// returns it as it now stands.
 	//
-	// It returns ErrNotPending when the session was already claimed, completed
-	// or failed, and ErrExpired when its window closed. Expiry is reported
-	// before the status so a late callback carrying a correct state learns
-	// nothing about whether that state was ever pending.
+	// It returns ErrNotPending when the session was already claimed,
+	// ErrNotFound once it has finished (Finish deletes it), and ErrExpired when
+	// its window closed. Expiry is reported before the status so a late
+	// callback carrying a correct state learns nothing about whether that
+	// state was ever pending.
 	//
 	// This is the single-use enforcement point: a caller may contact the
 	// provider's token endpoint only after this returns nil.
 	BeginExchange(ctx context.Context, key SessionKey, now time.Time) (*Session, error)
 
-	// Finish records the terminal status of a session being exchanged. Only
-	// Completed and Failed are accepted.
+	// Finish ends a session being exchanged, with outcome Completed or Failed;
+	// nothing else is accepted. The session is deleted, conditioned on the
+	// Version the caller holds, which must be the one BeginExchange returned:
+	// a stale copy gets ErrConflict and removes nothing. Nothing reads a
+	// finished session, so its outcome is reported back on session.Status
+	// rather than stored.
 	Finish(ctx context.Context, session *Session, status SessionStatus) error
 
 	// Delete removes a session. Absence is not an error, because a caller
