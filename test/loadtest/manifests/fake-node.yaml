@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Node
+metadata:
+  annotations:
+    kwok.x-k8s.io/node: fake          # kwok.yaml sets manageNodesWithAnnotationSelector to this key=value, so kwok claims Nodes carrying it
+    node.alpha.kubernetes.io/ttl: "0"
+  labels:
+    type: kwok
+  name: kwok-node-0
+spec:
+  taints:
+    - key: kwok.x-k8s.io/node
+      value: fake
+      effect: NoSchedule
+status:
+  # Must exceed SandboxSet's spec.replicas × per-Sandbox-Pod
+  # cpu/memory request — the REAL kube-scheduler's fit-check reads this even
+  # though the node is fake. Since the node isn't real, there's no actual
+  # capacity limit, so these are just sized generously above what a
+  # 100k-sandbox pool needs.
+  allocatable: {cpu: "1000000", memory: 100Ti, pods: "1000000"}
+  capacity:    {cpu: "1000000", memory: 100Ti, pods: "1000000"}
