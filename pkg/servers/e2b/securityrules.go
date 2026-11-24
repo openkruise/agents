@@ -76,46 +76,25 @@ func rejectUnsupportedNetworkFeatures(egressProxy json.RawMessage, maskRequestHo
 	return nil
 }
 
-// resolveSecurityRules produces the normalized agents.kruise.io/security-rules
-// annotation value from the two exclusive input entries: the reserved
-// e2b.agents.kruise.io/security-rules metadata key and the native E2B
-// network.rules field. It returns "" when neither entry is used, which keeps
-// requests without egress rules byte-identical to today's behavior.
-func resolveSecurityRules(request *models.NewSandboxRequest) (string, error) {
-	if request.Network != nil {
-		if err := rejectUnsupportedNetworkFeatures(request.Network.EgressProxy, request.Network.MaskRequestHost); err != nil {
-			return "", err
-		}
-	}
+// resolveSecurityRules returns the legacy annotation value for a new sandbox.
+// In annotation mode, network.rules is validated here and stored in e2b-network.
+func resolveSecurityRules(request *models.NewSandboxRequest, networkAnnotation bool) (string, error) {
 	inline := request.Extensions.SecurityRules
-	hasInline := len(inline) > 0
-	hasNetworkRules := request.Network != nil && len(request.Network.Rules) > 0
-	if hasInline && hasNetworkRules {
-		return "", fmt.Errorf("metadata key %q and network.rules are mutually exclusive: use exactly one entry for inline security rules",
-			models.ExtensionKeySecurityRules)
-	}
-
-	var rules []agentsv1alpha1.SecurityRule
-	switch {
-	case hasInline:
-		rules = inline
-	case hasNetworkRules:
-		translated, err := translateNetworkRules(request.Network)
-		if err != nil {
+	if net := request.Network; net != nil {
+		if err := rejectUnsupportedNetworkFeatures(net.EgressProxy, net.MaskRequestHost); err != nil {
 			return "", err
 		}
-		if len(translated) == 0 {
-			return "", nil
+		if len(net.Rules) > 0 {
+			if !networkAnnotation && len(inline) > 0 {
+				return "", fmt.Errorf("metadata key %q and network.rules are mutually exclusive: use exactly one entry for inline security rules", models.ExtensionKeySecurityRules)
+			}
+			networkRules, err := encodeNetworkSecurityRules(net.Rules)
+			if err != nil || !networkAnnotation {
+				return networkRules, err
+			}
 		}
-		rules = translated
-	default:
-		return "", nil
 	}
-
-	if err := validateInlineSecurityRules(rules); err != nil {
-		return "", err
-	}
-	return marshalSecurityRules(rules)
+	return encodeSecurityRules(inline)
 }
 
 // resolveSecurityRulesUpdate produces the replacement annotation value for a
@@ -130,29 +109,11 @@ func resolveSecurityRulesUpdate(req *models.SandboxNetworkUpdateConfig) (rulesJS
 	if req.Rules == nil {
 		return "", false, nil
 	}
-	if len(req.Rules) == 0 {
-		return "", true, nil
-	}
-	translated, err := translateNetworkRules(&models.SandboxNetworkConfig{
-		Rules: req.Rules,
-	})
-	if err != nil {
-		return "", false, err
-	}
-	if len(translated) == 0 {
-		return "", true, nil
-	}
-	if err := validateInlineSecurityRules(translated); err != nil {
-		return "", false, err
-	}
-	out, err := marshalSecurityRules(translated)
-	if err != nil {
-		return "", false, err
-	}
-	return out, true, nil
+	out, err := encodeNetworkSecurityRules(req.Rules)
+	return out, err == nil, err
 }
 
-// translateNetworkRules converts the native E2B network.rules field into
+// encodeNetworkSecurityRules converts the native E2B network.rules field into
 // inline security rules. Each domain with at least one header transform
 // becomes one headerManipulation rule; E2B set/replace semantics map to
 // headerManipulation.set. Domains are emitted in sorted order and headers are
@@ -162,9 +123,9 @@ func resolveSecurityRulesUpdate(req *models.SandboxNetworkUpdateConfig) (rulesJS
 // and is not required to appear in allowOut: reachability may come from the
 // request's own allowOut or from administrator-level traffic policy, and the
 // L7 rule simply never fires on traffic the L4 layer does not let out.
-func translateNetworkRules(net *models.SandboxNetworkConfig) ([]agentsv1alpha1.SecurityRule, error) {
-	domains := make([]string, 0, len(net.Rules))
-	for domain := range net.Rules {
+func encodeNetworkSecurityRules(networkRules map[string][]models.SandboxNetworkRule) (string, error) {
+	domains := make([]string, 0, len(networkRules))
+	for domain := range networkRules {
 		domains = append(domains, domain)
 	}
 	sort.Strings(domains)
@@ -176,20 +137,20 @@ func translateNetworkRules(net *models.SandboxNetworkConfig) ([]agentsv1alpha1.S
 	seenDomains := make(map[string]string, len(domains))
 	for _, domain := range domains {
 		if domain == "" {
-			return nil, fmt.Errorf("network.rules: empty domain key is not allowed")
+			return "", fmt.Errorf("network.rules: empty domain key is not allowed")
 		}
 		if len(domain) > 253 {
-			return nil, fmt.Errorf("network.rules[%q]: domain exceeds 253 characters", domain)
+			return "", fmt.Errorf("network.rules[%q]: domain exceeds 253 characters", domain)
 		}
 		lower := strings.ToLower(domain)
 		if prev, dup := seenDomains[lower]; dup {
-			return nil, fmt.Errorf("network.rules: %q and %q are the same domain (domains are case-insensitive)",
+			return "", fmt.Errorf("network.rules: %q and %q are the same domain (domains are case-insensitive)",
 				prev, domain)
 		}
 		seenDomains[lower] = domain
-		set, err := translateDomainTransforms(domain, net.Rules[domain])
+		set, err := translateDomainTransforms(domain, networkRules[domain])
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 		if len(set) == 0 {
 			// A domain whose rules carry no effective transform needs no L7
@@ -206,7 +167,7 @@ func translateNetworkRules(net *models.SandboxNetworkConfig) ([]agentsv1alpha1.S
 			},
 		})
 	}
-	return rules, nil
+	return encodeSecurityRules(rules)
 }
 
 // translateDomainTransforms merges every transform.headers map of one domain
@@ -521,9 +482,14 @@ func validateHeaderAssignment(name, value string) error {
 	return nil
 }
 
-// marshalSecurityRules serializes the normalized rule chain. The annotation
-// stores the server artifact, never the user's raw text.
-func marshalSecurityRules(rules []agentsv1alpha1.SecurityRule) (string, error) {
+// encodeSecurityRules validates and serializes a nonempty legacy rule chain.
+func encodeSecurityRules(rules []agentsv1alpha1.SecurityRule) (string, error) {
+	if len(rules) == 0 {
+		return "", nil
+	}
+	if err := validateInlineSecurityRules(rules); err != nil {
+		return "", err
+	}
 	raw, err := json.Marshal(rules)
 	if err != nil {
 		return "", fmt.Errorf("marshal normalized security rules: %v", err)

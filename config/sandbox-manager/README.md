@@ -32,6 +32,8 @@ To enable annotation mode, upgrade all sandbox-manager replicas, then start them
 Enable Sandbox policy discovery in Agentio and route managed outbound traffic through its egress gateway.
 New pool claims and snapshot clones store E2B network settings in the `agents.kruise.io/e2b-network` annotation.
 Existing sandboxes continue to use the backend selected at creation.
+In annotation mode, a client can send both `network.rules` and the `e2b.agents.kruise.io/security-profile` metadata key, and later network updates preserve the native profile.
+In the default mode, HTTP header transforms in `network.rules` use the legacy `security-rules` annotation and return HTTP 400 when combined with a native profile.
 
 For a sandbox created with `allow_internet_access` set to `false` and `network.allowOut` set to `["192.0.2.10"]`, read the annotation using the Sandbox's Kubernetes namespace and object name.
 

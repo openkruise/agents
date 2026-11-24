@@ -194,12 +194,6 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 	if apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
-	if _, hasProfile := sbx.GetAnnotations()[securityProfileAnnotation]; hasProfile {
-		return web.ApiResponse[struct{}]{}, withSandboxResourceContext(&web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("Cannot update E2B network for a sandbox using %q", securityProfileAnnotation),
-		}, sbx)
-	}
 
 	if _, annotated := sbx.GetAnnotations()[e2bNetworkAnnotation]; annotated {
 		rules, err := normalizeNetworkAnnotationRules(req.Rules)
@@ -227,9 +221,6 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 				return err
 			}
 			annotations[e2bNetworkAnnotation] = string(raw)
-			if rulesPresent {
-				delete(annotations, agentsv1alpha1.AnnotationSecurityRules)
-			}
 			return nil
 		})
 		if err != nil {
@@ -247,6 +238,9 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 	// data plane converges on both writes independently, exactly as at
 	// creation.
 	if rulesPresent {
+		if rulesJSON != "" && sbx.GetAnnotations()[securityProfileAnnotation] != "" {
+			return web.ApiResponse[struct{}]{}, withSandboxResourceContext(badRequest(legacyNetworkRulesConflict), sbx)
+		}
 		if err := sbx.UpdateSecurityRules(ctx, rulesJSON); err != nil {
 			log.Error(err, "failed to update security rules")
 			return web.ApiResponse[struct{}]{}, withSandboxResourceContext(&web.ApiError{

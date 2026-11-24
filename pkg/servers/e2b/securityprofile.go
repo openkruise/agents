@@ -31,6 +31,8 @@ import (
 const (
 	securityProfileMetadataKey = agentsv1alpha1.E2BPrefix + "security-profile"
 	securityProfileAnnotation  = agentsv1alpha1.InternalPrefix + "security-profile"
+	legacyNetworkRulesConflict = "network.rules would write " + agentsv1alpha1.AnnotationSecurityRules + ", which conflicts with " + securityProfileAnnotation +
+		". Enable --e2b-network-annotation and create a new sandbox to use network.rules with a native profile."
 )
 
 func parseInlineSecurityProfile(raw string) (string, error) {

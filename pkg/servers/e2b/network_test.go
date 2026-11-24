@@ -617,6 +617,7 @@ func TestE2BNetworkAnnotationLifecycle(t *testing.T) {
 		TemplateID: templateName,
 		Metadata: map[string]string{
 			models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+			models.ExtensionKeySecurityRules:   validInlineRulesJSON,
 		},
 		Network: &models.SandboxNetworkConfig{
 			AllowOut: []string{"192.0.2.10"},
@@ -630,7 +631,8 @@ func TestE2BNetworkAnnotationLifecycle(t *testing.T) {
 	sandbox := GetSandbox(t, id, c)
 	initial := sandbox.Annotations[e2bNetworkAnnotation]
 	require.JSONEq(t, `{"network":{"allowOut":["192.0.2.10"],"rules":{"api.example.com":[{"transform":{"headers":{"x-test":"initial"}}}]}}}`, initial)
-	require.NotContains(t, sandbox.Annotations, agentsv1alpha1.AnnotationSecurityRules)
+	legacyRules := sandbox.Annotations[agentsv1alpha1.AnnotationSecurityRules]
+	require.JSONEq(t, validInlineRulesJSON, legacyRules)
 
 	for _, tt := range []struct {
 		wantError string
@@ -686,6 +688,7 @@ func TestE2BNetworkAnnotationLifecycle(t *testing.T) {
 	require.Nil(t, apiErr)
 	sandbox = GetSandbox(t, id, c)
 	require.JSONEq(t, `{"network":{}}`, sandbox.Annotations[e2bNetworkAnnotation])
+	require.Equal(t, legacyRules, sandbox.Annotations[agentsv1alpha1.AnnotationSecurityRules])
 	described, apiErr = controller.DescribeSandbox(NewRequest(t, nil, nil, params, user))
 	require.Nil(t, apiErr)
 	require.Nil(t, described.Body.Network)
@@ -714,7 +717,7 @@ func TestE2BNetworkAnnotationLifecycle(t *testing.T) {
 	})
 }
 
-func TestE2BSecurityProfileExclusive(t *testing.T) {
+func TestE2BSecurityProfileNetwork(t *testing.T) {
 	const profile = `{
 		"inputs":[{"name":"settings","inline":{"team":"platform"}}],
 		"audit":[{"name":"requests","webhook":{"url":"https://audit.example.com/requests"}}],
@@ -732,10 +735,16 @@ func TestE2BSecurityProfileExclusive(t *testing.T) {
 			defer CreateSandboxPool(t, controller, templateName, 2)()
 			user := adminTestUser()
 
+			network := &models.SandboxNetworkConfig{AllowOut: []string{"api.example.com"}, DenyOut: []string{"10.0.0.0/8"}}
+			if networkAnnotation {
+				network.Rules = map[string][]models.SandboxNetworkRule{
+					"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-Test": "initial"}}}},
+				}
+			}
 			created, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
 				TemplateID:          templateName,
-				AllowInternetAccess: ptr.To(true),
-				Network:             &models.SandboxNetworkConfig{},
+				AllowInternetAccess: ptr.To(false),
+				Network:             network,
 				Metadata: map[string]string{
 					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
 					securityProfileMetadataKey:         profile,
@@ -743,23 +752,49 @@ func TestE2BSecurityProfileExclusive(t *testing.T) {
 			}, nil, user))
 			require.Nil(t, apiErr)
 			id := created.Body.SandboxID
-			annotations := GetSandbox(t, id, c).Annotations
-			require.JSONEq(t, profile, annotations[securityProfileAnnotation])
-			require.NotContains(t, annotations, securityProfileMetadataKey)
-			require.NotContains(t, annotations, e2bNetworkAnnotation)
-
-			_, apiErr = controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
-				AllowOut: []string{"192.0.2.10"},
-			}, map[string]string{"sandboxID": id}, user))
-			require.NotNil(t, apiErr)
-			require.Equal(t, http.StatusBadRequest, apiErr.Code)
-			require.Contains(t, apiErr.Message, securityProfileAnnotation)
-			require.Equal(t, annotations, GetSandbox(t, id, c).Annotations)
-
+			params := map[string]string{"sandboxID": id}
+			sandbox := GetSandbox(t, id, c)
+			storedProfile := sandbox.Annotations[securityProfileAnnotation]
+			require.JSONEq(t, profile, storedProfile)
+			require.NotContains(t, sandbox.Annotations, securityProfileMetadataKey)
+			require.NotContains(t, sandbox.Annotations, agentsv1alpha1.AnnotationSecurityRules)
 			policies := &agentsv1alpha1.TrafficPolicyList{}
 			require.NoError(t, getTestCRClient(controller).List(t.Context(), policies,
 				ctrlclient.InNamespace(Namespace), ctrlclient.MatchingFields{cache.IndexTrafficPolicySandboxID: id}))
-			require.Empty(t, policies.Items)
+			if networkAnnotation {
+				require.Empty(t, policies.Items)
+				require.Equal(t, agentsv1alpha1.True, sandbox.Labels[agentsv1alpha1.LabelAllowInternetAccess])
+				require.JSONEq(t, `{"allowInternetAccess":false,"network":{"allowOut":["api.example.com"],"denyOut":["10.0.0.0/8"],"rules":{"api.example.com":[{"transform":{"headers":{"x-test":"initial"}}}]}}}`, sandbox.Annotations[e2bNetworkAnnotation])
+			} else {
+				require.Len(t, policies.Items, 1)
+				require.Equal(t, agentsv1alpha1.False, sandbox.Labels[agentsv1alpha1.LabelAllowInternetAccess])
+				require.NotContains(t, sandbox.Annotations, e2bNetworkAnnotation)
+			}
+
+			update := json.RawMessage(`{"allowOut":["192.0.2.0/24"],"rules":{"api.example.com":[{"transform":{"headers":{"x-test":"updated"}}}]}}`)
+			resp, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, update, params, user))
+			if networkAnnotation {
+				require.Nil(t, apiErr)
+				require.Equal(t, http.StatusNoContent, resp.Code)
+				require.JSONEq(t, `{"network":{"allowOut":["192.0.2.0/24"],"rules":{"api.example.com":[{"transform":{"headers":{"x-test":"updated"}}}]}}}`, GetSandbox(t, id, c).Annotations[e2bNetworkAnnotation])
+			} else {
+				require.NotNil(t, apiErr)
+				require.Equal(t, http.StatusBadRequest, apiErr.Code)
+				require.Contains(t, apiErr.Message, "--e2b-network-annotation")
+				described, apiErr := controller.DescribeSandbox(NewRequest(t, nil, nil, params, user))
+				require.Nil(t, apiErr)
+				require.Equal(t, network, described.Body.Network)
+			}
+
+			resp, apiErr = controller.UpdateSandboxNetwork(NewRequest(t, nil, json.RawMessage(`{"allowOut":["192.0.2.0/24"],"rules":{}}`), params, user))
+			require.Nil(t, apiErr)
+			require.Equal(t, http.StatusNoContent, resp.Code)
+			sandbox = GetSandbox(t, id, c)
+			require.Equal(t, storedProfile, sandbox.Annotations[securityProfileAnnotation])
+			require.NotContains(t, sandbox.Annotations, agentsv1alpha1.AnnotationSecurityRules)
+			described, apiErr := controller.DescribeSandbox(NewRequest(t, nil, nil, params, user))
+			require.Nil(t, apiErr)
+			require.Equal(t, &models.SandboxNetworkConfig{AllowOut: []string{"192.0.2.0/24"}}, described.Body.Network)
 		})
 	}
 }

@@ -262,7 +262,7 @@ func TestResolveSecurityRules_InlineJSON(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			request := &models.NewSandboxRequest{}
 			request.Extensions.SecurityRules = parseResolvedRules(t, tt.raw)
-			got, err := resolveSecurityRules(request)
+			got, err := resolveSecurityRules(request, false)
 			if tt.expectError == "" {
 				require.NoError(t, err)
 				assert.NotEmpty(t, got)
@@ -283,7 +283,7 @@ func TestResolveSecurityRules_InlineNormalizedShape(t *testing.T) {
 	request := &models.NewSandboxRequest{}
 	request.Extensions.SecurityRules = parseResolvedRules(t, validInlineRulesJSON)
 
-	got, err := resolveSecurityRules(request)
+	got, err := resolveSecurityRules(request, false)
 	require.NoError(t, err)
 
 	rules := parseResolvedRules(t, got)
@@ -411,7 +411,7 @@ func TestResolveSecurityRules_NetworkRules(t *testing.T) {
 			request := &models.NewSandboxRequest{
 				Network: &models.SandboxNetworkConfig{AllowOut: tt.allowOut, Rules: tt.rules},
 			}
-			got, err := resolveSecurityRules(request)
+			got, err := resolveSecurityRules(request, false)
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -445,11 +445,11 @@ func TestResolveSecurityRules_NetworkNormalizedShape(t *testing.T) {
 		},
 	}
 
-	got, err := resolveSecurityRules(request)
+	got, err := resolveSecurityRules(request, false)
 	require.NoError(t, err)
 
 	// Determinism: identical input always yields an identical annotation.
-	got2, err := resolveSecurityRules(request)
+	got2, err := resolveSecurityRules(request, false)
 	require.NoError(t, err)
 	assert.Equal(t, got, got2)
 
@@ -470,7 +470,7 @@ func TestResolveSecurityRules_NetworkNormalizedShape(t *testing.T) {
 }
 
 // TestResolveSecurityRules_MutualExclusion locks the 400 boundary when both
-// input entries are used together.
+// input entries write the same legacy annotation.
 func TestResolveSecurityRules_MutualExclusion(t *testing.T) {
 	request := &models.NewSandboxRequest{
 		Network: &models.SandboxNetworkConfig{
@@ -483,7 +483,7 @@ func TestResolveSecurityRules_MutualExclusion(t *testing.T) {
 	}
 	request.Extensions.SecurityRules = parseResolvedRules(t, validInlineRulesJSON)
 
-	_, err := resolveSecurityRules(request)
+	_, err := resolveSecurityRules(request, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "mutually exclusive")
 }
@@ -491,7 +491,7 @@ func TestResolveSecurityRules_MutualExclusion(t *testing.T) {
 // TestResolveSecurityRules_NoInput verifies requests without either entry keep
 // today's behavior: no annotation value is produced.
 func TestResolveSecurityRules_NoInput(t *testing.T) {
-	got, err := resolveSecurityRules(&models.NewSandboxRequest{})
+	got, err := resolveSecurityRules(&models.NewSandboxRequest{}, false)
 	require.NoError(t, err)
 	assert.Empty(t, got)
 
@@ -499,14 +499,14 @@ func TestResolveSecurityRules_NoInput(t *testing.T) {
 	request := &models.NewSandboxRequest{
 		Network: &models.SandboxNetworkConfig{AllowOut: []string{"api.example.com"}},
 	}
-	got, err = resolveSecurityRules(request)
+	got, err = resolveSecurityRules(request, false)
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
 
 // TestParseCreateSandboxRequest_SecurityRules covers the create API boundary:
 // the reserved metadata key is consumed (so the blacklist check passes), the
-// normalized value lands on the request, and both entries together yield 400.
+// normalized value lands on the request, and both inputs together yield 400 in legacy mode.
 func TestParseCreateSandboxRequest_SecurityRules(t *testing.T) {
 	controller, _, teardown := Setup(t)
 	defer teardown()
@@ -887,7 +887,7 @@ func TestResolveSecurityRules_BlockStatusCodeDefaulted(t *testing.T) {
 	request.Extensions.SecurityRules = parseResolvedRules(t,
 		`[{"name":"b","match":[{"domains":["a.example.com"]}],"actions":{"block":{}}}]`)
 
-	got, err := resolveSecurityRules(request)
+	got, err := resolveSecurityRules(request, false)
 	require.NoError(t, err)
 	rules := parseResolvedRules(t, got)
 	require.Len(t, rules, 1)

@@ -686,12 +686,13 @@ func TestCreateSandboxWithClone_Naming(t *testing.T) {
 	defer cleanupCP()
 
 	var capturedName, capturedGenerateName string
-	var capturedNetwork string
+	var capturedNetwork, capturedProfile string
 	origCreateSandbox := sandboxcr.DefaultCreateSandbox
 	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
 		capturedName = sbx.Name
 		capturedGenerateName = sbx.GenerateName
 		capturedNetwork = sbx.Annotations[e2bNetworkAnnotation]
+		capturedProfile = sbx.Annotations[securityProfileAnnotation]
 		// The fake client does not auto-resolve GenerateName; assign a unique
 		// Name so Create succeeds. Capture happens before mutation.
 		if sbx.Name == "" {
@@ -762,14 +763,17 @@ func TestCreateSandboxWithClone_Naming(t *testing.T) {
 		})
 	}
 
-	t.Run("clone persists Agentio policy at creation", func(t *testing.T) {
+	t.Run("clone persists network and native profile annotations", func(t *testing.T) {
 		controller.networkAnnotation = true
+		const profile = `{"tcpRules":[{"name":"deny-ssh","match":[{"ports":[22]}],"action":"Deny"}]}`
 		_, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
 			TemplateID:          "cp-id",
 			AllowInternetAccess: ptr.To(false),
+			Metadata:            map[string]string{securityProfileMetadataKey: profile},
 		}, nil, user))
 		require.Nil(t, apiErr)
 		require.JSONEq(t, `{"allowInternetAccess":false,"network":{}}`, capturedNetwork)
+		require.JSONEq(t, profile, capturedProfile)
 	})
 }
 
@@ -779,6 +783,7 @@ func TestParseCreateSandboxRequest_SecurityProfile(t *testing.T) {
 	overRuleLimit := "[" + strings.Repeat("{},", maxSecurityRules) + "{}]"
 	tests := []struct {
 		name        string
+		annotation  bool
 		profile     string
 		legacy      string
 		network     *models.SandboxNetworkConfig
@@ -786,10 +791,15 @@ func TestParseCreateSandboxRequest_SecurityProfile(t *testing.T) {
 		wantMessage string
 	}{
 		{name: "both metadata keys", profile: validProfile, legacy: legacyRules, wantMessage: "mutually exclusive"},
-		{name: "profile with allowOut", profile: validProfile, network: &models.SandboxNetworkConfig{AllowOut: []string{"192.0.2.10"}}, wantMessage: "cannot be combined"},
-		{name: "profile with denyOut", profile: validProfile, network: &models.SandboxNetworkConfig{DenyOut: []string{"10.0.0.0/8"}}, wantMessage: "cannot be combined"},
-		{name: "profile with network.rules", profile: validProfile, network: &models.SandboxNetworkConfig{Rules: map[string][]models.SandboxNetworkRule{"api.example.com": {{}}}}, wantMessage: "cannot be combined"},
-		{name: "profile with internet disabled", profile: validProfile, internet: ptr.To(false), wantMessage: "cannot be combined"},
+		{name: "both metadata keys in annotation mode", annotation: true, profile: validProfile, legacy: legacyRules, wantMessage: "mutually exclusive"},
+		{name: "profile with allowOut", profile: validProfile, network: &models.SandboxNetworkConfig{AllowOut: []string{"192.0.2.10"}}},
+		{name: "profile with denyOut", profile: validProfile, network: &models.SandboxNetworkConfig{DenyOut: []string{"10.0.0.0/8"}}},
+		{name: "profile with an empty transform", profile: validProfile, network: &models.SandboxNetworkConfig{Rules: map[string][]models.SandboxNetworkRule{"api.example.com": {{}}}}},
+		{name: "profile with legacy header rules", profile: validProfile, network: &models.SandboxNetworkConfig{Rules: map[string][]models.SandboxNetworkRule{
+			"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-Test": "value"}}}},
+		}}, wantMessage: "--e2b-network-annotation"},
+		{name: "profile with internet disabled", profile: validProfile, internet: ptr.To(false)},
+		{name: "profile alone in annotation mode", annotation: true, profile: validProfile},
 		{name: "audit only", profile: `{"audit":[{"name":"requests","webhook":{"url":"https://audit.example.com/events"}}]}`},
 		{name: "inputs only", profile: `{"inputs":[{"name":"settings","inline":{"region":"west"}}]}`},
 		{name: "shared profile selector", profile: `{"selector":{}}`, wantMessage: "unknown field"},
@@ -814,7 +824,7 @@ func TestParseCreateSandboxRequest_SecurityProfile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctrl := &Controller{maxTimeout: 3600}
+			ctrl := &Controller{maxTimeout: 3600, networkAnnotation: tt.annotation}
 			metadata := map[string]string{securityProfileMetadataKey: tt.profile}
 			if tt.legacy != "" {
 				metadata[models.ExtensionKeySecurityRules] = tt.legacy
@@ -825,6 +835,9 @@ func TestParseCreateSandboxRequest_SecurityProfile(t *testing.T) {
 			if tt.wantMessage == "" {
 				require.Nil(t, apiErr)
 				require.JSONEq(t, tt.profile, request.SecurityProfileJSON)
+				if tt.annotation {
+					require.JSONEq(t, `{"network":{}}`, request.E2BNetworkAnnotation)
+				}
 				return
 			}
 			require.NotNil(t, apiErr)
@@ -1095,7 +1108,29 @@ func TestBasicSandboxCreateModifier(t *testing.T) {
 		expectLabels           map[string]string
 		expectWakeRule         bool
 		expectWakePauseTimeout time.Duration
+		wantError              string
 	}{
+		{
+			name:               "pooled profile with E2B network annotation",
+			initialAnnotations: map[string]string{securityProfileAnnotation: "{}"},
+			request:            models.NewSandboxRequest{E2BNetworkAnnotation: `{"network":{}}`},
+			expectAnnotations:  map[string]string{securityProfileAnnotation: "{}", e2bNetworkAnnotation: `{"network":{}}`},
+		},
+		{
+			name:               "pooled profile with translated network rules",
+			initialAnnotations: map[string]string{securityProfileAnnotation: "{}"},
+			request:            models.NewSandboxRequest{SecurityRulesJSON: validInlineRulesJSON},
+			wantError:          "--e2b-network-annotation",
+		},
+		{
+			name:               "pooled profile with explicit security rules",
+			initialAnnotations: map[string]string{securityProfileAnnotation: "{}"},
+			request: models.NewSandboxRequest{
+				Extensions:        models.NewSandboxRequestExtension{SecurityRules: parseResolvedRules(t, validInlineRulesJSON)},
+				SecurityRulesJSON: validInlineRulesJSON,
+			},
+			wantError: models.ExtensionKeySecurityRules,
+		},
 		{
 			name: "metadata propagated to annotations",
 			request: models.NewSandboxRequest{
@@ -1244,7 +1279,14 @@ func TestBasicSandboxCreateModifier(t *testing.T) {
 			}
 
 			c := &Controller{maxTimeout: tt.maxTimeout}
-			c.basicSandboxCreateModifier(context.Background(), mockSbx, tt.request)
+			err := c.basicSandboxCreateModifier(context.Background(), mockSbx, tt.request)
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				require.Equal(t, http.StatusBadRequest, mapInfraErrorToApiError(err).Code)
+				require.NotContains(t, mockSbx.GetAnnotations(), agentsv1alpha1.AnnotationSecurityRules)
+				return
+			}
+			require.NoError(t, err)
 
 			annotations := mockSbx.GetAnnotations()
 			for k, v := range tt.expectAnnotations {
@@ -1685,7 +1727,7 @@ func TestBasicSandboxCreateModifier_PodLabels(t *testing.T) {
 				},
 			}
 
-			ctrl.basicSandboxCreateModifier(context.Background(), mockSbx, request)
+			require.NoError(t, ctrl.basicSandboxCreateModifier(context.Background(), mockSbx, request))
 
 			crLabels := mockSbx.GetLabels()
 			require.NotNil(t, crLabels, "sandbox CR labels should not be nil after modifier")

@@ -141,7 +141,9 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		ClaimTimeout:      resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		MemoryPersistence: request.AutoPauseMemory,
 		Modifier: func(sbx infra.Sandbox) error {
-			sc.basicSandboxCreateModifier(ctx, sbx, request)
+			if err := sc.basicSandboxCreateModifier(ctx, sbx, request); err != nil {
+				return err
+			}
 			sc.csiMountOptionsConfigRecord(ctx, sbx, request)
 			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
 			return nil
@@ -239,7 +241,9 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		CloneTimeout:      resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		MemoryPersistence: request.AutoPauseMemory,
 		Modifier: func(sbx infra.Sandbox) error {
-			sc.basicSandboxCreateModifier(ctx, sbx, request)
+			if err := sc.basicSandboxCreateModifier(ctx, sbx, request); err != nil {
+				return err
+			}
 			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
 			return nil
 		},
@@ -393,20 +397,8 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 		}
 	}
 	request.Network = networkConfig
-	if request.SecurityProfileJSON != "" {
-		if request.Network != nil || (request.AllowInternetAccess != nil && !*request.AllowInternetAccess) {
-			return request, &web.ApiError{
-				Code:    http.StatusBadRequest,
-				Message: fmt.Sprintf("metadata %q cannot be combined with network rules or allow_internet_access=false", securityProfileMetadataKey),
-			}
-		}
-		return request, nil
-	}
 
-	// Resolve security rules from either the native network.rules input or the
-	// e2b.agents.kruise.io/security-rules metadata JSON. The two inputs are
-	// mutually exclusive and normalize to one annotation value.
-	securityRulesJSON, err := resolveSecurityRules(&request)
+	securityRulesJSON, err := resolveSecurityRules(&request, sc.networkAnnotation)
 	if err != nil {
 		return request, &web.ApiError{
 			Code:    http.StatusBadRequest,
@@ -414,6 +406,9 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 		}
 	}
 	request.SecurityRulesJSON = securityRulesJSON
+	if request.SecurityProfileJSON != "" && securityRulesJSON != "" {
+		return request, badRequest(legacyNetworkRulesConflict)
+	}
 
 	if sc.networkAnnotation {
 		config := e2bNetworkPolicy{AllowInternetAccess: request.AllowInternetAccess}
@@ -429,15 +424,19 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 			return request, &web.ApiError{Code: http.StatusInternalServerError, Message: "Failed to encode sandbox network configuration"}
 		}
 		request.E2BNetworkAnnotation = string(raw)
-		if len(request.Extensions.SecurityRules) == 0 {
-			request.SecurityRulesJSON = ""
-		}
 	}
 	return request, nil
 }
 
-func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
+func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) error {
 	log := klog.FromContext(ctx)
+	annotations := sbx.GetAnnotations()
+	if request.SecurityRulesJSON != "" && annotations[securityProfileAnnotation] != "" {
+		if len(request.Extensions.SecurityRules) > 0 {
+			return managererrors.NewError(managererrors.ErrorBadRequest, "metadata %q conflicts with the sandbox's %q annotation", models.ExtensionKeySecurityRules, securityProfileAnnotation)
+		}
+		return managererrors.NewError(managererrors.ErrorBadRequest, legacyNetworkRulesConflict)
+	}
 	// E2B-managed sandboxes persist paused-retention preference so later timeout
 	// writes and controller auto-pause use the same policy. never-timeout keeps
 	// deadline fields empty; the annotation is only policy state.
@@ -451,7 +450,6 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	log.Info("timeout options calculated", "options", timeoutOptions)
 
 	// propagate annotations to sandbox
-	annotations := sbx.GetAnnotations()
 	if annotations == nil {
 		annotations = make(map[string]string)
 	}
@@ -521,6 +519,7 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	// directly for metadata-only changes (no image/resources) without setting the
 	// InplaceUpdate condition.
 	claimengine.MergePodLabels(sbx, podLabels)
+	return nil
 }
 
 func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {

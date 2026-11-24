@@ -106,10 +106,8 @@ type SandboxNetworkConfig struct {
 	// MaskRequestHost mirrors the upstream E2B top-level field. It is not
 	// supported and must be absent.
 	MaskRequestHost *string `json:"maskRequestHost,omitempty"`
-	// Rules maps a target domain to its egress rules. It is the native E2B
-	// network.rules field; header transforms are normalized into the
-	// agents.kruise.io/security-rules annotation. L4 allowOut/denyOut keep
-	// their existing TrafficPolicy behavior.
+	// Rules maps target domains to E2B header transforms. The server writes
+	// them to e2b-network in annotation mode and to security-rules by default.
 	Rules map[string][]SandboxNetworkRule `json:"rules,omitempty"`
 }
 

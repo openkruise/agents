@@ -1,7 +1,7 @@
 ---
 title: E2B network and inline SecurityProfile annotations for sandboxes
 creation-date: 2026-11-21
-last-updated: 2026-11-23
+last-updated: 2026-11-24
 status: provisional
 ---
 
@@ -85,6 +85,8 @@ Each uses the corresponding SecurityProfile API type.
 This metadata key works with either setting of `--e2b-network-annotation`.
 The deployment needs an Agentio gateway with support for inline Sandbox SecurityProfiles to enforce the rules.
 
+This example uses annotation mode to deny SSH to the management subnet and set a header on HTTPS requests to the allowed API domain.
+
 ```python
 import json
 
@@ -92,6 +94,11 @@ from e2b import Sandbox
 
 sandbox = Sandbox.create(
     template="my-template",
+    allow_internet_access=False,
+    network={
+        "allow_out": ["api.example.com"],
+        "rules": {"api.example.com": [{"transform": {"headers": {"X-Environment": "test"}}}]},
+    },
     metadata={
         "e2b.agents.kruise.io/security-profile": json.dumps({
             "tcpRules": [
@@ -118,7 +125,10 @@ The create endpoint returns HTTP 400 for malformed profile JSON or a request tha
 The legacy `e2b.agents.kruise.io/security-rules` key remains available on its existing path.
 Use a shared SecurityProfile resource for administrator-managed policy.
 
-Choose one policy format per E2B sandbox.
-A SecurityProfile create request returns HTTP 400 when it also supplies `network.allowOut`, `network.denyOut`, or `network.rules` with entries, or sets `allow_internet_access` to `false`.
-An empty `network` object and the SDK default `allow_internet_access: true` are accepted.
-`PUT /sandboxes/{sandboxID}/network` returns HTTP 400 for a sandbox using a SecurityProfile.
+In annotation mode, the Sandbox carries both `security-profile` and `e2b-network`.
+Agentio evaluates native HTTP rules, E2B HTTP rules, native TCP rules, and E2B TCP rules in that order until a rule makes a terminal decision. [Sandbox policy evaluation](https://github.com/openkruise/agentio/blob/32261ca3ca76d8b84094ff6613e9dd2bfabeaf44/docs/reference/security-profile.md#sandbox-policy-annotations)
+`PUT /sandboxes/{sandboxID}/network` updates only `e2b-network` and preserves the native profile or any separately supplied legacy `security-rules`.
+
+In the default mode, a native profile can be combined with `network.allowOut`, `network.denyOut`, and `allow_internet_access` at creation.
+Creating or updating a sandbox with a native profile returns HTTP 400 if E2B `network.rules` would write header transforms to the legacy `security-rules` annotation.
+To use header transforms alongside the profile, enable `--e2b-network-annotation` and create a new sandbox.

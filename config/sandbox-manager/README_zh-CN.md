@@ -30,6 +30,8 @@ docker build -t sandbox-manager:latest .
 在 Agentio 中启用 Sandbox 策略发现，并将受管出站流量路由到其出口网关。
 此后，从池中领取或从快照克隆的新沙箱将 E2B 网络配置保存在 `agents.kruise.io/e2b-network` 注解中。
 已有沙箱继续使用创建时选定的策略存储方式。
+注解模式下，客户端可以同时传入 `network.rules` 和 `e2b.agents.kruise.io/security-profile` 元数据，后续更新 E2B 网络配置时会保留原生 profile。
+默认模式使用旧 `security-rules` 注解保存 `network.rules` 中的 HTTP 请求头改写规则，与原生 profile 同时配置时会返回 HTTP 400。
 
 例如，创建沙箱时将 `allow_internet_access` 设为 `false`，将 `network.allowOut` 设为 `["192.0.2.10"]`。
 用 Sandbox 在 Kubernetes 中的命名空间和资源名称读取注解。
