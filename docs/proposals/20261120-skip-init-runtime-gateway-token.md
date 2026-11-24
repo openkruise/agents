@@ -18,12 +18,11 @@ clients to send it in `x-access-token` when gateway UUID authentication is on.
 Always pass the UUID in `ClaimSandboxOptions.AccessToken`. For ordinary
 initialization, also pass the same value in `InitRuntime.AccessToken` for the
 runtime `/init` request. For skipped initialization, leave `InitRuntime` nil.
-Before claim execution, `ValidateAndInitClaimOptions` fills either missing token
-from its nonempty counterpart when initialization is requested. Different
-nonempty values are rejected as a bad request without disclosing either token.
-Defaulting copies the runtime options rather than mutating the caller's input.
-Nil initialization and two empty tokens retain their existing semantics; the
-validator never generates credentials or enables initialization implicitly.
+Before claim execution, `ValidateAndInitClaimOptions` requires the two token
+fields to match when initialization is requested. Any mismatch, including one
+empty field, is rejected as a bad request without disclosing either token.
+Validation never fills, generates or modifies credentials. Nil initialization
+and two empty tokens retain their existing semantics.
 
 The SandboxClaim controller allocates the outer token in `buildClaimOptions`,
 before runtime initialization decisions. Skipped initialization and templates
@@ -106,8 +105,8 @@ authentication and JWT-required route tests retain their existing expectations.
 SandboxClaim option tests require a nonempty outer token in every successful
 case, including skipped initialization and templates without a runtime, while
 retaining their existing nil-init checks and token equality checks when initialized.
-Claim validation tests cover both one-sided defaults, matching and conflicting
-credentials, unchanged empty-token behavior, input immutability and idempotence.
+Claim validation tests cover rejection of one-sided and conflicting credentials,
+matching tokens, unchanged empty-token behavior and input immutability.
 Clone preparation tests create two clones from the same checkpoint and verify
 new UUIDs only when initialization was skipped, unchanged normal-init tokens,
 and an unmodified checkpoint. Snapshot/clone E2E cases cover both paths, including
