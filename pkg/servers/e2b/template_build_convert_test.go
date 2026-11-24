@@ -81,20 +81,20 @@ func TestConvertBuildRecipeSDK256WireFixture(t *testing.T) {
 			expected: &convertedBuild{
 				Image: "python:3.12-slim",
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
-					Steps: []agentsv1alpha1.TemplateBuildCommand{
-						{
+					Steps: expectedBuildSteps(
+						agentsv1alpha1.TemplateBuildCommand{
 							Command: "python -m pip install numpy && python -m pip install pandas",
 							User:    "agent",
 							Cwd:     "/app",
 							Env:     map[string]string{"MODE": "build", "PORT": "8080"},
 						},
-						{
+						agentsv1alpha1.TemplateBuildCommand{
 							Command: "echo forced",
 							User:    "root",
 							Cwd:     "/app",
 							Env:     map[string]string{"MODE": "build", "PORT": "8080"},
 						},
-					},
+					),
 					StartCommand: &agentsv1alpha1.TemplateBuildCommand{
 						Command: "python server.py",
 						User:    "root",
@@ -121,7 +121,7 @@ func TestConvertBuildRecipeSDK256WireFixture(t *testing.T) {
 			expected: &convertedBuild{
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
 					FromTemplate: "python-base",
-					Steps:        []agentsv1alpha1.TemplateBuildCommand{{Command: "echo derived"}},
+					Steps:        expectedBuildSteps(agentsv1alpha1.TemplateBuildCommand{Command: "echo derived"}),
 				},
 			},
 		},
@@ -131,7 +131,7 @@ func TestConvertBuildRecipeSDK256WireFixture(t *testing.T) {
 			expected: &convertedBuild{
 				Image: "python:3.12-slim",
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
-					Steps: []agentsv1alpha1.TemplateBuildCommand{{Command: "echo hello"}},
+					Steps: expectedBuildSteps(agentsv1alpha1.TemplateBuildCommand{Command: "echo hello"}),
 				},
 			},
 			check: func(t *testing.T, request models.TemplateBuildStartV2) {
@@ -199,10 +199,10 @@ func TestConvertBuildRecipeFolding(t *testing.T) {
 			expected: &convertedBuild{
 				Image: "example/runtime@sha256:abc",
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
-					Steps: []agentsv1alpha1.TemplateBuildCommand{
-						{Command: "echo default", User: "agent", Cwd: "/workspace", Env: map[string]string{"A": "1", "B": "2"}},
-						{Command: "apt-get update", User: "root", Cwd: "/workspace", Env: map[string]string{"A": "1", "B": "2"}},
-					},
+					Steps: expectedBuildSteps(
+						agentsv1alpha1.TemplateBuildCommand{Command: "echo default", User: "agent", Cwd: "/workspace", Env: map[string]string{"A": "1", "B": "2"}},
+						agentsv1alpha1.TemplateBuildCommand{Command: "apt-get update", User: "root", Cwd: "/workspace", Env: map[string]string{"A": "1", "B": "2"}},
+					),
 				},
 			},
 		},
@@ -220,10 +220,10 @@ func TestConvertBuildRecipeFolding(t *testing.T) {
 			expected: &convertedBuild{
 				Image: "example/runtime@sha256:abc",
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
-					Steps: []agentsv1alpha1.TemplateBuildCommand{
-						{Command: "echo build", Env: map[string]string{"MODE": "build"}},
-						{Command: "echo run", Env: map[string]string{"MODE": "run"}},
-					},
+					Steps: expectedBuildSteps(
+						agentsv1alpha1.TemplateBuildCommand{Command: "echo build", Env: map[string]string{"MODE": "build"}},
+						agentsv1alpha1.TemplateBuildCommand{Command: "echo run", Env: map[string]string{"MODE": "run"}},
+					),
 				},
 			},
 		},
@@ -243,7 +243,7 @@ func TestConvertBuildRecipeFolding(t *testing.T) {
 			expected: &convertedBuild{
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
 					FromTemplate: "base",
-					Steps:        []agentsv1alpha1.TemplateBuildCommand{{Command: "prepare"}},
+					Steps:        expectedBuildSteps(agentsv1alpha1.TemplateBuildCommand{Command: "prepare"}),
 					StartCommand: &agentsv1alpha1.TemplateBuildCommand{
 						Command: "python server.py", User: "agent", Cwd: "/srv", Env: map[string]string{"PORT": "8080"},
 					},
@@ -278,8 +278,8 @@ func TestConvertBuildRecipeCopiesCommandEnvironment(t *testing.T) {
 	converted, apiErr := convertBuildRecipe(request)
 	require.Nil(t, apiErr)
 
-	converted.BuildOptions.Steps[0].Env["MODE"] = "changed"
-	assert.Equal(t, "build", converted.BuildOptions.Steps[1].Env["MODE"])
+	converted.BuildOptions.Steps[0].Command.Env["MODE"] = "changed"
+	assert.Equal(t, "build", converted.BuildOptions.Steps[1].Command.Env["MODE"])
 	assert.Equal(t, "build", converted.BuildOptions.StartCommand.Env["MODE"])
 	assert.Equal(t, "build", converted.BuildOptions.ReadyCommand.Env["MODE"])
 }
@@ -430,6 +430,14 @@ func TestConvertBuildRecipeRejects(t *testing.T) {
 			assert.Nil(t, converted)
 		})
 	}
+}
+
+func expectedBuildSteps(commands ...agentsv1alpha1.TemplateBuildCommand) []agentsv1alpha1.TemplateBuildStep {
+	steps := make([]agentsv1alpha1.TemplateBuildStep, len(commands))
+	for i := range commands {
+		steps[i].Command = &commands[i]
+	}
+	return steps
 }
 
 func runStep(command string) models.TemplateStep {

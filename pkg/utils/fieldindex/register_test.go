@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -123,6 +124,48 @@ func TestSandboxSetTemplateRefIndexFunc(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, SandboxSetTemplateRefIndexFunc(tt.obj))
+		})
+	}
+}
+
+func TestTemplateNameIndexFunc(t *testing.T) {
+	tests := []struct {
+		name string
+		obj  client.Object
+		want []string
+	}{
+		{
+			name: "ignores non-sandboxtemplate object",
+			obj:  &corev1.Pod{},
+		},
+		{
+			name: "ignores template without the label",
+			obj:  &agentsv1alpha1.SandboxTemplate{},
+		},
+		{
+			name: "ignores unrelated labels",
+			obj: &agentsv1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{"app": "test"},
+			}},
+		},
+		{
+			name: "ignores empty template name",
+			obj: &agentsv1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{agentsv1alpha1.LabelTemplateName: ""},
+			}},
+		},
+		{
+			name: "indexes template name",
+			obj: &agentsv1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{agentsv1alpha1.LabelTemplateName: "python-agent"},
+			}},
+			want: []string{"python-agent"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, TemplateNameIndexFunc(tt.obj))
 		})
 	}
 }

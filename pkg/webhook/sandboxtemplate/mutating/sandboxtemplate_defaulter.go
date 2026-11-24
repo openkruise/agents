@@ -47,6 +47,9 @@ func (h *Defaulter) Enabled() bool {
 }
 
 func (h *Defaulter) Handle(ctx context.Context, req admission.Request) admission.Response {
+	if req.SubResource == "status" {
+		return admission.Allowed("")
+	}
 	obj := &agentsv1alpha1.SandboxTemplate{}
 	err := h.Decoder.Decode(req, obj)
 	if err != nil {
