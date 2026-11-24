@@ -85,8 +85,8 @@ type ClaimSandboxOptions struct {
 	RuntimeConfig []v1alpha1.RuntimeConfig `json:"runtimeConfig"`
 	// Set InitRuntime to non-nil value to init the agent-runtime
 	InitRuntime *config.InitRuntimeOptions `json:"initRuntime"`
-	// AccessToken is persisted independently of runtime initialization. Callers
-	// initializing the runtime must also set InitRuntime.AccessToken to this value.
+	// AccessToken is persisted independently of runtime initialization. Validation
+	// fills either missing token from its counterpart and rejects conflicting values.
 	AccessToken string `json:"-"`
 	// MemoryPersistence overrides memory persistence for this Sandbox; nil inherits its current setting.
 	MemoryPersistence *bool `json:"memoryPersistence,omitempty"`
