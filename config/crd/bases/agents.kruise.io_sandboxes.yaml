@@ -1127,13 +1127,13 @@ spec:
                     type: object
                   patchVersion:
                     description: |-
-                      PatchVersion identifies the payload this upgrade installs. It is an opaque
-                      token: SandboxUpdateOps sets it to the UID of the owning ops object, so every
-                      operation carries a distinct value. The sandbox controller runs an
-                      InstallerUpdate upgrade only while PatchVersion differs from
-                      status.completedPatchVersion; Recreate and CheckpointRestore ignore it because
-                      they key off the Pod template revision instead.
-                      Required when Type is InstallerUpdate.
+                      PatchVersion is the user-defined installer payload version and must be a
+                      nonempty Kubernetes label value. InstallerUpdate runs only when it differs
+                      from status.completedPatchVersion. Recreate and CheckpointRestore ignore it.
+                      Required when Type is InstallerUpdate; a new attempt needs a new version.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
                     type: string
                   type:
                     description: |-
@@ -1146,6 +1146,9 @@ spec:
                     - InstallerUpdate
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: patchVersion is required when type is InstallerUpdate
+                  rule: '!has(self.type) || self.type != ''InstallerUpdate'' || has(self.patchVersion)'
               volumeClaimTemplates:
                 description: VolumeClaimTemplates is a list of PVC templates to create
                   for this Sandbox.

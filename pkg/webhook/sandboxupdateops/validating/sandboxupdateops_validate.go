@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -139,7 +140,15 @@ func (h *SandboxUpdateOpsValidatingHandler) validateUpdateStrategy(obj *agentsv1
 	strategy := obj.Spec.UpdateStrategy
 	strategyPath := specPath.Child("updateStrategy")
 
+	if strategy.PatchVersion != "" {
+		for _, msg := range validation.IsValidLabelValue(strategy.PatchVersion) {
+			errList = append(errList, field.Invalid(strategyPath.Child("patchVersion"), strategy.PatchVersion, msg))
+		}
+	}
 	if strategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate {
+		if strategy.PatchVersion == "" {
+			errList = append(errList, field.Required(strategyPath.Child("patchVersion"), "patchVersion is required when updateStrategy.type is InstallerUpdate"))
+		}
 		if strategy.Installer == nil {
 			errList = append(errList, field.Required(strategyPath.Child("installer"), "installer is required when updateStrategy.type is InstallerUpdate"))
 		} else {
@@ -278,6 +287,9 @@ func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, 
 	}
 	if !reflect.DeepEqual(oldObj.Spec.UpdateStrategy.Installer, newObj.Spec.UpdateStrategy.Installer) {
 		errList = append(errList, field.Forbidden(specPath.Child("updateStrategy", "installer"), "installer is immutable"))
+	}
+	if oldObj.Spec.UpdateStrategy.PatchVersion != newObj.Spec.UpdateStrategy.PatchVersion {
+		errList = append(errList, field.Forbidden(specPath.Child("updateStrategy", "patchVersion"), "patchVersion is immutable"))
 	}
 
 	// updateStrategy.type stays mutable, so the strategy-level rules must hold

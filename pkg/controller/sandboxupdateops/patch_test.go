@@ -1185,7 +1185,8 @@ func newInstallerOpsAndSandbox() (*agentsv1alpha1.SandboxUpdateOps, *agentsv1alp
 		},
 		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
 			UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
-				Type: agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+				Type:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+				PatchVersion: "1.4.0",
 				Installer: &agentsv1alpha1.InstallerSpec{
 					Image:               "installer:1.4.0",
 					TargetContainerName: "main",
@@ -1311,7 +1312,7 @@ func TestApplySandboxPatch_InstallerUpdate(t *testing.T) {
 
 			require.NotNil(t, updated.Spec.UpgradePolicy)
 			assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate, updated.Spec.UpgradePolicy.Type)
-			assert.Equal(t, "ops-uid-1", updated.Spec.UpgradePolicy.PatchVersion)
+			assert.Equal(t, ops.Spec.UpdateStrategy.PatchVersion, updated.Spec.UpgradePolicy.PatchVersion)
 			require.NotNil(t, updated.Spec.UpgradePolicy.Installer)
 			assert.Equal(t, "installer:1.4.0", updated.Spec.UpgradePolicy.Installer.Image)
 			assert.Equal(t, "main", updated.Spec.UpgradePolicy.Installer.TargetContainerName)
@@ -1327,9 +1328,9 @@ func TestApplySandboxPatch_InstallerUpdate(t *testing.T) {
 
 func TestIsSandboxOpsApplied_InstallerUpdate(t *testing.T) {
 	ops, sbx := newInstallerOpsAndSandbox()
-	ops.UID = types.UID("ops-uid-1")
+	ops.UID = types.UID("another-ops-uid")
 
-	sbx.Status.CompletedPatchVersion = "ops-uid-1"
+	sbx.Status.CompletedPatchVersion = ops.Spec.UpdateStrategy.PatchVersion
 	assert.False(t, isSandboxOpsApplied(sbx, ops), "completed install still needs its metadata patch")
 	sbx.Spec.Template.Labels["harness-version"] = "v2"
 	sbx.Spec.Template.Annotations["harness-version"] = "v2"
@@ -1349,7 +1350,7 @@ func TestIsSandboxOpsApplied_InstallerUpdate(t *testing.T) {
 	assert.False(t, isSandboxOpsApplied(sbx, ops), "matching metadata alone must not skip installation")
 
 	// Declared hooks must also be present once the install completed.
-	sbx.Status.CompletedPatchVersion = "ops-uid-1"
+	sbx.Status.CompletedPatchVersion = ops.Spec.UpdateStrategy.PatchVersion
 	ops.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{
 		PrePause: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}},
 	}

@@ -505,7 +505,7 @@ SandboxUpdateOps                       Sandbox controller                kubelet
         |
         | 2. patch Sandbox:
         |      spec.upgradePolicy.type         = InstallerUpdate
-        |      spec.upgradePolicy.patchVersion = <ops UID>
+        |      spec.upgradePolicy.patchVersion = ops.spec.updateStrategy.patchVersion
         |      spec.upgradePolicy.installer    = <copied from ops>
         |      spec.lifecycle                  = ops.spec.lifecycle
         |      labels[agents.kruise.io/update-ops] = <ops name>
@@ -578,6 +578,7 @@ spec:
 
   updateStrategy:
     type: InstallerUpdate
+    patchVersion: "1.4.0"
     maxUnavailable: 1
     installer:
       # Required. Carrier of the update payload and of whatever tooling the
@@ -645,6 +646,7 @@ What the manifest cannot express, field by field:
 | Field | Required | Default | Notes |
 |---|---|---|---|
 | `updateStrategy.type` | no | `Recreate` | Enum widened to `Recreate;CheckpointRestore;InstallerUpdate`. |
+| `updateStrategy.patchVersion` | with `type: InstallerUpdate` | — | User-defined, immutable payload version; 1–63 characters, alphanumeric at both ends, with alphanumerics, `-`, `_`, or `.` inside. Suitable as a Sandbox label value. |
 | `updateStrategy.installer` | with `type: InstallerUpdate` | — | Rejected under any other strategy. |
 | `installer.image` | **yes** | — | `MinLength=1`. |
 | `installer.command` | no | image `ENTRYPOINT`/`CMD` | `+listType=atomic`, so a strategic merge patch replaces the whole list instead of appending. |
@@ -654,9 +656,9 @@ What the manifest cannot express, field by field:
 | `installer.imagePullPolicy` | no | `IfNotPresent` | Enum `Always;IfNotPresent;Never`. |
 | `installer.timeoutSeconds` | no | `600` | `Minimum=1`. Bounds the install from entry into `Installing`, so it also covers an image pull that never completes. |
 
-The Go declaration itself is unchanged in shape from the existing
-`SandboxUpdateOpsStrategy`: one optional pointer field, `Installer
-*InstallerSpec` with `json:"installer,omitempty"`. `InstallerSpec` is declared in
+`SandboxUpdateOpsStrategy` adds `PatchVersion string` with
+`json:"patchVersion,omitempty"` and `Installer *InstallerSpec` with
+`json:"installer,omitempty"`. `InstallerSpec` is declared in
 `api/v1alpha1/sandbox_types.go` rather than in `sandboxupdateops_types.go`,
 because it is referenced from both `SandboxUpdateOpsStrategy.Installer` and
 `SandboxUpgradePolicy.Installer`. That file already imports
@@ -688,14 +690,14 @@ type SandboxUpgradePolicy struct {
 	// +optional
 	Type SandboxUpgradePolicyType `json:"type,omitempty"`
 
-	// PatchVersion identifies the payload this upgrade installs. It is an opaque
-	// token: SandboxUpdateOps sets it to the UID of the owning ops object, so every
-	// operation carries a distinct value. The sandbox controller runs an
-	// InstallerUpdate upgrade only while PatchVersion differs from
-	// status.completedPatchVersion; Recreate and CheckpointRestore ignore it because
-	// they key off the Pod template revision instead.
-	// Required when Type is InstallerUpdate.
+	// PatchVersion is the user-defined installer payload version and must be a
+	// nonempty Kubernetes label value. InstallerUpdate runs only when it differs
+	// from status.completedPatchVersion. Recreate and CheckpointRestore ignore it.
+	// Required when Type is InstallerUpdate; a new attempt needs a new version.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
 	PatchVersion string `json:"patchVersion,omitempty"`
 
 	// Installer configures the ephemeral container for an InstallerUpdate
@@ -712,7 +714,7 @@ type SandboxStatus struct {
 	// CompletedPatchVersion is the spec.upgradePolicy.patchVersion of the last
 	// InstallerUpdate upgrade that finished successfully. It is what makes the
 	// install idempotent: the controller does not re-run a patch it has already
-	// completed, and a new ops object carries a new token.
+	// completed. A new attempt requires a different user-supplied version.
 	// +optional
 	CompletedPatchVersion string `json:"completedPatchVersion,omitempty"`
 }
@@ -733,13 +735,15 @@ revision and break
 `pkg/controller/sandbox/core/upgrade_control.go:394`. A separate token avoids
 that entirely.
 
-The field is named for what it will carry rather than for how it is generated
-today. Deriving it from the ops UID keeps SUO the only writer and guarantees
-distinctness across operations, which is all the controller needs. Letting an
-operator set it explicitly from the payload version — so that
-`status.completedPatchVersion` reads as `1.4.0` rather than as a UID — is a
-compatible later extension, since the controller only ever compares the two values
-for equality.
+The operator supplies `spec.updateStrategy.patchVersion`, which SUO copies to
+`spec.upgradePolicy.patchVersion`; the ops UID remains an object identity, not a
+payload version. The version must be a nonempty Kubernetes label value (at most
+63 characters), so values such as `1.4.0` can also be used in Sandbox labels.
+No label key or automatic label publication is introduced by this field.
+The strategy version is immutable within an ops object, like its installer.
+Reusing a completed version does not reinstall it; reuse a version only for the
+same payload. Recovery from a terminal failure requires a new ops object with a
+different version, even when the corrected installer uses the same image tag.
 
 Why the token cannot be dropped: the `Upgrading` condition alone is insufficient.
 SUO clears `spec.upgradePolicy` only after it observes success, so between
@@ -832,7 +836,8 @@ The installer command is expected to:
 5. **Be idempotent.** The controller runs a given `patchVersion` exactly once and
    never re-injects, so this is not about surviving a retry. It is about surviving
    a *failure*: a non-zero exit may leave the target half-updated, and the
-   operator's recovery is a new ops object whose installer meets that state. The
+   operator's recovery is a new ops object with a different `patchVersion` whose
+   installer meets that state. The
    same image may also be applied to a sandbox that a previous, different ops
    already installed into.
 6. **Exit 0 on success.** stdout and stderr are truncated into the `Upgrading`
@@ -1005,7 +1010,7 @@ All in `pkg/controller/sandboxupdateops/`.
 
 **`patch.go` — `applySandboxPatch` (line 140).** The ops→sandbox policy mapping at
 lines 144-150 gains an `InstallerUpdate` case. It sets the policy type, sets
-`PatchVersion` to the UID of the owning ops object, and deep-copies
+`PatchVersion` to `ops.Spec.UpdateStrategy.PatchVersion`, and deep-copies
 `ops.Spec.UpdateStrategy.Installer` into the policy.
 
 For `InstallerUpdate` the function must **not** call `mergeTemplate`, because
@@ -1021,7 +1026,7 @@ adjustments, all guarded on the strategy being `InstallerUpdate`:
   image change — and typically an empty `spec.patch` — that check is meaningless
   here and would let the ops complete without installing anything. Replace it with
   an install-aware check: the sandbox needs no update when
-  `sbx.Status.CompletedPatchVersion == string(ops.UID)`.
+  `sbx.Status.CompletedPatchVersion == ops.Spec.UpdateStrategy.PatchVersion`.
 - Line 467 returns `sandboxResumeSucceed` for a labelled, `Running` sandbox with no
   `Upgrading` condition. That heuristic exists to recover a lost phase-2 template
   patch. `InstallerUpdate` has no phase 2, so this branch must be skipped; such a
@@ -1115,7 +1120,7 @@ transition directly to `PreUpgrade`; the abandonment check keys off
    name. Every outcome below is terminal for this `patchVersion` — the controller
    never re-injects, because an ephemeral container cannot be removed, restarted or
    replaced, so a second one would only add a second entry to `pod.spec` without
-   undoing the first. Recovery is a new ops object, which carries a new
+   undoing the first. Recovery is a new ops object with a different user-supplied
    `patchVersion` and therefore a new container name.
    - `State.Waiting.Reason == "ImagePullBackOff" | "ErrImagePull"` → keep waiting.
      The kubelet retries the pull on its own backoff and no new ephemeral container
@@ -1391,8 +1396,8 @@ fail-stops the batch, matching existing SUO semantics. The contract requires
 idempotent installers and recommends staging into a temporary directory and
 switching atomically, so the common failure leaves the live tree untouched rather
 than half-written. Recovery is the operator's decision: delete and recreate the
-sandbox, or re-run a corrected ops — which carries a new `patchVersion` and
-therefore a new container name.
+sandbox, or create a corrected ops with a different user-supplied `patchVersion`
+and therefore a new container name.
 
 **Result is not durable across Pod replacement.** See
 [Durability](#durability-of-the-result).
@@ -1532,7 +1537,8 @@ used:
 **Unit — `pkg/controller/sandboxupdateops/`** (table-driven, extending the
 existing tables per the repository's test rules):
 
-- `patch_test.go`: `InstallerUpdate` sets `Type`, `PatchVersion = ops.UID` and a
+- `patch_test.go`: `InstallerUpdate` sets `Type`, copies the user-supplied
+  `ops.Spec.UpdateStrategy.PatchVersion`, and stores a
   deep-copied `Installer`; does not merge the template; still sets the tracking
   label and clears the stale failure label; a `Paused` sandbox gets the resume
   trigger *and* the full policy.

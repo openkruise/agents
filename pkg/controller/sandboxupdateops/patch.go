@@ -106,7 +106,7 @@ func isInstallerUpdateOps(ops *agentsv1alpha1.SandboxUpdateOps) bool {
 // InstallerUpdate also requires this ops's completed patch version token.
 func isSandboxOpsApplied(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
 	if isInstallerUpdateOps(ops) {
-		if sbx.Status.CompletedPatchVersion != string(ops.UID) {
+		if sbx.Status.CompletedPatchVersion != ops.Spec.UpdateStrategy.PatchVersion {
 			return false
 		}
 	}
@@ -215,7 +215,7 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 			modified.Spec.UpgradePolicy.Type = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
 		case agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate:
 			modified.Spec.UpgradePolicy.Type = agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate
-			modified.Spec.UpgradePolicy.PatchVersion = string(ops.UID)
+			modified.Spec.UpgradePolicy.PatchVersion = ops.Spec.UpdateStrategy.PatchVersion
 			modified.Spec.UpgradePolicy.Installer = ops.Spec.UpdateStrategy.Installer.DeepCopy()
 		}
 	}

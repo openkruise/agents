@@ -1692,6 +1692,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 					},
 					UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
 						Type:           agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+						PatchVersion:   "v2",
 						MaxUnavailable: maxUnavailable,
 						Installer:      installer,
 					},
@@ -1747,8 +1748,8 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 				g.Expect(cond).NotTo(BeNil(), "should have Upgrading condition")
 				g.Expect(cond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonSucceeded))
 				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-				g.Expect(updated.Status.CompletedPatchVersion).To(Equal(string(ops.UID)),
-					"completedPatchVersion should record the ops UID")
+				g.Expect(updated.Status.CompletedPatchVersion).To(Equal(ops.Spec.UpdateStrategy.PatchVersion),
+					"completedPatchVersion should record the user-specified payload version")
 				g.Expect(updated.Spec.UpgradePolicy).To(BeNil(),
 					"upgrade policy should be cleared after the upgrade succeeds")
 				g.Expect(updated.Spec.Template.Spec.Containers[0].Image).To(Equal(initialImage),
@@ -1847,7 +1848,7 @@ exit 1`
 				g.Expect(cond).NotTo(BeNil())
 				g.Expect(cond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonSucceeded))
 				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-				g.Expect(updated.Status.CompletedPatchVersion).To(Equal(string(ops.UID)))
+				g.Expect(updated.Status.CompletedPatchVersion).To(Equal(ops.Spec.UpdateStrategy.PatchVersion))
 				g.Expect(updated.Spec.UpgradePolicy).To(BeNil())
 				g.Expect(updated.Spec.Lifecycle).To(BeNil())
 			}, 30*time.Second, time.Second).Should(Succeed())
@@ -2058,7 +2059,7 @@ exit 1`
 			By("Verifying the install itself completed before the hook failed")
 			updated := &agentsv1alpha1.Sandbox{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
-			Expect(updated.Status.CompletedPatchVersion).To(Equal(string(ops.UID)),
+			Expect(updated.Status.CompletedPatchVersion).To(Equal(ops.Spec.UpdateStrategy.PatchVersion),
 				"the install finished before postUpgrade failed")
 
 			pod := &corev1.Pod{}

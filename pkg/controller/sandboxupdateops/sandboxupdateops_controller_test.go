@@ -736,13 +736,14 @@ func TestClassifySandbox(t *testing.T) {
 
 func TestClassifySandbox_InstallerUpdate(t *testing.T) {
 	opsName := "test-ops"
-	const opsUID = "installer-ops-uid"
+	const patchVersion = "1.4.0"
 	ops := &agentsv1alpha1.SandboxUpdateOps{
-		ObjectMeta: metav1.ObjectMeta{Name: opsName, UID: types.UID(opsUID)},
+		ObjectMeta: metav1.ObjectMeta{Name: opsName, UID: types.UID("installer-ops-uid")},
 		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
 			UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
-				Type:      agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
-				Installer: &agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"},
+				Type:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+				PatchVersion: patchVersion,
+				Installer:    &agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"},
 			},
 		},
 	}
@@ -766,7 +767,7 @@ func TestClassifySandbox_InstallerUpdate(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase:                 agentsv1alpha1.SandboxRunning,
-					CompletedPatchVersion: opsUID,
+					CompletedPatchVersion: patchVersion,
 				},
 			},
 			expected: sandboxNoNeedUpdate,
@@ -788,7 +789,7 @@ func TestClassifySandbox_InstallerUpdate(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase:                 agentsv1alpha1.SandboxUpgrading,
-					CompletedPatchVersion: opsUID,
+					CompletedPatchVersion: patchVersion,
 				},
 			},
 			expected: sandboxCandidate,
@@ -867,7 +868,7 @@ func TestClassifySandbox_InstallerUpdate(t *testing.T) {
 				}},
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase:                 agentsv1alpha1.SandboxRunning,
-					CompletedPatchVersion: opsUID,
+					CompletedPatchVersion: patchVersion,
 					Conditions: []metav1.Condition{
 						{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
 					},
@@ -916,7 +917,7 @@ func TestClassifySandbox_InstallerUpdate(t *testing.T) {
 				}},
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase:                 agentsv1alpha1.SandboxRunning,
-					CompletedPatchVersion: opsUID,
+					CompletedPatchVersion: patchVersion,
 				},
 			},
 			expected: sandboxUpdated,
@@ -1875,9 +1876,10 @@ func TestHandleDeletion_ClearsUpgradePolicyOnlyForUpdatedSandboxes(t *testing.T)
 			policy := &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore}
 			installer := tt.strategy == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate
 			if installer {
+				ops.Spec.UpdateStrategy.PatchVersion = "1.4.0"
 				policy = &agentsv1alpha1.SandboxUpgradePolicy{
 					Type:         agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate,
-					PatchVersion: string(ops.UID),
+					PatchVersion: ops.Spec.UpdateStrategy.PatchVersion,
 					Installer:    &agentsv1alpha1.InstallerSpec{Image: "installer:v2"},
 				}
 				ops.Spec.UpdateStrategy.Type = tt.strategy
@@ -1888,7 +1890,7 @@ func TestHandleDeletion_ClearsUpgradePolicyOnlyForUpdatedSandboxes(t *testing.T)
 			}}
 			sbxUpdated := newSandbox("sbx-updated", "default", "test-ops", agentsv1alpha1.SandboxRunning, succeeded)
 			sbxUpdated.Spec.UpgradePolicy = policy.DeepCopy()
-			sbxUpdated.Status.CompletedPatchVersion = string(ops.UID)
+			sbxUpdated.Status.CompletedPatchVersion = ops.Spec.UpdateStrategy.PatchVersion
 			sbxUpgrading := newSandbox("sbx-upgrading", "default", "test-ops", agentsv1alpha1.SandboxUpgrading, []metav1.Condition{
 				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod, Status: metav1.ConditionFalse},
 			})
@@ -1959,13 +1961,19 @@ func TestIsUpgradeSucceeded(t *testing.T) {
 			name:             "installer success requires the current operation token",
 			conditions:       succeeded,
 			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
-			completedVersion: "current-ops-uid",
+			completedVersion: "1.4.0",
 			want:             true,
 		},
 		{
 			name:       "old success without a token is not installer success",
 			conditions: succeeded,
 			strategy:   agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+		},
+		{
+			name:             "ops UID is not the desired payload version",
+			conditions:       succeeded,
+			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+			completedVersion: "current-ops-uid",
 		},
 		{
 			name:             "previous installer token does not complete the current operation",
@@ -1976,7 +1984,7 @@ func TestIsUpgradeSucceeded(t *testing.T) {
 		{
 			name:             "matching token without succeeded condition is insufficient",
 			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
-			completedVersion: "current-ops-uid",
+			completedVersion: "1.4.0",
 		},
 		{
 			name:             "Recreate success ignores installer tokens",
@@ -1998,6 +2006,7 @@ func TestIsUpgradeSucceeded(t *testing.T) {
 			ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
 			ops.UID = "current-ops-uid"
 			ops.Spec.UpdateStrategy.Type = tt.strategy
+			ops.Spec.UpdateStrategy.PatchVersion = "1.4.0"
 			sbx := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxRunning, tt.conditions)
 			sbx.Status.CompletedPatchVersion = tt.completedVersion
 			assert.Equal(t, tt.want, isUpgradeSucceeded(sbx, ops))
@@ -2008,7 +2017,7 @@ func TestIsUpgradeSucceeded(t *testing.T) {
 func TestReconcile_CleanupUpdatedSandbox(t *testing.T) {
 	policy := &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}
 	installerPolicy := &agentsv1alpha1.SandboxUpgradePolicy{
-		Type: agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate, PatchVersion: "current-ops-uid",
+		Type: agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate, PatchVersion: "1.4.0",
 		Installer: &agentsv1alpha1.InstallerSpec{Image: "installer:v2"},
 	}
 	tests := []struct {
@@ -2063,7 +2072,7 @@ func TestReconcile_CleanupUpdatedSandbox(t *testing.T) {
 			name:             "matching installer token permits cleanup",
 			policy:           installerPolicy.DeepCopy(),
 			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
-			completedVersion: "current-ops-uid",
+			completedVersion: "1.4.0",
 			wantPatches:      1,
 			wantPolicyNil:    true,
 		},
@@ -2086,6 +2095,7 @@ func TestReconcile_CleanupUpdatedSandbox(t *testing.T) {
 			ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
 			ops.UID = "current-ops-uid"
 			ops.Spec.UpdateStrategy.Type = tt.strategy
+			ops.Spec.UpdateStrategy.PatchVersion = "1.4.0"
 			if tt.strategy == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate {
 				ops.Spec.UpdateStrategy.Installer = installerPolicy.Installer.DeepCopy()
 			} else {
@@ -2896,6 +2906,7 @@ func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 			if tt.installer {
 				ops.UID = "current-ops-uid"
 				ops.Spec.UpdateStrategy.Type = agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate
+				ops.Spec.UpdateStrategy.PatchVersion = "1.4.0"
 				ops.Spec.UpdateStrategy.Installer = &agentsv1alpha1.InstallerSpec{Image: "installer:v2"}
 			}
 			sbx := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxUpgrading, []metav1.Condition{
@@ -2907,9 +2918,9 @@ func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 				sbx.Spec.Paused = true
 				sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
 					Type:         agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate,
-					PatchVersion: string(ops.UID), Installer: ops.Spec.UpdateStrategy.Installer.DeepCopy(),
+					PatchVersion: ops.Spec.UpdateStrategy.PatchVersion, Installer: ops.Spec.UpdateStrategy.Installer.DeepCopy(),
 				}
-				sbx.Status.UpgradingPatchVersion = string(ops.UID)
+				sbx.Status.UpgradingPatchVersion = ops.Spec.UpdateStrategy.PatchVersion
 			}
 			sbx.Annotations = map[string]string{agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True}
 			t.Cleanup(func() { ResourceVersionExpectations.Delete(sbx) })

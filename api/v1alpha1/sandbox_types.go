@@ -205,6 +205,7 @@ const (
 // SandboxUpgradePolicy defines the upgrade strategy for the sandbox.
 // When Type is empty (default), the sandbox does not support upgrading.
 // Only when Type is explicitly set (e.g., Recreate), the upgrade capability is enabled.
+// +kubebuilder:validation:XValidation:rule="!has(self.type) || self.type != 'InstallerUpdate' || has(self.patchVersion)",message="patchVersion is required when type is InstallerUpdate"
 type SandboxUpgradePolicy struct {
 	// Type specifies the upgrade policy type.
 	// When empty (default), upgrading is disabled.
@@ -213,14 +214,14 @@ type SandboxUpgradePolicy struct {
 	// +optional
 	Type SandboxUpgradePolicyType `json:"type,omitempty"`
 
-	// PatchVersion identifies the payload this upgrade installs. It is an opaque
-	// token: SandboxUpdateOps sets it to the UID of the owning ops object, so every
-	// operation carries a distinct value. The sandbox controller runs an
-	// InstallerUpdate upgrade only while PatchVersion differs from
-	// status.completedPatchVersion; Recreate and CheckpointRestore ignore it because
-	// they key off the Pod template revision instead.
-	// Required when Type is InstallerUpdate.
+	// PatchVersion is the user-defined installer payload version and must be a
+	// nonempty Kubernetes label value. InstallerUpdate runs only when it differs
+	// from status.completedPatchVersion. Recreate and CheckpointRestore ignore it.
+	// Required when Type is InstallerUpdate; a new attempt needs a new version.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
 	PatchVersion string `json:"patchVersion,omitempty"`
 
 	// Installer configures the ephemeral container for an InstallerUpdate

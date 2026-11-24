@@ -705,6 +705,19 @@ spec:
                       MaxUnavailable is the maximum number of sandboxes that can be upgrading at the same time.
                       Value can be an absolute number (e.g., 5) or a percentage of total sandboxes (e.g., 10%).
                     x-kubernetes-int-or-string: true
+                  patchVersion:
+                    description: |-
+                      PatchVersion is the user-defined installer payload version copied to each
+                      sandbox's upgrade policy. It must be a nonempty Kubernetes label value.
+                      Required for InstallerUpdate; ignored by other strategies. Immutable.
+                      Reuse a version only for the same payload; a new attempt needs a new version.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: patchVersion is immutable
+                      rule: self == oldSelf
                   type:
                     description: |-
                       Type specifies the update strategy type.
@@ -716,6 +729,9 @@ spec:
                     - InstallerUpdate
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: patchVersion is required when type is InstallerUpdate
+                  rule: '!has(self.type) || self.type != ''InstallerUpdate'' || has(self.patchVersion)'
             required:
             - selector
             type: object

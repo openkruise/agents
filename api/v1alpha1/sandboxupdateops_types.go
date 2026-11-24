@@ -97,6 +97,7 @@ const (
 )
 
 // SandboxUpdateOpsStrategy defines the strategy for batch sandbox updates.
+// +kubebuilder:validation:XValidation:rule="!has(self.type) || self.type != 'InstallerUpdate' || has(self.patchVersion)",message="patchVersion is required when type is InstallerUpdate"
 type SandboxUpdateOpsStrategy struct {
 	// Type specifies the update strategy type.
 	// When empty, defaults to Recreate.
@@ -109,6 +110,17 @@ type SandboxUpdateOpsStrategy struct {
 	// Value can be an absolute number (e.g., 5) or a percentage of total sandboxes (e.g., 10%).
 	// +optional
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+
+	// PatchVersion is the user-defined installer payload version copied to each
+	// sandbox's upgrade policy. It must be a nonempty Kubernetes label value.
+	// Required for InstallerUpdate; ignored by other strategies. Immutable.
+	// Reuse a version only for the same payload; a new attempt needs a new version.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="patchVersion is immutable"
+	PatchVersion string `json:"patchVersion,omitempty"`
 
 	// Installer configures the ephemeral container injected into each selected
 	// sandbox. Required when Type is InstallerUpdate, forbidden otherwise.
