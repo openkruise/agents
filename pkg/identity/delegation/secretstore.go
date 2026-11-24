@@ -90,6 +90,14 @@ const (
 	delegationNamePrefix = "user-delegation-"
 )
 
+// recordKind values, what LabelRecordKind is actually set to on each kind of
+// record. Named apart from the Secret name prefixes above, which carry a
+// trailing hyphen these do not.
+const (
+	sessionRecordKind    = "oauth-session"
+	delegationRecordKind = "user-delegation"
+)
+
 // secretStore is what the two stores share: a client, a keyring and the one
 // namespace every record lives in.
 //
@@ -347,7 +355,7 @@ func (s *SecretSessionStore) Create(ctx context.Context, session *Session) error
 			Name:      SessionSecretName(session.Key),
 			Namespace: s.namespace,
 			Labels: map[string]string{
-				LabelRecordKind:         "oauth-session",
+				LabelRecordKind:         sessionRecordKind,
 				LabelAgentIdentity:      safeLabelValue(session.AgentIdentity),
 				LabelCredentialProvider: safeLabelValue(session.CredentialProvider),
 				LabelSessionNamespace:   session.Key.Namespace,
@@ -388,7 +396,7 @@ func (s *SecretSessionStore) ResolveStateDigest(ctx context.Context, digest stri
 
 	var candidates corev1.SecretList
 	if err := s.client.List(ctx, &candidates, client.InNamespace(s.namespace), client.MatchingLabels{
-		LabelRecordKind:  "oauth-session",
+		LabelRecordKind:  sessionRecordKind,
 		LabelStateDigest: safeLabelValue(digest),
 	}); err != nil {
 		return SessionKey{}, fmt.Errorf("delegation: list sessions by state digest: %w", err)
@@ -549,7 +557,7 @@ func (s *SecretSessionStore) Delete(ctx context.Context, key SessionKey) error {
 func (s *SecretSessionStore) SweepExpiredSessions(ctx context.Context, now time.Time) (int, error) {
 	var sessions corev1.SecretList
 	if err := s.client.List(ctx, &sessions, client.InNamespace(s.namespace),
-		client.MatchingLabels{LabelRecordKind: "oauth-session"}); err != nil {
+		client.MatchingLabels{LabelRecordKind: sessionRecordKind}); err != nil {
 		return 0, fmt.Errorf("delegation: list sessions: %w", err)
 	}
 
@@ -666,7 +674,7 @@ func (s *SecretDelegationStore) Put(ctx context.Context, record *Delegation) err
 			Name:      DelegationSecretName(record.Key),
 			Namespace: s.namespace,
 			Labels: map[string]string{
-				LabelRecordKind:         "user-delegation",
+				LabelRecordKind:         delegationRecordKind,
 				LabelAgentIdentity:      safeLabelValue(record.Key.AgentIdentity),
 				LabelCredentialProvider: safeLabelValue(record.Key.CredentialProvider),
 			},
