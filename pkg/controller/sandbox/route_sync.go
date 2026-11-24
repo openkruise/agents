@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -29,43 +28,43 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
-)
-
-const (
-	controllerPeerNamespace = "sandbox-system"
-	controllerPeerBindPort  = 7946
+	"github.com/openkruise/agents/pkg/utils"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 // RouteSync manages peer discovery and publishes route refreshes without serving them.
 // ready publishes the read-only outbound client after startup succeeds.
 type RouteSync struct {
-	cache    ctrlcache.Cache
-	peers    *peers.MemberlistPeers
-	bindPort int
-	ready    chan struct{}
-	outbound *refresh.PeerOutbound
+	cache       ctrlcache.Cache
+	peers       *peers.MemberlistPeers
+	bindAddress string
+	bindPort    int
+	ready       chan struct{}
+	outbound    *refresh.PeerOutbound
 }
 
 // SetupRouteSync registers a dedicated peer cache and the plaintext sender lifecycle.
-// An empty selector disables sync without starting any peer listeners.
-func SetupRouteSync(mgr manager.Manager, peerSelector string) (*RouteSync, error) {
-	if peerSelector == "" {
+// A disabled SandboxRouteSync gate or an empty selector skips validation and setup.
+// An empty bindAddress falls back to peers.FindPodIP; a non-positive bindPort uses 7946.
+func SetupRouteSync(mgr manager.Manager, peerSelector, bindAddress string, bindPort int) (*RouteSync, error) {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxRouteSyncGate) || peerSelector == "" {
 		return nil, nil
+	}
+	if bindPort <= 0 {
+		bindPort = 7946
+	}
+	if bindPort > 65535 {
+		return nil, fmt.Errorf("--memberlist-bind-port must be in the range 1-65535, got %d", bindPort)
 	}
 	selector, err := labels.Parse(peerSelector)
 	if err != nil {
 		return nil, fmt.Errorf("parse peer selector: %w", err)
 	}
-	nodeName := os.Getenv("POD_NAME")
-	if nodeName == "" {
-		nodeName, err = os.Hostname()
-		if err != nil {
-			return nil, fmt.Errorf("get controller peer name: %w", err)
-		}
-	}
+	nodeName := peers.NewPeerNodeName(true)
 
 	// The main Pod cache may exclude manager/gateway Pods; peer discovery uses a separate filter scope.
 	peerCache, err := ctrlcache.New(mgr.GetConfig(), ctrlcache.Options{
@@ -74,7 +73,7 @@ func SetupRouteSync(mgr manager.Manager, peerSelector string) (*RouteSync, error
 		ReaderFailOnMissingInformer: true,
 		ByObject: map[ctrlclient.Object]ctrlcache.ByObject{
 			&corev1.Pod{}: {
-				Namespaces: map[string]ctrlcache.Config{controllerPeerNamespace: {}},
+				Namespaces: map[string]ctrlcache.Config{utils.DefaultSandboxDeployNamespace: {}},
 				Label:      selector,
 			},
 		},
@@ -86,10 +85,11 @@ func SetupRouteSync(mgr manager.Manager, peerSelector string) (*RouteSync, error
 		return nil, fmt.Errorf("register peer informer: %w", err)
 	}
 	sender := &RouteSync{
-		cache:    peerCache,
-		peers:    peers.NewMemberlistPeers(peerCache, peers.NodePrefixSandboxController+nodeName, controllerPeerNamespace, peerSelector),
-		bindPort: controllerPeerBindPort,
-		ready:    make(chan struct{}),
+		cache:       peerCache,
+		peers:       peers.NewMemberlistPeers(peerCache, peers.NodePrefixSandboxController+nodeName, utils.DefaultSandboxDeployNamespace, peerSelector),
+		bindAddress: bindAddress,
+		bindPort:    bindPort,
+		ready:       make(chan struct{}),
 	}
 	if err := mgr.Add(sender); err != nil {
 		return nil, fmt.Errorf("register controller route sync: %w", err)
@@ -118,7 +118,7 @@ func (s *RouteSync) Start(ctx context.Context) (err error) {
 	}
 	s.outbound = refresh.NewPeerOutbound(nil)
 	defer s.outbound.CloseIdleConnections()
-	if err := s.peers.Start(ctx, "", s.bindPort); err != nil {
+	if err := s.peers.Start(ctx, s.bindAddress, s.bindPort); err != nil {
 		return fmt.Errorf("start controller peers: %w", err)
 	}
 	close(s.ready)

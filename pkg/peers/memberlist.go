@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/hashicorp/memberlist"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
@@ -117,6 +118,22 @@ func (m *MemberlistPeers) SetSecretKey(key []byte) {
 		return
 	}
 	m.secretKey = append([]byte(nil), key...)
+}
+
+// NewPeerNodeName returns HOSTNAME, then POD_NAME. When both are unset,
+// randomFallback selects an eight-character UUID prefix; otherwise it returns
+// an empty string so callers requiring an explicit identity can reject it.
+func NewPeerNodeName(randomFallback bool) string {
+	if name := os.Getenv("HOSTNAME"); name != "" {
+		return name
+	}
+	if name := os.Getenv("POD_NAME"); name != "" {
+		return name
+	}
+	if randomFallback {
+		return uuid.NewString()[:8]
+	}
+	return ""
 }
 
 func FindPodIP() (string, error) {

@@ -57,6 +57,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
+	"github.com/openkruise/agents/pkg/utils/network"
 	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/webhookutils"
 	customwebhook "github.com/openkruise/agents/pkg/webhook"
@@ -93,6 +94,8 @@ func main() {
 	var defaultPersistentContents string
 	var runtimeClientCertDir string
 	var peerSelector string
+	var networkInterface string
+	var memberlistBindPort int
 
 	// New variables for pprof
 	var enablePprof bool
@@ -137,7 +140,9 @@ func main() {
 			"HTTPS capability on newly created sandboxes; empty disables both. Set it only after the sidecar "+
 			"injection template already serves HTTPS, since the capability annotation is write-once.")
 
-	flag.StringVar(&peerSelector, "peer-selector", "", "Label selector of memberlist seed Pods in sandbox-system; empty disables controller route sync.")
+	flag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip; only used when SandboxRouteSync is enabled; non-positive values use 7946.")
+	flag.StringVar(&peerSelector, "peer-selector", "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", "Label selector of memberlist seed Pods in sandbox-system; only used when SandboxRouteSync is enabled; empty disables sync.")
+	flag.StringVar(&networkInterface, "network-interface", "eni1", "Network interface whose single global-unicast address (IPv4 preferred, IPv6 otherwise) binds and advertises controller memberlist; only used when SandboxRouteSync is enabled; empty uses POD_IP or the first non-loopback IPv4.")
 
 	var metricsAsyncWorkers int
 	var metricsAsyncQueueCap int
@@ -185,6 +190,15 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "unable to start")
 		os.Exit(1)
+	}
+
+	var bindAddress string
+	if utilfeature.DefaultFeatureGate.Enabled(features.SandboxRouteSyncGate) && peerSelector != "" {
+		bindAddress, err = network.ResolveNetworkInterfaceAddress(networkInterface)
+		if err != nil {
+			setupLog.Error(err, "invalid --network-interface", "interface", networkInterface)
+			os.Exit(1)
+		}
 	}
 
 	// Start pprof server if enabled
@@ -366,7 +380,7 @@ func main() {
 		setupLog.Info("runtime client TLS disabled, using legacy plaintext runtime paths")
 	}
 
-	routeSync, err := sandboxctrl.SetupRouteSync(mgr, peerSelector)
+	routeSync, err := sandboxctrl.SetupRouteSync(mgr, peerSelector, bindAddress, memberlistBindPort)
 	if err != nil {
 		setupLog.Error(err, "unable to setup controller route sync")
 		os.Exit(1)

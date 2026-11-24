@@ -34,13 +34,16 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 // newSandboxTestManager creates a real controller-runtime Manager backed by a
@@ -95,18 +98,27 @@ func TestSandboxReconciler_SetupWithManager(t *testing.T) {
 }
 
 func TestSetupRouteSyncValidation(t *testing.T) {
+	assert.False(t, utilfeature.DefaultFeatureGate.Enabled(features.SandboxRouteSyncGate))
 	tests := []struct {
-		name     string
-		selector string
-		wantErr  string
+		name        string
+		gateEnabled bool
+		selector    string
+		bindAddress string
+		bindPort    int
+		wantErr     string
 	}{
-		{name: "默认关闭"},
-		{name: "selector 必须合法", selector: "component in (", wantErr: "parse peer selector"},
+		{name: "默认关闭且默认参数不启用同步", selector: "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", bindPort: 7946},
+		{name: "gate 关闭不校验 selector、绑定地址或端口", selector: "component in (", bindAddress: "invalid-address", bindPort: 65536},
+		{name: "自定义端口不能单独启用同步", selector: "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", bindPort: 9000},
+		{name: "gate 开启但 selector 为空仍关闭", gateEnabled: true, bindPort: 65536},
+		{name: "gate 开启后 selector 必须合法", gateEnabled: true, selector: "component in (", bindPort: 7946, wantErr: "parse peer selector"},
+		{name: "gate 开启后端口不能越界", gateEnabled: true, selector: "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", bindPort: 65536, wantErr: "--memberlist-bind-port must be in the range 1-65535"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxRouteSyncGate, tt.gateEnabled)
 			// All cases must return before accessing the manager or starting listeners.
-			sender, err := SetupRouteSync(nil, tt.selector)
+			sender, err := SetupRouteSync(nil, tt.selector, tt.bindAddress, tt.bindPort)
 			assert.Nil(t, sender)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
@@ -119,16 +131,43 @@ func TestSetupRouteSyncValidation(t *testing.T) {
 
 func TestRouteSyncLifecycle(t *testing.T) {
 	tests := []struct {
-		name       string
-		cancelSync bool
+		name         string
+		hostname     string
+		podName      string
+		wantNodeName string
+		bindAddress  string
+		podIP        string
+		peerSelector string
+		cancelSync   bool
+		setupOnly    bool
+		bindPort     int
+		wantBindPort int
 	}{
-		{name: "明文启动并退出"},
+		{name: "默认端口", setupOnly: true, bindPort: 7946, wantBindPort: 7946},
+		{name: "零端口回退默认值", setupOnly: true, wantBindPort: 7946},
+		{name: "负端口回退默认值", setupOnly: true, bindPort: -1, wantBindPort: 7946},
+		{name: "端口上限合法", setupOnly: true, bindPort: 65535, wantBindPort: 65535},
+		{name: "覆盖默认 selector", peerSelector: "component=sandbox-manager"},
+		{name: "HOSTNAME 优先", hostname: "controller-hostname", podName: "controller-pod", wantNodeName: "controller-hostname"},
+		{name: "POD_NAME 回退", podName: "controller-route-sync-test", wantNodeName: "controller-route-sync-test"},
+		{name: "环境变量均为空时使用 UUID"},
+		{name: "指定绑定地址覆盖 POD_IP", bindAddress: "127.0.0.1", podIP: "192.0.2.1"},
 		{name: "缓存未同步时可以取消", cancelSync: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("POD_NAME", "controller-route-sync-test")
-			t.Setenv("POD_IP", "127.0.0.1")
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxRouteSyncGate, true)
+			peerSelector := tt.peerSelector
+			if peerSelector == "" {
+				peerSelector = "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager"
+			}
+			t.Setenv("HOSTNAME", tt.hostname)
+			t.Setenv("POD_NAME", tt.podName)
+			podIP := tt.podIP
+			if podIP == "" {
+				podIP = "127.0.0.1"
+			}
+			t.Setenv("POD_IP", podIP)
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			listStarted := make(chan struct{}, 1)
@@ -139,7 +178,7 @@ func TestRouteSyncLifecycle(t *testing.T) {
 					http.NotFound(w, r)
 					return
 				}
-				assert.Equal(t, "component=sandbox-manager", r.URL.Query().Get("labelSelector"))
+				assert.Equal(t, peerSelector, r.URL.Query().Get("labelSelector"))
 				list := &corev1.PodList{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"}, ListMeta: metav1.ListMeta{ResourceVersion: "1"}, Items: []corev1.Pod{}}
 				select {
 				case listStarted <- struct{}{}:
@@ -179,17 +218,25 @@ func TestRouteSyncLifecycle(t *testing.T) {
 				MapperProvider: func(*rest.Config, *http.Client) (meta.RESTMapper, error) { return mapper, nil },
 			})
 			require.NoError(t, err)
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			require.NoError(t, err)
-			port := listener.Addr().(*net.TCPAddr).Port
-			require.NoError(t, listener.Close())
-			sender, err := SetupRouteSync(mgr, "component=sandbox-manager")
+			port := tt.bindPort
+			wantPort := tt.wantBindPort
+			if !tt.setupOnly {
+				// Pass an available port through setup without occupying the production default.
+				listener, err := net.Listen("tcp", "127.0.0.1:0")
+				require.NoError(t, err)
+				port = listener.Addr().(*net.TCPAddr).Port
+				require.NoError(t, listener.Close())
+				wantPort = port
+			}
+			sender, err := SetupRouteSync(mgr, peerSelector, tt.bindAddress, port)
 			require.NoError(t, err)
 			require.NotNil(t, sender)
-			assert.Equal(t, 7946, sender.bindPort)
-			// Override the instance port only in tests to avoid occupying the fixed production port.
-			sender.bindPort = port
+			assert.Equal(t, wantPort, sender.bindPort)
+			assert.Equal(t, tt.bindAddress, sender.bindAddress)
 			assert.NotSame(t, mgr.GetCache(), sender.GetCache())
+			if tt.setupOnly {
+				return
+			}
 			done := make(chan error, 1)
 			go func() { done <- sender.Start(ctx) }()
 			// Ensure assertion failures also cancel the informer and allow the component to exit.
@@ -212,7 +259,14 @@ func TestRouteSyncLifecycle(t *testing.T) {
 				assert.Equal(t, "http", sender.outbound.Scheme())
 				members := sender.peers.GetAllMembers()
 				require.Len(t, members, 1)
-				assert.Equal(t, peers.NodePrefixSandboxController+"controller-route-sync-test", members[0].Name)
+				assert.Equal(t, "127.0.0.1", members[0].IP)
+				assert.Equal(t, "127.0.0.1", sender.peers.LocalAddr().String())
+				assert.Equal(t, port, sender.peers.LocalPort())
+				if tt.wantNodeName != "" {
+					assert.Equal(t, peers.NodePrefixSandboxController+tt.wantNodeName, members[0].Name)
+				} else {
+					assert.Regexp(t, "^"+peers.NodePrefixSandboxController+"[0-9a-f]{8}$", members[0].Name)
+				}
 				assert.Empty(t, sender.peers.GetPeers())
 				require.NoError(t, sender.SyncRouteWithPeers(ctx, sandboxroute.Route{}))
 				cancel()

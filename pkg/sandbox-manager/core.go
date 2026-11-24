@@ -21,11 +21,9 @@ import (
 	"crypto/tls"
 	stderrors "errors"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"k8s.io/apimachinery/pkg/api/validate/content"
 	"k8s.io/apimachinery/pkg/labels"
@@ -161,13 +159,7 @@ func (b *SandboxManagerBuilder) WithMemberlistPeers() *SandboxManagerBuilder {
 		}
 		b.peerReader = peerClient
 		// build node name of sandbox-manager
-		nodeName := os.Getenv("HOSTNAME")
-		if nodeName == "" {
-			nodeName = os.Getenv("POD_NAME")
-		}
-		if nodeName == "" {
-			nodeName = uuid.NewString()[:8]
-		}
+		nodeName := peers.NewPeerNodeName(true)
 		return peers.NewMemberlistPeers(
 			peerClient,
 			peers.NodePrefixSandboxManager+nodeName,

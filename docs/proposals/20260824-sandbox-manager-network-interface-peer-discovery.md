@@ -118,15 +118,29 @@ status merge patch 显式写入 `podInfo.podIP`（包括空字符串），防止
 - 触发条件不是 phase、IP 或整个 route 的任意变化。两个不同的非空 IP、
   message 或 resourceVersion 变化，只要 `CanRouteTraffic()` 不变就不推送。
   spec、Ready condition、池归属等仍由统一投影决定流量可路由性。
-- controller 用 `sc-<pod-name>` 加入 memberlist，参与 TCP/UDP gossip，
+- controller 用 `sc-<node-name>` 加入 memberlist，参与 TCP/UDP gossip，
   但不启动 `:7789/refresh`。所有成员的 `GetPeers()` 排除 `sc-` 前缀，
   `GetAllMembers()` 仍保留这些节点用于观察成员关系。controller 不加入
   manager/gateway 的 seed Pod labels。
-- controller 仅提供 `--peer-selector`，默认为空，关闭功能且不启动 peer listener。
-  启用后固定在 `sandbox-system` 发现 peers，memberlist TCP/UDP 端口固定为 7946。
-  ACK 部署的 selector 为
-  `agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager`。
-  `POD_NAME` 决定节点名（未设置时使用 hostname），`POD_IP` 决定绑定地址。
+- controller 通过默认关闭的 Alpha FeatureGate `SandboxRouteSync` 启用。
+  gate 关闭时不解析网卡或 selector、不创建 peer cache，也不启动 peer listener。
+  `--peer-selector` 默认值为线上
+  `agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager`，
+  非空 selector 本身不再启用功能；显式设置为空仍可关闭同步。
+  启用后使用公共 namespace `sandbox-system` 发现 peers。
+  controller 通过 `--memberlist-bind-port` 配置 memberlist 端口，默认 7946；
+  非正数沿用默认值，超过 65535 时启动失败。gate 关闭时跳过端口校验。
+  自定义端口同时作为未配置 `memberlist-url` annotation 的 seed 默认端口，须与对端一致。
+  三组件复用相同的节点名获取逻辑：`HOSTNAME → POD_NAME`；均未设置时，
+  manager/controller 使用八字符 UUID 前缀，gateway 保留报错行为。
+- controller 的 `--network-interface` 默认值为 `eni1`，复用 Manager 的网卡地址解析能力。
+  所选地址用于 memberlist 绑定和广播，覆盖 `POD_IP`。
+  gate 开启后，网卡不存在、未启用、没有合格地址或首选地址族中存在多个地址时启动失败；
+  显式设置 `--network-interface=` 才沿用 `POD_IP → 第一个非回环 IPv4` 的回退。
+  此参数不改变 HTTP refresh 的出站路由，网络路由和安全组仍须保证可达。
+  selector、网卡和端口 flags 保留给其他环境覆盖，均不能单独启用同步；上述默认值使 ACK 线上只需在既有
+  `options.featureGate` 中追加 `SandboxRouteSync=true`，无需修改 Deployment YAML。
+  gate 由进程启动时的 `--feature-gates` 读取，不提供运行时热切换。
 - controller 新增独立 Pod informer，仅 watch `sandbox-system` 中符合 selector 的 Pods。
   它不复用可能开启 Sandbox Pod 标签过滤的主缓存，也不使用 APIReader List。
   不加载或 watch peer Secrets，不新增 Secrets RBAC 权限。
@@ -143,10 +157,11 @@ status merge patch 显式写入 `podInfo.podIP`（包括空字符串），防止
 已有 `sandbox_peers`、`sandbox_peer_outbound_tls_errors_total` 随实现迁移，
 未新增指标名称；controller 进程也会注册这些既有指标。
 
-部署编排需提供 `POD_NAME`/`POD_IP`，允许 controller 与 peers 双向 TCP/UDP 7946，
-并允许 controller 向接收方发起 TCP 7789。启用功能前必须先更新接收方的
+`POD_NAME`/`POD_IP` 不是必须新增的配置；双网卡部署默认选择 `eni1`，其他网卡名需覆盖，
+允许 controller 与 peers 双向 TCP/UDP 7946，并允许 controller 向接收方发起 TCP 7789。
+启用功能前必须先更新接收方的
 `sc-` 过滤逻辑；旧版本接收方会把 controller 误当作 refresh 目标。
-`config/manager/manager.yaml` 保留可选启用参数示例，不自动启用该能力，
+`config/manager/manager.yaml` 仅保留 gate 与可选覆盖参数的注释示例，不自动启用该能力，
 无需为 controller 添加 refresh Service，也不改变既有 probe 配置。
 
 验证覆盖：布尔值双向变化、Ready/IP/phase 组合、布尔值不变、发送失败、

@@ -79,9 +79,14 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
           - --webhook-cert-path=/home/nonroot/sandbox-controller-webhook-certs
-          # Optional: actively sync routes to manager/gateway; an empty selector disables sync.
-          # ACK deployment example: discover peers in sandbox-system on memberlist port 7946.
+          # Optional: actively sync routes to manager/gateway; disabled by default.
+          # - --feature-gates=SandboxRouteSync=true
+          # Defaults: ACK peer selector in sandbox-system, memberlist port 7946, interface eni1.
+          # Other deployments may override the selector, interface, and port; an empty selector disables sync.
+          # - --memberlist-bind-port=7946
           # - --peer-selector=agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager
+          # Set --network-interface= to use POD_IP or the first non-loopback IPv4 instead.
+          # - --network-interface=eni1
           # OpenTelemetry tracing (uncomment to enable).
           # The bundled demo Collector (config/otel-collector) serves plaintext
           # gRPC without TLS, hence insecure=true; switch to false only after

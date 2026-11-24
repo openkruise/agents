@@ -112,6 +112,35 @@ func startFakeLifecycle(ctx context.Context, reader ctrlclient.Reader, handle me
 	return peer
 }
 
+func TestNewPeerNodeName(t *testing.T) {
+	tests := []struct {
+		name           string
+		hostname       string
+		podName        string
+		randomFallback bool
+		want           string
+	}{
+		{name: "HOSTNAME 优先", hostname: "host", podName: "pod", want: "host"},
+		{name: "允许随机回退时 HOSTNAME 仍优先", hostname: "host", podName: "pod", randomFallback: true, want: "host"},
+		{name: "POD_NAME 回退", podName: "pod", want: "pod"},
+		{name: "允许随机回退时仍使用 POD_NAME", podName: "pod", randomFallback: true, want: "pod"},
+		{name: "缺少环境变量时返回空值"},
+		{name: "缺少环境变量时允许 UUID 回退", randomFallback: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOSTNAME", tt.hostname)
+			t.Setenv("POD_NAME", tt.podName)
+			name := NewPeerNodeName(tt.randomFallback)
+			if tt.randomFallback && tt.want == "" {
+				assert.Regexp(t, "^[0-9a-f]{8}$", name)
+			} else {
+				assert.Equal(t, tt.want, name)
+			}
+		})
+	}
+}
+
 // TestMemberlistPeers_Start_Stop tests basic start and stop functionality
 func TestMemberlistPeers_Start_Stop(t *testing.T) {
 	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()

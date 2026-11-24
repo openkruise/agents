@@ -265,21 +265,15 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	// Get node name from environment variables
-	nodeName := os.Getenv("HOSTNAME")
-	if nodeName == "" {
-		nodeName = os.Getenv("POD_NAME")
-	}
+	nodeName := peers.NewPeerNodeName(false)
 	if nodeName == "" {
 		return fmt.Errorf("HOSTNAME or POD_NAME environment variable must be set")
 	}
 
-	// Get local IP
-	localIP := os.Getenv("POD_IP")
-	if localIP == "" {
-		localIP = utils.GetFirstNonLoopbackIP()
-	}
-	if localIP == "" {
-		return fmt.Errorf("failed to determine local IP")
+	// Resolve once through the shared helper and pass the same address to memberlist.
+	localIP, err := peers.FindPodIP()
+	if err != nil {
+		return fmt.Errorf("failed to determine local IP: %w", err)
 	}
 
 	inputs, err := peerSecurityFromEnv()
@@ -329,7 +323,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	if err := s.peerManager.Start(ctx, "", s.memberlistBindPort); err != nil {
+	if err := s.peerManager.Start(ctx, localIP, s.memberlistBindPort); err != nil {
 		if shutdownErr := s.httpServer.Shutdown(ctx); shutdownErr != nil {
 			klog.ErrorS(shutdownErr, "Failed to shut down peer server after memberlist startup failure")
 		}
