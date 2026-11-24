@@ -22,8 +22,10 @@ const (
 	LabelSandboxPool = InternalPrefix + "sandbox-pool"
 	// LabelSandboxTemplate identifies which template generated the sandbox
 	LabelSandboxTemplate = InternalPrefix + "sandbox-template"
-	// LabelTemplateName groups independent build Versions of one public
-	// template name; the value is the E2B templateID.
+	// LabelTemplateName is carried only by SandboxTemplate objects: it
+	// groups the independent build Versions of one public template name,
+	// and its value is the E2B templateID. It is never set on Sandboxes,
+	// Pods, Checkpoints, or recovery templates.
 	LabelTemplateName = E2BPrefix + "template-name"
 	// LabelSandboxIsClaimed indicates whether the sandbox has been claimed by user
 	LabelSandboxIsClaimed = InternalPrefix + "sandbox-claimed"

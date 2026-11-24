@@ -28,7 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandboxtemplate"
 	"github.com/openkruise/agents/pkg/utils/defaults"
 )
 
@@ -62,9 +61,6 @@ func (h *Defaulter) Handle(ctx context.Context, req admission.Request) admission
 
 	// Apply defaulting logic to volume claim templates
 	setDefaultVolumeClaimTemplates(obj.Spec.VolumeClaimTemplates)
-	if sandboxtemplate.IsBuildVersion(obj) && obj.Spec.BuildOptions != nil && len(obj.Spec.BuildOptions.Steps) > 0 {
-		obj.Spec.BuildOptions.Checkpoint = &agentsv1alpha1.CheckpointStrategy{Enable: true}
-	}
 
 	if !reflect.DeepEqual(obj, clone) {
 		marshal, err := json.Marshal(obj)

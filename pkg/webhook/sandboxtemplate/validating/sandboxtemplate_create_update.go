@@ -116,6 +116,11 @@ func validateManagedUpdate(old, obj *agentsv1alpha1.SandboxTemplate) field.Error
 		return field.ErrorList{field.Forbidden(field.NewPath("metadata", "labels").Key(agentsv1alpha1.LabelTemplateName), "template name is immutable; existing templates cannot be adopted")}
 	}
 	var errs field.ErrorList
+	// Only the template-name label, Spec, and status.artifacts are frozen.
+	// Metadata stays mutable on complete and deleting templates: the
+	// cleanup flow patches the template-cleanup annotation and finalizer
+	// on selected Versions, and tag assignment patches the template-tags
+	// annotation on Ready builds.
 	complete := sandboxtemplate.IsSubmitted(old)
 	if !equality.Semantic.DeepEqual(old.Spec, obj.Spec) {
 		switch {

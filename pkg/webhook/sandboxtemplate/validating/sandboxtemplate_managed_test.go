@@ -76,6 +76,9 @@ func TestManagedTemplateAdmission(t *testing.T) {
 	deletingDraft := draft.DeepCopy()
 	deletingDraft.DeletionTimestamp = ptr.To(metav1.Now())
 	deletingDraft.Finalizers = []string{"test/retain"}
+	deletingSubmitted := submitted.DeepCopy()
+	deletingSubmitted.DeletionTimestamp = ptr.To(metav1.Now())
+	deletingSubmitted.Finalizers = []string{"test/retain"}
 
 	tests := []struct {
 		name    string
@@ -155,6 +158,13 @@ func TestManagedTemplateAdmission(t *testing.T) {
 		{name: "first artifact status publication is allowed", old: submitted, object: published, status: true, allowed: true},
 		{name: "published artifact status is immutable", old: published, object: published, status: true, mutate: func(v *api.SandboxTemplate) { v.Status.Artifacts[0].Value = "another-checkpoint" }},
 		{name: "metadata writes remain allowed", old: submitted, object: submitted, allowed: true, mutate: func(v *api.SandboxTemplate) { v.Labels["app"] = "test" }},
+		{name: "cleanup annotation and finalizer writes remain allowed on submitted", old: submitted, object: submitted, allowed: true, mutate: func(v *api.SandboxTemplate) {
+			v.Annotations = map[string]string{api.E2BPrefix + "template-cleanup": "op-1"}
+			v.Finalizers = append(v.Finalizers, "agents.kruise.io/template-cleanup")
+		}},
+		{name: "tag annotation writes remain allowed while deleting", old: deletingSubmitted, object: deletingSubmitted, allowed: true, mutate: func(v *api.SandboxTemplate) {
+			v.Annotations = map[string]string{api.E2BPrefix + "template-tags": `{"v1.1.0":"2026-11-24T00:00:00Z"}`}
+		}},
 		{name: "steps need capture", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo hi"}}}}
 		}},

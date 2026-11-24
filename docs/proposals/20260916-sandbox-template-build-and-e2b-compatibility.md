@@ -487,7 +487,9 @@ of this state lives on the Version itself; nothing is kept elsewhere.
    [filesystem]`. Files produced by the steps are restored later without
    rerunning them. In-memory state and background processes started by
    RUN are not restored. A caller cannot publish provisioning effects as
-   a static image-only definition.
+   a static image-only definition. The submitting Manager writes the
+   `checkpoint` strategy and `persistentContents: [filesystem]` itself;
+   admission validates the invariant and performs no defaulting.
 5. A build with no steps may become Ready as a static definition without a
    checkpoint. Its instances cold-start from the submitted image.
 

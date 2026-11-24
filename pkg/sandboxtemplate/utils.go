@@ -22,6 +22,11 @@ func IsBuildVersion(v *api.SandboxTemplate) bool {
 	return v != nil && v.Labels[api.LabelTemplateName] != ""
 }
 
+// IsSubmitted reports whether the business-container image has been set.
+// Submission writes exactly that image, so it is the marker between a
+// reserved Draft and a submitted definition. Init containers are injected
+// by the runtime and infra layers and may exist on an unsubmitted Draft,
+// so checking them would misclassify Drafts as submitted.
 func IsSubmitted(v *api.SandboxTemplate) bool {
 	if v.Spec.Template != nil {
 		for _, container := range v.Spec.Template.Spec.Containers {
