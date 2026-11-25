@@ -869,12 +869,6 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 	withPodMetadata.PodInfo.PodUID = "pod-uid"
 	withPodMetadata.PodInfo.Labels = map[string]string{"app": "sandbox"}
 	withPodMetadata.PodInfo.Annotations = map[string]string{"example.com/key": "value"}
-	clearedUID := *withPodMetadata.DeepCopy()
-	clearedUID.PodInfo.PodUID = ""
-	clearedNode := *withPodMetadata.DeepCopy()
-	clearedNode.PodInfo.NodeName = ""
-	clearedScalars := *withPodMetadata.DeepCopy()
-	clearedScalars.PodInfo.PodIP, clearedScalars.PodInfo.PodUID, clearedScalars.PodInfo.NodeName = "", "", ""
 	clearedIPWithMetadata := *withPodMetadata.DeepCopy()
 	clearedIPWithMetadata.PodInfo.PodIP = ""
 	pauseTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -910,16 +904,13 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 		{name: "traffic address removed", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "", true), wantSync: true},
 		{name: "clearing address preserves Pod metadata", oldStatus: withPodMetadata, newStatus: clearedIPWithMetadata, wantSync: true},
 		{name: "clearing address with sync disabled", oldStatus: withPodMetadata, newStatus: clearedIPWithMetadata, disabled: true},
-		{name: "clearing Pod UID", oldStatus: withPodMetadata, newStatus: clearedUID},
-		{name: "clearing node name", oldStatus: withPodMetadata, newStatus: clearedNode},
-		{name: "clearing all PodInfo scalars preserves maps", oldStatus: withPodMetadata, newStatus: clearedScalars, wantSync: true},
-		{name: "clearing all PodInfo scalars with sync disabled", oldStatus: withPodMetadata, newStatus: clearedScalars, disabled: true},
 		{name: "nonempty address changes", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.2", true), wantSync: true},
 		{name: "address changes while unroutable", oldStatus: pending, newStatus: status(agentsv1alpha1.SandboxPending, "10.0.0.2", false), wantSync: true},
 		{name: "entering pause", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true), wantSync: true},
 		{name: "resume completes", oldStatus: status(agentsv1alpha1.SandboxResuming, "10.0.0.1", true), newStatus: running, wantSync: true},
 		{name: "upgrade starts", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxUpgrading, "10.0.0.1", true), wantSync: true},
-		{name: "terminal phase is unroutable", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxFailed, "10.0.0.1", false), wantSync: true},
+		{name: "failed CR is not sent as a deletion", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxFailed, "10.0.0.1", false)},
+		{name: "succeeded CR is not sent as a deletion", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxSucceeded, "10.0.0.1", false)},
 		{name: "unroutable transitions do not sync", oldStatus: pending, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", false)},
 		{name: "message-only change does not sync", oldStatus: running, newStatus: messageChanged},
 		{name: "identical status does not patch", oldStatus: running, newStatus: running},
@@ -982,8 +973,6 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 					require.NoError(t, err)
 					assert.Equal(t, expected, route, "must send the full route persisted by the API server")
 					assert.NotEqual(t, "10", route.ResourceVersion)
-					assert.Equal(t, persisted.ResourceVersion, box.ResourceVersion)
-					assert.Equal(t, tt.newStatus, box.Status, "local status must be updated before invoking the callback")
 					if tt.verifyCompletion {
 						assert.Zero(t, counterValue(t, sandboxPauseTotal, box.Namespace, metricResultSuccess), "completion must be counted after route sync")
 					}
@@ -1411,7 +1400,6 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 					assert.Equal(t, sandbox.UID, route.UID)
 					assert.NotEmpty(t, route.ResourceVersion)
 					assert.Equal(t, sandboxstate.Dead, route.State)
-					assert.False(t, route.Terminal)
 					deadline, ok := ctx.Deadline()
 					assert.True(t, ok)
 					assert.LessOrEqual(t, time.Until(deadline), controllerRouteSyncTimeout)

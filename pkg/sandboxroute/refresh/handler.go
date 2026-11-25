@@ -44,11 +44,9 @@ type RouteMutator interface {
 
 // NewHandler creates the shared peer route refresh handler. After every
 // mutator call, afterMutation receives its result when the callback is non-nil.
-// The optional acceptRoute runs before any store mutation; out-of-scope requests are ignored without triggering the callback.
 func NewHandler(
 	mutator RouteMutator,
 	afterMutation func(sandboxroute.MutationResult),
-	acceptRoute ...func(sandboxroute.Route) bool,
 ) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log := klog.FromContext(r.Context())
@@ -72,16 +70,11 @@ func NewHandler(
 			return
 		}
 
-		for _, accept := range acceptRoute {
-			if accept != nil && !accept(route) {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-		}
-
 		var result sandboxroute.MutationResult
-		// A terminal CR is still an observation; dead without Terminal and empty states keep the legacy delete semantics.
-		if (route.State == sandboxstate.Dead && !route.Terminal) || route.State == "" {
+		// The legacy peer protocol uses dead and empty states as deletion
+		// markers. Other states are observations, including Paused routes
+		// needed for wake-on-traffic.
+		if route.State == sandboxstate.Dead || route.State == "" {
 			if route.ResourceVersion == "" {
 				http.Error(w, "invalid route refresh payload", http.StatusBadRequest)
 				return

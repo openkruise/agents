@@ -433,7 +433,6 @@ func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandb
 		return
 	}
 	route.State = sandboxstate.Dead
-	route.Terminal = false
 	// Peer fanout is detached from the request ctx so client cancellation does
 	// not abort this bounded, best-effort dead-route push.
 	if err := m.proxy.SyncRouteWithPeers(context.WithoutCancel(ctx), route); err != nil {

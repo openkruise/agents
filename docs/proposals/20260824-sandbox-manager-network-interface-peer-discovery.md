@@ -107,9 +107,9 @@ flowchart LR
 After a successful Sandbox status patch, the controller compares the old and
 new `Route.CanRouteTraffic()` values and IP addresses. A change sends the full
 `RouteFromSandbox` projection with the API server's returned UID/resourceVersion,
-before lifecycle metrics. The UID precondition protects same-name replacements,
-not concurrent status writers. PodInfo scalar fields are patched explicitly,
-including empty values, to clear stale Pod identity and addresses.
+before lifecycle metrics, except when the projection is Dead. Non-deletion Dead
+observations remain on the existing informer path so they cannot be mistaken for
+delete markers. PodIP is patched explicitly to persist address removal.
 
 Sending is synchronous, best effort, and bounded by a 200ms total context budget
 for fanout and retries. Errors are logged without rolling back status or adding
@@ -157,29 +157,21 @@ free of API and sandbox-manager packages. Proxy preserves its public API via
 aliases and thin delegation; manager/gateway assembly and receive TLS policy stay
 unchanged. No new metrics or generic peer-initialization wrapper are added.
 
-The refresh payload adds:
-- `labels`: a CR label snapshot for manager namespace/selector admission before
-  mutation, not authentication evidence. `{}` is known empty; missing/null is
-  unknown and ignored when a selector is configured. Out-of-scope refresh returns
-  204 without mutation or callback; the filtered informer handles scope exits.
-  Store does not add copy-on-write/read isolation; callers treat labels as read-only.
-- `terminal=true`: Failed/Succeeded CR observations remain Upserts rather than
-  deletions, regardless of arrival order. Actual deletion clears this flag;
-  legacy Dead/empty-state payloads remain Deletes. Same-RV terminal observations
-  cannot cross an authoritative deletion fence.
+The refresh payload, projection, Store and receiver behavior remain unchanged:
+Dead/empty-state payloads are Deletes and other states are Upserts. No labels,
+terminal marker or receiver scope filtering are added.
 
-Upgrade all receivers before enabling the gate: old receivers target `sc-` members
-and mistake terminal Dead observations for deletions. Allow controller/peer
-bidirectional TCP/UDP gossip and controller-to-receiver TCP 7789. Gate-only
-activation also requires compatible interface, seed topology and shutdown grace.
+Upgrade peer senders before enabling the gate so they exclude `sc-` members.
+Allow controller/peer bidirectional TCP/UDP gossip and controller-to-receiver
+TCP 7789. Activation also requires compatible interface, seed topology and
+shutdown grace.
 This release uses empty TLS refs and plaintext receivers. Optional TLS remains,
 but local validation cannot prove group-wide transport/trust/identity agreement;
 there is no protocol probing or plaintext downgrade.
 
-Tests retain status/deletion dispatch, returned versions and scalar clearing,
-sender-only filtering, fanout/retry/cancellation, real memberlist and mTLS delivery,
-receiver scope/terminal ordering, and existing Store deletion fences. Tests tied
-to removed wrappers, skip logging and Store snapshot isolation are removed.
+Tests cover controller status/deletion dispatch, returned versions and PodIP
+clearing, with existing sender transport/retry/TLS coverage migrated alongside
+the implementation. Store and receiver tests retain their existing contracts.
 
 ### Bounded peer listing
 
@@ -369,9 +361,9 @@ discovery intentionally stops its Kubernetes retry loop.
 
 The original Manager address design adds two optional CLI flags,
 `--network-interface` and `--disable-envoy-ext-proc`. The controller extension
-also adds the optional peer-security overrides and the additive peer refresh
-`labels`/`terminal` fields described above. CRDs, public control-API models,
-Secret schemas, and the memberlist wire protocol remain unchanged. Both
+also adds optional peer configuration while reusing the existing refresh
+protocol. CRDs, public control-API models, Secret schemas, and the memberlist
+wire protocol remain unchanged. Both
 in-cluster configuration and `KUBECONFIG` continue to supply the sandbox-cluster
 Kubernetes client.
 

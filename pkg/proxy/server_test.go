@@ -143,63 +143,10 @@ func TestNewServeMuxRefresh(t *testing.T) {
 	}
 }
 
-func TestRefreshReceiverScope(t *testing.T) {
-	tests := []struct {
-		name       string
-		namespace  string
-		selector   string
-		labels     map[string]string
-		delete     bool
-		wantStored bool
-		wantStatus int
-	}{
-		{name: "same namespace", namespace: "ns", wantStored: true},
-		{name: "other namespace is ignored", namespace: "other"},
-		{name: "matching label", selector: "app=sandbox", labels: map[string]string{"app": "sandbox"}, wantStored: true},
-		{name: "different label is ignored", selector: "app=sandbox", labels: map[string]string{"app": "other"}},
-		{name: "unknown legacy labels are ignored", selector: "!excluded"},
-		{name: "known empty labels match negative selector", selector: "!excluded", labels: map[string]string{}, wantStored: true},
-		{name: "excluded delete preserves local record", namespace: "other", delete: true, wantStored: true},
-		{name: "out-of-scope label delete preserves local record", selector: "app=sandbox", labels: map[string]string{"app": "other"}, delete: true, wantStored: true},
-		{name: "in-scope delete removes local record", selector: "app=sandbox", labels: map[string]string{"app": "sandbox"}, delete: true},
-		{name: "invalid selector fails closed", selector: "app in (", wantStatus: http.StatusInternalServerError},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := NewServer(config.SandboxManagerOptions{SandboxNamespace: tt.namespace, SandboxLabelSelector: tt.selector})
-			route := testProxyRoute("sb", "10.0.0.1", "2")
-			route.State, route.Labels = sandboxstate.Running, tt.labels
-			if tt.delete {
-				previous := route
-				previous.ResourceVersion = "1"
-				server.SetRoute(previous)
-				route.State = sandboxstate.Dead
-			}
-			routeCount.Set(7)
-			body, err := json.Marshal(route)
-			require.NoError(t, err)
-			response := httptest.NewRecorder()
-			server.newServeMux().ServeHTTP(response, httptest.NewRequest(http.MethodPost, refresh.Path, bytes.NewReader(body)))
-			wantStatus := tt.wantStatus
-			if wantStatus == 0 {
-				wantStatus = http.StatusNoContent
-			}
-			assert.Equal(t, wantStatus, response.Code)
-			_, ok := server.LoadRoute(route.ID)
-			assert.Equal(t, tt.wantStored, ok)
-			if (!tt.delete && !tt.wantStored) || (tt.delete && tt.wantStored) {
-				assert.Equal(t, float64(7), testutil.ToFloat64(routeCount), "rejection must not invoke mutation callback")
-			}
-		})
-	}
-}
-
 func TestRunWrapsPeerTLSListener(t *testing.T) {
 	server := NewServer(config.SandboxManagerOptions{DisableEnvoyExtProc: true})
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	server.SetPeerServerTLS(tlsConfig)
-	server.SetPeerOutbound(nil)
-	require.NotNil(t, server.peerOutbound, "nil TLS must keep a configured plaintext client")
 	server.SetPeerOutbound(&tls.Config{MinVersion: tls.VersionTLS12})
 	t.Cleanup(func() { server.Stop(context.Background()) })
 

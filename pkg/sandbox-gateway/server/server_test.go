@@ -410,8 +410,6 @@ func TestStartPeerSecurityLoadFails(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "load peer security")
 	assert.Contains(t, err.Error(), "peer secret reader is not configured")
-	assert.Nil(t, server.peerManager, "failed initialization must not publish membership")
-	assert.Nil(t, server.peerOutbound, "failed initialization must not publish a plaintext fallback")
 }
 
 func TestStartPeerTLSWrapsListenerThenFailsMemberlist(t *testing.T) {
@@ -456,8 +454,6 @@ func TestStartPeerTLSWrapsListenerThenFailsMemberlist(t *testing.T) {
 			assert.Equal(t, tls.VerifyClientCertIfGiven, server.peerServerTLS.ClientAuth)
 			assert.Equal(t, tt.wantIdentityCheck, server.peerServerTLS.VerifyConnection != nil)
 			require.NotNil(t, server.peerOutbound)
-			assert.Same(t, server.peerManager, GetPeerManager())
-			assert.Same(t, server.peerOutbound, GetPeerOutbound())
 		})
 	}
 }

@@ -196,10 +196,11 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 				CSIResetSignalFileName: csiResetSignalFileName,
 			},
 		}),
-		rateLimiter:        rateLimiter,
-		lifecycleHooks:     lifecycleHooks,
-		metricsCleanup:     metricsCleanup,
-		recorder:           recorder,
+		rateLimiter:    rateLimiter,
+		lifecycleHooks: lifecycleHooks,
+		metricsCleanup: metricsCleanup,
+		recorder:       recorder,
+
 		syncRouteWithPeers: syncRouteWithPeers,
 	}).SetupWithManager(mgr)
 	if err != nil {
@@ -212,14 +213,15 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
-	Scheme             *runtime.Scheme
-	controls           map[string]core.SandboxControl
-	rateLimiter        *core.RateLimiter
-	lifecycleHooks     *core.LifecycleHookManager
-	checkpointControl  *core.CheckpointControl
-	metricsCleanup     Enqueuer
-	recorder           record.EventRecorder
-	messageRegexCache  compiledMessageRegexCache
+	Scheme            *runtime.Scheme
+	controls          map[string]core.SandboxControl
+	rateLimiter       *core.RateLimiter
+	lifecycleHooks    *core.LifecycleHookManager
+	checkpointControl *core.CheckpointControl
+	metricsCleanup    Enqueuer
+	recorder          record.EventRecorder
+	messageRegexCache compiledMessageRegexCache
+
 	syncRouteWithPeers func(context.Context, sandboxroute.Route) error
 }
 
@@ -682,7 +684,6 @@ func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.Ens
 		route, err := sandboxroute.RouteFromSandbox(box)
 		if err == nil {
 			route.State = sandboxstate.Dead
-			route.Terminal = false
 			syncCtx, cancel := context.WithTimeout(ctx, controllerRouteSyncTimeout)
 			err = r.syncRouteWithPeers(syncCtx, route)
 			cancel()
@@ -736,7 +737,6 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	if reflect.DeepEqual(box.Status, newStatus) {
 		return nil
 	}
-	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	oldPhase := box.Status.Phase
 	var oldRoute sandboxroute.Route
 	var oldRouteErr error
@@ -759,16 +759,14 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus, statusAttrs...)
 
-	// Serialize PodInfo scalars explicitly so omitempty cannot keep cleared values in the merge patch.
 	type podInfoPatch struct {
 		agentsv1alpha1.PodInfo
-		PodIP    string    `json:"podIP"`
-		PodUID   types.UID `json:"podUID"`
-		NodeName string    `json:"nodeName"`
+		PodIP string `json:"podIP"`
 	}
+	// The UID precondition keeps a same-name replacement from receiving this
+	// status or reporting its completion. Completion counting is best-effort
+	// under concurrent writers because the cached old status is not CAS-guarded.
 	patchBytes, err := json.Marshal(map[string]interface{}{
-		// The UID precondition prevents writing to a same-name replacement object; there is no CAS on the old status,
-		// so completion accounting is best effort under concurrent writers.
 		"metadata": map[string]interface{}{"uid": box.UID},
 		"status": struct {
 			agentsv1alpha1.SandboxStatus
@@ -778,10 +776,7 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 		}{
 			SandboxStatus: newStatus,
 			Conditions:    newStatus.Conditions,
-			PodInfo: podInfoPatch{
-				PodInfo: newStatus.PodInfo, PodIP: newStatus.PodInfo.PodIP,
-				PodUID: newStatus.PodInfo.PodUID, NodeName: newStatus.PodInfo.NodeName,
-			},
+			PodInfo:       podInfoPatch{PodInfo: newStatus.PodInfo, PodIP: newStatus.PodInfo.PodIP},
 		},
 	})
 	if err != nil {
@@ -796,30 +791,28 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 		return nil
 	}
 	if err != nil {
-		logger.Error(err, "update sandbox status failed", "patchStatus", string(patchBytes))
+		klog.FromContext(ctx).Error(err, "update sandbox status failed", "sandbox", klog.KObj(box), "patchStatus", string(patchBytes))
 		return err
 	}
 	core.ResourceVersionExpectations.Expect(rcvObject)
-	// Preserve the old status for completion accounting, while exposing the successfully written status to the sender callback.
-	previous := *box
-	box.ResourceVersion = rcvObject.ResourceVersion
-	box.Status = newStatus
 	if r.syncRouteWithPeers != nil {
 		newRoute, routeErr := sandboxroute.RouteFromSandbox(rcvObject)
 		if routeErr := cmp.Or(oldRouteErr, routeErr); routeErr != nil {
-			logger.Error(routeErr, "failed to project Sandbox route, skipping peer sync")
-		} else if oldRoute.CanRouteTraffic() != newRoute.CanRouteTraffic() || oldRoute.IP != newRoute.IP {
+			klog.FromContext(ctx).Error(routeErr, "failed to project Sandbox route, skipping peer sync", "sandbox", klog.KObj(box))
+		} else if newRoute.State != sandboxstate.Dead && (oldRoute.CanRouteTraffic() != newRoute.CanRouteTraffic() || oldRoute.IP != newRoute.IP) {
 			// Status is already persisted; peer sync is best-effort acceleration, while informers ensure eventual convergence.
 			syncCtx, cancel := context.WithTimeout(ctx, controllerRouteSyncTimeout)
 			err := r.syncRouteWithPeers(syncCtx, newRoute)
 			cancel()
 			if err != nil {
-				logger.Error(err, "failed to sync Sandbox route with peers")
+				klog.FromContext(ctx).Error(err, "failed to sync Sandbox route with peers", "sandbox", klog.KObj(box))
 			}
 		}
 	}
-	recordSandboxLifecycleCompletions(&previous, rcvObject.Status, newStatus)
-	logger.Info("update sandbox status success", "status", utils.DumpJson(newStatus))
+	recordSandboxLifecycleCompletions(box, rcvObject.Status, newStatus)
+	klog.FromContext(ctx).Info("update sandbox status success", "sandbox", klog.KObj(box), "status", utils.DumpJson(newStatus))
+	box.ResourceVersion = rcvObject.ResourceVersion
+	box.Status = newStatus
 	r.recordSandboxPhaseEvent(box, oldPhase, newStatus)
 	// Update metrics after status change (pod=nil: container metrics already recorded in Reconcile)
 	recordSandboxMetrics(box, nil)

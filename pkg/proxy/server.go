@@ -31,7 +31,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/peers"
@@ -78,12 +77,10 @@ type Server struct {
 	adapter RequestAdapter
 	LBEntry string // entry of load balancer, usually a service
 	// peers - now managed by Peers
-	peersManager         peers.Peers
-	bindAddress          string
-	peerServerTLS        *tls.Config
-	peerOutbound         *PeerOutbound
-	sandboxNamespace     string
-	sandboxLabelSelector string
+	peersManager  peers.Peers
+	bindAddress   string
+	peerServerTLS *tls.Config
+	peerOutbound  *PeerOutbound
 	// lifecycle: Run is called once and Stop at most once, after Run.
 	mu sync.Mutex
 }
@@ -96,8 +93,6 @@ func NewServer(opts config.SandboxManagerOptions) *Server {
 		store:                       store,
 		bindAddress:                 opts.BindAddress,
 		peerOutbound:                NewPeerOutbound(nil),
-		sandboxNamespace:            opts.SandboxNamespace,
-		sandboxLabelSelector:        opts.SandboxLabelSelector,
 	}
 }
 
@@ -117,9 +112,8 @@ func (s *Server) SetPeerServerTLS(cfg *tls.Config) {
 }
 
 // SetPeerOutbound installs this process's outbound peer client. A nil TLS
-// config keeps plaintext HTTP. Call before Run.
+// config keeps plaintext HTTP.
 func (s *Server) SetPeerOutbound(clientTLS *tls.Config) {
-	s.peerOutbound.CloseIdleConnections()
 	s.peerOutbound = NewPeerOutbound(clientTLS)
 }
 
@@ -186,25 +180,6 @@ func (s *Server) Run() error {
 
 func (s *Server) newServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	selector, err := labels.Parse(s.sandboxLabelSelector)
-	if err != nil {
-		// Normal startup has already validated the configuration; standalone callers must not widen the receive scope with an invalid selector either.
-		klog.ErrorS(err, "invalid route receiver label selector")
-		mux.HandleFunc(http.MethodPost+" "+refresh.Path, func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "invalid route receiver scope", http.StatusInternalServerError)
-		})
-		return mux
-	}
-	acceptRoute := func(route sandboxroute.Route) bool {
-		if s.sandboxNamespace != "" && route.Namespace != s.sandboxNamespace {
-			return false
-		}
-		if selector.Empty() {
-			return true
-		}
-		// Legacy payloads without labels cannot prove scope; the local informer fills in the observation.
-		return route.Labels != nil && selector.Matches(labels.Set(route.Labels))
-	}
 	mux.Handle(
 		http.MethodPost+" "+refresh.Path,
 		refresh.NewHandler(s.store, func(result sandboxroute.MutationResult) {
@@ -212,7 +187,7 @@ func (s *Server) newServeMux() *http.ServeMux {
 			case sandboxroute.EventResultApplied, sandboxroute.EventResultIgnored:
 				s.updateRouteCount()
 			}
-		}, acceptRoute),
+		}),
 	)
 	return mux
 }

@@ -30,9 +30,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandboxroute"
@@ -58,6 +60,8 @@ var errPeerRedirect = errors.New("peer refresh does not follow redirects")
 type PeerOutbound struct {
 	scheme string
 	client *http.Client
+
+	lastNoTargetsLog atomic.Int64
 }
 
 // NewPeerOutbound builds the outbound peer client. A nil clientTLS keeps
@@ -112,6 +116,12 @@ func (o *PeerOutbound) CloseIdleConnections() {
 // outbound is this process's peer-owner client. Callers must not construct a
 // second client with an independent security decision.
 func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route sandboxroute.Route, outbound *PeerOutbound) error {
+	body, err := json.Marshal(route) // #nosec G117 -- AccessToken is serialized for peer /refresh authentication sync, never logged; the peer owner configures transport security.
+	if err != nil {
+		return err
+	}
+
+	// Get peers from Peers - no manual locking needed
 	var peerList []peers.Peer
 	if peersManager != nil {
 		peerList = peersManager.GetPeers()
@@ -124,13 +134,17 @@ func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route san
 		}
 	}
 	peerList = targets
-	body, err := json.Marshal(route) // #nosec G117 -- AccessToken is serialized for peer /refresh authentication sync, never logged; the peer owner configures transport security.
-	if err != nil {
-		return err
-	}
 	peerCount.Set(float64(len(peerList)))
 
 	if len(peerList) == 0 {
+		if outbound != nil {
+			now := time.Now().UnixNano()
+			last := outbound.lastNoTargetsLog.Load()
+			if (last == 0 || now-last >= int64(30*time.Second)) &&
+				outbound.lastNoTargetsLog.CompareAndSwap(last, now) {
+				klog.FromContext(ctx).Info("route sync skipped: no refresh targets")
+			}
+		}
 		return nil
 	}
 	if outbound == nil {

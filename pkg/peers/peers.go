@@ -41,8 +41,7 @@ type Peers interface {
 	// no-op.
 	Stop(ctx context.Context) error
 
-	// GetPeers returns the current list of alive peers (excluding self and
-	// sender-only members).
+	// GetPeers returns the current list of alive peers (excluding self).
 	// Each Peer.IP must be a net.ParseIP literal, not a hostname.
 	GetPeers() []Peer
 
