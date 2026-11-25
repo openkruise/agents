@@ -21,11 +21,16 @@ limitations under the License.
 // that matches no rule is denied: permission exists because something granted
 // it, never because nothing forbade it.
 //
-// Every decision reads the current bindings rather than anything cached from a
-// token or an earlier call. A binding deleted a moment ago must stop granting
-// immediately, which is why authorization does not consult the Ready condition
-// on a binding or a role: readiness reports what a controller has observed,
-// which necessarily lags the spec that authorization has to act on.
+// Every call reads live state: a List scoped by IndexFieldAgentIdentityRef to
+// the identity being asked about, plus one Get per bound role. Both go
+// through the informer cache, so this stays cheap without a caching layer of
+// its own on top; the index is what keeps the List from scaling with every
+// binding in the namespace instead of just the ones that name this identity.
+// SetupFieldIndex must have registered it first.
+//
+// Authorization does not consult the Ready condition on a binding or a role:
+// readiness reports what a controller has observed, which necessarily lags
+// the spec that authorization has to act on.
 package authorization
 
 import (
@@ -84,11 +89,14 @@ type Decision struct {
 
 var deniedNoBindings = Decision{Reason: ReasonNoBindings}
 
-// Authorizer evaluates requests against the bindings and roles in the cluster.
+// Authorizer evaluates requests against the bindings and roles in the
+// cluster.
 type Authorizer struct {
-	// reader must be informer-backed. Authorization runs on every request, so a
-	// direct API read would put the apiserver in the hot path, and the informer
-	// is current enough that a deleted binding stops granting within one event.
+	// reader must be informer-backed, with IndexFieldAgentIdentityRef already
+	// registered on its cache via SetupFieldIndex. Authorization runs on
+	// every request, so a direct API read would put the apiserver in the hot
+	// path, and the informer is current enough that a deleted binding stops
+	// granting within one event.
 	reader client.Reader
 }
 
@@ -116,8 +124,11 @@ func (a *Authorizer) Authorize(ctx context.Context, req Request) (Decision, erro
 	}
 
 	bindings := &securityv1alpha1.AgentRoleBindingList{}
-	if err := a.reader.List(ctx, bindings, client.InNamespace(req.Namespace)); err != nil {
-		return Decision{}, fmt.Errorf("list agent role bindings in %s: %w", req.Namespace, err)
+	if err := a.reader.List(ctx, bindings,
+		client.InNamespace(req.Namespace),
+		client.MatchingFields{IndexFieldAgentIdentityRef: req.AgentIdentity},
+	); err != nil {
+		return Decision{}, fmt.Errorf("list agent role bindings in %s for %s: %w", req.Namespace, req.AgentIdentity, err)
 	}
 
 	roleNames := a.rolesBoundTo(bindings, req.AgentIdentity)
@@ -156,9 +167,12 @@ func (a *Authorizer) Authorize(ctx context.Context, req Request) (Decision, erro
 // rolesBoundTo returns the roles bound to one identity, in the order the
 // bindings were listed, with duplicates kept out.
 //
-// Several bindings may name the same identity, and §5.5 says their rules
-// combine. A binding being deleted is skipped: it must stop granting
-// immediately, which is the whole reason authorization reads live state.
+// bindings is already scoped to agentIdentity by Authorize's field-indexed
+// List; the equality check here is a cheap re-check against the index itself
+// ever being wrong, not the primary filter. Several bindings may name the
+// same identity, and §5.5 says their rules combine. A binding being deleted
+// is skipped: it must stop granting immediately, which is the whole reason
+// authorization reads live state.
 func (a *Authorizer) rolesBoundTo(bindings *securityv1alpha1.AgentRoleBindingList,
 	agentIdentity string) []string {
 	var names []string
