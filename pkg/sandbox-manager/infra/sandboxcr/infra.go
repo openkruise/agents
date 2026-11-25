@@ -207,10 +207,11 @@ func buildClaimError(err error, lastError error, failures []infra.PickSandboxFai
 	if err == nil {
 		return nil
 	}
-	// Preserve terminal error type (ErrorBadRequest / ErrorInternal) from the classifier.
-	// These errors were not retried and carry the correct ErrorCode for HTTP status mapping.
+	// Preserve classified terminal errors. An exhausted retry can also carry a
+	// classified cause, but still needs the accumulated attempt diagnostics.
+	_, retriable := err.(retriableError)
 	var mErr *managererrors.Error
-	if errors.As(err, &mErr) {
+	if !retriable && errors.As(err, &mErr) {
 		return mErr
 	}
 	// Retry exhausted or interrupted: wrap as Internal

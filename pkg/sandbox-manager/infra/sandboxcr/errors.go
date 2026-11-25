@@ -29,10 +29,15 @@ import (
 
 type retriableError struct {
 	Message string
+	cause   error
 }
 
 func (e retriableError) Error() string {
 	return e.Message
+}
+
+func (e retriableError) Unwrap() error {
+	return e.cause
 }
 
 func (e retriableError) Is(target error) bool {

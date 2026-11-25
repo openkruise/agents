@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -56,6 +57,7 @@ import (
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/cache/controllers"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -3842,6 +3844,70 @@ func markSandboxReadyForTest(t *testing.T, ctx context.Context, c client.Client,
 		PodInfo: v1alpha1.PodInfo{PodIP: podIP},
 	}
 	require.NoError(t, c.Status().Update(ctx, sbx))
+}
+
+func TestClaimSandbox_WaitReadyError(t *testing.T) {
+	requestCause := errors.New("request interrupted")
+	for _, tt := range []struct {
+		name        string
+		contextErr  error
+		wantRetries int
+	}{
+		{name: "request canceled", contextErr: context.Canceled},
+		{name: "request deadline", contextErr: context.DeadlineExceeded},
+		{name: "ready wait timeout", wantRetries: CreateMaxRetrySteps - 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				backend, fc := NewTestInfra(t)
+				setFastCreateRetryForTest(t)
+				sbs := sandboxSetForTest("ready-wait-error", "default")
+				require.NoError(t, fc.Create(t.Context(), sbs))
+
+				ctx := t.Context()
+				switch tt.contextErr {
+				case context.Canceled:
+					var cancel context.CancelCauseFunc
+					ctx, cancel = context.WithCancelCause(ctx)
+					defer cancel(nil)
+					timer := time.AfterFunc(time.Millisecond, func() { cancel(requestCause) })
+					defer timer.Stop()
+				case context.DeadlineExceeded:
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeoutCause(ctx, time.Millisecond, requestCause)
+					defer cancel()
+				}
+
+				claimed, metrics, err := backend.ClaimSandbox(ctx, infra.ClaimSandboxOptions{
+					User:                    "test-user",
+					Template:                sbs.Name,
+					CreateOnNoStock:         true,
+					ClaimTimeout:            time.Minute,
+					WaitReadyTimeout:        20 * time.Millisecond,
+					ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+				})
+				require.Error(t, err)
+				assert.Nil(t, claimed)
+				assert.Positive(t, metrics.WaitReady)
+				assert.Equal(t, tt.wantRetries, metrics.Retries)
+				assert.Equal(t, managererrors.ErrorInternal, managererrors.GetErrCode(err))
+				if tt.contextErr != nil {
+					assert.ErrorIs(t, err, tt.contextErr)
+					assert.ErrorIs(t, err, requestCause)
+					var retryErr retriableError
+					assert.False(t, errors.As(metrics.LastError, &retryErr))
+				}
+				if tt.contextErr != context.Canceled {
+					assert.ErrorAs(t, err, new(*cacheutils.WaitNotSatisfiedError))
+					assert.Equal(t, managererrors.ErrorInternal, managererrors.GetErrCode(metrics.LastError))
+					assert.ErrorContains(t, err, "Check the sandbox status before retrying")
+				}
+				if tt.contextErr == nil {
+					assert.ErrorContains(t, err, "pick sandbox failures: ")
+				}
+			})
+		})
+	}
 }
 
 func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {

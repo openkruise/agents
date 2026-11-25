@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -436,7 +437,10 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		metrics.Total += metrics.WaitReady
 		if err != nil {
 			log.Error(err, "failed to wait for sandbox ready", "cost", metrics.WaitReady)
-			return retriableError{Message: fmt.Sprintf("failed to wait for sandbox ready: %s", err)}
+			if wait.Interrupted(err) {
+				return err
+			}
+			return retriableError{Message: fmt.Sprintf("failed to wait for sandbox ready: %s", err), cause: err}
 		}
 		log.Info("sandbox is ready", "cost", metrics.WaitReady)
 	}
