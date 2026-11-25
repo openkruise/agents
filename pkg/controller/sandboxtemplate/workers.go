@@ -91,19 +91,15 @@ func (r *Reconciler) startWorker(version *api.SandboxTemplate) bool {
 	return true
 }
 
-func (r *Reconciler) stopWorkers(matches func(*buildWorker) bool) bool {
+func (r *Reconciler) stopVersionWorker(key client.ObjectKey) bool {
 	r.workerMu.Lock()
 	defer r.workerMu.Unlock()
 	pending := false
 	for _, worker := range r.workers {
-		if matches(worker) {
+		if worker.key == key {
 			worker.cancel()
 			pending = true
 		}
 	}
 	return pending
-}
-
-func (r *Reconciler) stopVersionWorker(key client.ObjectKey) bool {
-	return r.stopWorkers(func(worker *buildWorker) bool { return worker.key == key })
 }

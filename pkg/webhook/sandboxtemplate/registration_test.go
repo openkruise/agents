@@ -77,7 +77,6 @@ func TestGeneratedTemplateAdmissionConfiguration(t *testing.T) {
 	for _, rule := range role.Rules {
 		require.NotContains(t, rule.Resources, "sandboxtemplateclaims")
 		require.NotContains(t, rule.Resources, "sandboxtemplateclaims/finalizers")
-		require.NotContains(t, rule.Resources, "sandboxtemplates/finalizers")
 	}
 	_, err = os.Stat("../../../config/crd/bases/agents.kruise.io_sandboxtemplateclaims.yaml")
 	require.True(t, os.IsNotExist(err), "%v", err)

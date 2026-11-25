@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -189,9 +190,13 @@ func TestBuildCleanupRetainsPublishedArtifacts(t *testing.T) {
 		wrongOwner          bool
 		replaceDuringDelete bool
 		keep                bool
+		unsubmitted         bool
+		age                 time.Duration
 	}{
 		{name: "Ready retains capture", phase: api.SandboxTemplatePhaseReady, keep: true},
 		{name: "Failed removes partial capture", phase: api.SandboxTemplatePhaseFailed},
+		{name: "Failed Draft retains failure record", phase: api.SandboxTemplatePhaseFailed, unsubmitted: true},
+		{name: "expired Failed Draft retains failure record", phase: api.SandboxTemplatePhaseFailed, unsubmitted: true, age: 2 * time.Hour},
 		{name: "Ready reclaims replacement owned by Version", phase: api.SandboxTemplatePhaseReady, replacement: true, keep: true},
 		{name: "Failed reclaims replacement owned by Version", phase: api.SandboxTemplatePhaseFailed, replacement: true},
 		{name: "another Version owns the Sandbox", phase: api.SandboxTemplatePhaseReady, wrongOwner: true, keep: true},
@@ -200,6 +205,12 @@ func TestBuildCleanupRetainsPublishedArtifacts(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, version, box, _ := executionFixture(t)
 			version.Status = api.SandboxTemplateStatus{Phase: tt.phase, ObservedGeneration: version.Generation}
+			if tt.unsubmitted {
+				version.Spec.Template.Spec.Containers[0].Image = ""
+				version.CreationTimestamp = metav1.NewTime(time.Now().Add(-tt.age))
+				version.Status.Conditions = []metav1.Condition{{Type: buildReadyCondition, Status: metav1.ConditionFalse, Reason: "Superseded", LastTransitionTime: metav1.NewTime(time.Now().Truncate(time.Second))}}
+			}
+			statusBefore := version.Status.DeepCopy()
 			checkpoint := &api.Checkpoint{ObjectMeta: metav1.ObjectMeta{Name: version.Name + "-checkpoint", Namespace: version.Namespace, UID: "checkpoint-uid", OwnerReferences: []metav1.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: "SandboxTemplate", Name: version.Name, UID: version.UID, Controller: ptr.To(true)}}}}
 			if tt.replacement {
 				box.UID = "replacement"
@@ -208,6 +219,41 @@ func TestBuildCleanupRetainsPublishedArtifacts(t *testing.T) {
 				box.OwnerReferences[0].UID = "other-version"
 			}
 			r := modelReconciler(t, version, box, checkpoint)
+			if tt.unsubmitted {
+				sibling := version.DeepCopy()
+				sibling.Name, sibling.UID, sibling.ResourceVersion = "sibling", "sibling-uid", ""
+				siblingBox := box.DeepCopy()
+				siblingBox.Name, siblingBox.UID, siblingBox.ResourceVersion = sibling.Name, "sibling-sandbox-uid", ""
+				siblingBox.OwnerReferences[0].Name, siblingBox.OwnerReferences[0].UID = sibling.Name, sibling.UID
+				require.NoError(t, r.Create(t.Context(), sibling))
+				require.NoError(t, r.Create(t.Context(), siblingBox))
+				workerCtx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				siblingCtx, siblingCancel := context.WithCancel(t.Context())
+				defer siblingCancel()
+				r.workers = map[types.UID]*buildWorker{
+					version.UID: {key: client.ObjectKeyFromObject(version), cancel: cancel},
+					sibling.UID: {key: client.ObjectKeyFromObject(sibling), cancel: siblingCancel},
+				}
+				_, err := r.ReconcileVersion(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(version)})
+				require.NoError(t, err)
+				require.ErrorIs(t, workerCtx.Err(), context.Canceled)
+				require.NoError(t, siblingCtx.Err())
+				delete(r.workers, version.UID) // the stopped worker has drained
+				for i := 0; i < 4; i++ {
+					_, err := r.ReconcileVersion(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(version)})
+					require.NoError(t, err)
+				}
+				current := &api.SandboxTemplate{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
+				require.Nil(t, current.DeletionTimestamp)
+				require.Equal(t, *statusBefore, current.Status)
+				require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(box), &api.Sandbox{})))
+				require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(checkpoint), &api.Checkpoint{})))
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sibling), &api.SandboxTemplate{}))
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(siblingBox), &api.Sandbox{}))
+				return
+			}
 			if tt.replaceDuringDelete {
 				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
 					if current, ok := obj.(*api.Sandbox); ok {

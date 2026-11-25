@@ -204,14 +204,9 @@ func (r *Reconciler) runExecution(ctx context.Context, version *api.SandboxTempl
 //	capture done -- Captured --> Ready (terminal)
 //
 // A terminal phase at the observed generation is immutable: another write
-// reports it back as done, except Running, which means another worker
-// restarted a finished build and fails as Interrupted. A write whose last
-// observed condition showed a running execution also accepts a Provisioned
-// condition that another worker already published, so overlapping workers
-// converge instead of overwriting each other.
+// reports it back as done, except Running, which means the build already
+// started under a previous execution and fails as Interrupted.
 func (r *Reconciler) executionStatus(ctx context.Context, version *api.SandboxTemplate, phase api.SandboxTemplateBuildPhase, status metav1.ConditionStatus, reason, message string) error {
-	expected := meta.FindStatusCondition(version.Status.Conditions, buildReadyCondition)
-	pendingExecution := expected != nil && expected.Status == metav1.ConditionFalse && expected.Reason != buildReasonProvisioned
 	return wait.ExponentialBackoffWithContext(ctx, retry.DefaultBackoff, func(ctx context.Context) (bool, error) {
 		current := &api.SandboxTemplate{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(version), current); err != nil {
@@ -229,14 +224,12 @@ func (r *Reconciler) executionStatus(ctx context.Context, version *api.SandboxTe
 		}
 		condition := meta.FindStatusCondition(current.Status.Conditions, buildReadyCondition)
 		// Running is the first write only: an existing condition or a
-		// deleting Version means another worker already owns this build.
+		// deleting Version means this build already started under a previous
+		// execution — after a restart or from a stale cache view — so a
+		// replayed start is refused.
 		if reason == buildReasonRunning && (condition != nil || current.DeletionTimestamp != nil) {
 			*version = *current
 			return false, errExecutionInterrupted
-		}
-		if pendingExecution && supersededByProvisioned(condition) {
-			*version = *current
-			return true, nil
 		}
 		before := current.DeepCopy()
 		current.Status.Phase = phase
@@ -258,12 +251,6 @@ func (r *Reconciler) executionStatus(ctx context.Context, version *api.SandboxTe
 func buildTerminal(version *api.SandboxTemplate) bool {
 	return version.Status.ObservedGeneration == version.Generation &&
 		(version.Status.Phase == api.SandboxTemplatePhaseReady || version.Status.Phase == api.SandboxTemplatePhaseFailed)
-}
-
-// supersededByProvisioned reports whether another worker already published
-// the Provisioned step that this write was about to publish.
-func supersededByProvisioned(condition *metav1.Condition) bool {
-	return condition != nil && condition.Reason == buildReasonProvisioned
 }
 
 func (r *Reconciler) bindExecutionSandbox(ctx context.Context, session *executionSession) error {

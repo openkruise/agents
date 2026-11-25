@@ -569,14 +569,17 @@ func TestExecutionStatusPreservesKnownResult(t *testing.T) {
 	require.NoError(t, r.Status().Update(t.Context(), version))
 	_, err := r.reconcileExecution(t.Context(), stale)
 	require.True(t, apierrors.IsConflict(err), "%v", err)
+	// The live build turns terminal while the stale view is still in flight.
 	current := &api.SandboxTemplate{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
 	require.Equal(t, api.SandboxTemplatePhaseBuilding, current.Status.Phase)
 	require.Equal(t, buildReasonProvisioned, meta.FindStatusCondition(current.Status.Conditions, buildReadyCondition).Reason)
+	terminal := api.SandboxTemplateStatus{Phase: api.SandboxTemplatePhaseFailed, ObservedGeneration: current.Generation, Conditions: []metav1.Condition{{Type: buildReadyCondition, Status: metav1.ConditionFalse, Reason: buildReasonInterrupted, ObservedGeneration: current.Generation, LastTransitionTime: metav1.NewTime(time.Now().Truncate(time.Second))}}}
+	current.Status = terminal
+	require.NoError(t, r.Status().Update(t.Context(), current))
 	require.NoError(t, r.executionStatus(t.Context(), stale, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonInterrupted, "late failure"))
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
-	require.Equal(t, api.SandboxTemplatePhaseBuilding, current.Status.Phase)
-	require.Equal(t, buildReasonProvisioned, meta.FindStatusCondition(current.Status.Conditions, buildReadyCondition).Reason)
+	require.Equal(t, terminal, current.Status)
 }
 
 func TestExecutionStatusRetriesMetadataConflict(t *testing.T) {
@@ -832,7 +835,7 @@ func TestRunExecutionBoundaries(t *testing.T) {
 		reason  string
 	}{
 		{
-			name: "another worker already started the build",
+			name: "a previously started build is not replayed",
 			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *api.Sandbox, _ *corev1.Pod) {
 				version.Status = api.SandboxTemplateStatus{Phase: api.SandboxTemplatePhaseBuilding, ObservedGeneration: version.Generation, Conditions: []metav1.Condition{{Type: buildReadyCondition, Status: metav1.ConditionFalse, Reason: buildReasonRunning, LastTransitionTime: metav1.Now()}}}
 				require.NoError(t, r.Status().Update(t.Context(), version))

@@ -107,6 +107,12 @@ func (r *Reconciler) ReconcileVersion(ctx context.Context, req ctrl.Request) (ct
 		r.stopVersionWorker(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
+	// A terminal result at the observed generation is immutable; checking
+	// before the Draft branch keeps a superseded Failed Draft from being
+	// flipped back to Pending and re-waiting its expiry.
+	if buildTerminal(v) {
+		return r.reconcileBuildCleanup(ctx, v)
+	}
 	if !template.IsSubmitted(v) {
 		remaining := time.Until(v.CreationTimestamp.Add(r.Options.Timeout))
 		if remaining > 0 {
@@ -123,9 +129,6 @@ func (r *Reconciler) ReconcileVersion(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{RequeueAfter: retryInterval}, nil
 		}
 		return ctrl.Result{}, nil
-	}
-	if (v.Status.Phase == api.SandboxTemplatePhaseReady || v.Status.Phase == api.SandboxTemplatePhaseFailed) && v.Status.ObservedGeneration == v.Generation {
-		return r.reconcileBuildCleanup(ctx, v)
 	}
 	if options := v.Spec.BuildOptions; options != nil && (len(options.Steps) > 0 || v.Spec.Checkpoint != nil && v.Spec.Checkpoint.Enable) {
 		return r.reconcileExecution(ctx, v)

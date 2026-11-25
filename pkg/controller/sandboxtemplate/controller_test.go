@@ -103,6 +103,12 @@ func TestVersionPhases(t *testing.T) {
 		{name: "Draft shorter timeout expires", age: 10 * time.Minute, timeout: 5 * time.Minute, expired: true},
 		{name: "Draft longer timeout waits", age: 90 * time.Minute, timeout: 2 * time.Hour, phase: api.SandboxTemplatePhasePending},
 		{name: "Draft longer timeout expires", age: 3 * time.Hour, timeout: 2 * time.Hour, expired: true},
+		{name: "unsubmitted Ready record is retained", age: 2 * time.Hour, phase: api.SandboxTemplatePhaseReady, mutate: func(v *api.SandboxTemplate) {
+			v.Status.Phase, v.Status.ObservedGeneration = api.SandboxTemplatePhaseReady, v.Generation
+		}},
+		{name: "stale terminal result does not skip Draft handling", phase: api.SandboxTemplatePhasePending, mutate: func(v *api.SandboxTemplate) {
+			v.Status.Phase, v.Status.ObservedGeneration = api.SandboxTemplatePhaseFailed, v.Generation-1
+		}},
 		{name: "static definition Ready", phase: api.SandboxTemplatePhaseReady, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.Template.Spec.Containers[0].Image = "test/image"
 		}},

@@ -87,7 +87,7 @@ Every term below is used many times. Each has exactly one meaning here.
 | **buildID**, **B** | The random name of one build: `st-` followed by 20 lowercase letters and digits, for example `st-abcdefghijklmnopqrst`. |
 | **Version** | One `SandboxTemplate` custom resource. It stores one build: the definition and the result. Its `metadata.name` is B. |
 | **Build Sandbox** | The private work sandbox of one Version. Uploads land here and steps run here. Users never see it in their sandbox lists. |
-| **Draft** | A reserved Version that has not been submitted yet. Drafts expire after the build timeout, 30 minutes by default. |
+| **Draft** | A reserved Version that has not been submitted yet. Nonterminal Drafts expire after the build timeout, 30 minutes by default; failed Drafts are retained as failure records. |
 | **Superseded** | Marked failed because a newer reservation of the same name arrived. Only unsubmitted Builds can be superseded. The newest unsubmitted Build is the active one. |
 | **Steps** | The build instructions: `RUN`, `COPY`, `ENV`, `USER`, `WORKDIR`. |
 | **Checkpoint** | A saved copy of the Build Sandbox's filesystem, taken after the steps finish. |
@@ -455,11 +455,11 @@ of this state lives on the Version itself; nothing is kept elsewhere.
 
 | State | Plain meaning |
 | --- | --- |
-| Unsubmitted Draft | Positive and equal CPU/memory requests and limits, reserved runtimes, no business image, immutable label set. Expires after `--template-build-timeout` counted from `metadata.creationTimestamp`, 30 minutes by default. Expiry cleans only this Version and its owned resources, and keeps sibling Versions. |
+| Unsubmitted Draft | Positive and equal CPU/memory requests and limits, reserved runtimes, no business image, immutable label set. While nonterminal, expires after `--template-build-timeout` counted from `metadata.creationTimestamp`, 30 minutes by default. Expiry cleans only this Version and its owned resources, and keeps sibling Versions. Failed Drafts follow terminal cleanup and retention instead. |
 | Pending | No execution has started. Draft and submitted are told apart by the business image, never by this phase. |
 | Building | Accepted work is executing, or capture is pending. |
 | Ready | Every declared operation completed, and the required artifact and the accepted Version definition were verified. |
-| Failed | Terminal. A confirmed nonzero exit, a timeout, identity loss, an unknown in-flight execution result, or supersession by a newer same-name reservation. Commands are never replayed. |
+| Failed | Terminal. A confirmed nonzero exit, a timeout, identity loss, an unknown in-flight execution result, or supersession by a newer same-name reservation. Commands are never replayed. The Version remains an immutable failure record after owned-resource cleanup, including when it has no submitted image. |
 | Cleanup marked | Not a new phase. While the finalizer cleanup runs, new uploads, submissions, queries, and consumption are blocked for this Version only. The label never gates the group. |
 
 1. A failed reservation returns an error; no successful Build response is
