@@ -467,7 +467,7 @@ func (l *claimedSandboxLookup) observeRoute(reader infra.RouteReader, sandboxID 
 	if !ok {
 		return l.hasRoute
 	}
-	if !l.hasRoute || expectations.IsResourceVersionReallyNewer(l.routeResourceVersion, route.ResourceVersion) {
+	if !l.hasRoute || expectations.IsResourceVersionStrictlyNewer(l.routeResourceVersion, route.ResourceVersion) {
 		l.routeResourceVersion = route.ResourceVersion
 		l.hasRoute = true
 	}
@@ -486,7 +486,7 @@ func isSandboxStale(ctx context.Context, lookup claimedSandboxLookup) bool {
 		reason = fallbackReasonRVExpectation
 	case lookup.hasRoute &&
 		lookup.routeResourceVersion != "" &&
-		expectations.IsResourceVersionReallyNewer(cacheRV, lookup.routeResourceVersion):
+		expectations.IsResourceVersionStrictlyNewer(cacheRV, lookup.routeResourceVersion):
 		reason = fallbackReasonCacheLagging
 	default:
 	}

@@ -131,7 +131,7 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 			return err
 		}
 	}
-	if expectations.IsResourceVersionReallyNewer(s.Sandbox.GetResourceVersion(), newSbx.GetResourceVersion()) {
+	if expectations.IsResourceVersionStrictlyNewer(s.Sandbox.GetResourceVersion(), newSbx.GetResourceVersion()) {
 		if deepcopy {
 			s.Sandbox = newSbx.DeepCopy()
 		} else {
@@ -190,7 +190,7 @@ func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) (bool,
 		if !shouldUpdate {
 			// The informer view may lag behind writes made earlier in the same
 			// operation; never roll the wrapper back to an older object.
-			if expectations.IsResourceVersionNewer(s.Sandbox.ResourceVersion, latest.ResourceVersion) {
+			if expectations.IsResourceVersionNewerOrEqual(s.Sandbox.ResourceVersion, latest.ResourceVersion) {
 				s.Sandbox = latest
 			}
 			updated = false
@@ -263,7 +263,7 @@ func (s *Sandbox) retryPatch(ctx context.Context, modifier ModifierFunc) (bool, 
 		if !shouldUpdate {
 			// The informer view may lag behind writes made earlier in the same
 			// operation; never roll the wrapper back to an older object.
-			if expectations.IsResourceVersionNewer(s.Sandbox.ResourceVersion, latest.ResourceVersion) {
+			if expectations.IsResourceVersionNewerOrEqual(s.Sandbox.ResourceVersion, latest.ResourceVersion) {
 				s.Sandbox = latest
 			}
 			updated = false
@@ -558,7 +558,7 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error
 		}
 		// A stale informer write conflicts on resourceVersion. Only a current
 		// observation can supersede the admission decision from the API reader.
-		if expectations.IsResourceVersionNewer(s.ResourceVersion, sbx.ResourceVersion) {
+		if expectations.IsResourceVersionNewerOrEqual(s.ResourceVersion, sbx.ResourceVersion) {
 			if err := validatePause(sbx); err != nil {
 				return false, err
 			}
