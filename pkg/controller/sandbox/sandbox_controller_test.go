@@ -862,6 +862,9 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 	}
 	running := status(agentsv1alpha1.SandboxRunning, "10.0.0.1", true)
 	pending := status(agentsv1alpha1.SandboxPending, "10.0.0.1", false)
+	pausedStatus := status(agentsv1alpha1.SandboxPaused, "10.0.0.1", false)
+	pausedMessageChanged := *pausedStatus.DeepCopy()
+	pausedMessageChanged.Message = "still paused"
 	messageChanged := *running.DeepCopy()
 	messageChanged.Message = "still running"
 	withPodMetadata := *running.DeepCopy()
@@ -914,7 +917,15 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 		{name: "unroutable transitions do not sync", oldStatus: pending, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", false)},
 		{name: "message-only change does not sync", oldStatus: running, newStatus: messageChanged},
 		{name: "identical status does not patch", oldStatus: running, newStatus: running},
-		{name: "already paused spec does not sync", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true), paused: true},
+		{name: "entering pause with paused spec syncs", oldStatus: running, newStatus: pausedStatus, paused: true, wantSync: true},
+		{name: "entering pause while not Ready syncs", oldStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.1", false), newStatus: pausedStatus, paused: true, wantSync: true},
+		{name: "addressless pause preserves projection without sync", oldStatus: status(agentsv1alpha1.SandboxRunning, "", true), newStatus: status(agentsv1alpha1.SandboxPaused, "", false), paused: true},
+		{name: "paused message-only change does not sync", oldStatus: pausedStatus, newStatus: pausedMessageChanged, paused: true},
+		{name: "pause completion does not repeat sync", oldStatus: pausedStatus, newStatus: pauseCompleted, paused: true},
+		{name: "entering pause with sync disabled", oldStatus: running, newStatus: pausedStatus, paused: true, disabled: true},
+		{name: "pool pause preserves projection without sync", oldStatus: running, newStatus: pausedStatus, paused: true, pool: true},
+		{name: "pause Patch NotFound does not send", oldStatus: running, newStatus: pausedStatus, paused: true, patchErr: apierrors.NewNotFound(agentsv1alpha1.Resource("sandboxes"), "test-sandbox")},
+		{name: "pause send failure preserves status write", oldStatus: running, newStatus: pausedStatus, paused: true, wantSync: true, syncErr: fmt.Errorf("peer unavailable")},
 		{name: "undelivered pool instance does not sync", oldStatus: pending, newStatus: running, pool: true},
 		{name: "active sync disabled", oldStatus: pending, newStatus: running, disabled: true},
 		{name: "invalid projection preserves status write", oldStatus: pending, newStatus: running, invalidUID: true},
