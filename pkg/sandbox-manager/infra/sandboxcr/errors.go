@@ -23,15 +23,21 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 )
 
 type retriableError struct {
 	Message string
+	cause   error
 }
 
 func (e retriableError) Error() string {
 	return e.Message
+}
+
+func (e retriableError) Unwrap() error {
+	return e.cause
 }
 
 func (e retriableError) Is(target error) bool {
@@ -168,4 +174,19 @@ func newPlatformCreateError(err error, contextMsg string) error {
 		contextMsg,
 		err,
 	)
+}
+
+// sandboxWaitTimeoutError classifies a wait-task timeout with the sandbox action
+// that did not complete. Classifying and wording it here keeps the HTTP layer on
+// manager error codes alone instead of recognizing cache-level wait types. The
+// original wait error stays in the cause chain, so callers can still tell an
+// internal wait timeout from their own deadline or cancellation.
+func sandboxWaitTimeoutError(err error, action, sandboxID string) error {
+	var waitErr *cacheutils.WaitNotSatisfiedError
+	if !errors.As(err, &waitErr) {
+		return err
+	}
+	return managererrors.WrapError(managererrors.ErrorInternal, err,
+		"timed out after %s waiting for sandbox %s to %s; completion was not confirmed, check the sandbox state before retrying",
+		waitErr.Timeout, sandboxID, action)
 }
