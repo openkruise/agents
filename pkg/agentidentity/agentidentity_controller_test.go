@@ -20,11 +20,13 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"net/http"
 	"testing"
 
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -563,12 +565,28 @@ func readyConditionOf(t *testing.T, r *Reconciler, key types.NamespacedName) *me
 // newTestManager builds a real manager over a stub REST config, following the
 // pattern in the sandboxset and controller-registry tests. It is never started,
 // so no apiserver is needed; only the registration wiring is exercised.
+//
+// The RESTMapper is static because AddIssuer registers a field index, and
+// creating the informer behind it resolves the kind's mapping up front, which
+// the default discovery-backed mapper cannot do without an apiserver.
 func newTestManager(t *testing.T) ctrl.Manager {
+	t.Helper()
+	mapper := apiMeta.NewDefaultRESTMapper([]schema.GroupVersion{securityv1alpha1.GroupVersion})
+	mapper.Add(securityv1alpha1.GroupVersion.WithKind("AgentRoleBinding"), apiMeta.RESTScopeNamespace)
+	return newTestManagerWithMapper(t, mapper)
+}
+
+// newTestManagerWithMapper is newTestManager over the given RESTMapper, so a
+// test can leave a kind unmapped the way a cluster without its CRD would.
+func newTestManagerWithMapper(t *testing.T, mapper apiMeta.RESTMapper) ctrl.Manager {
 	t.Helper()
 	mgr, err := ctrl.NewManager(&rest.Config{Host: "http://127.0.0.1:0"}, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "0",
+		MapperProvider: func(*rest.Config, *http.Client) (apiMeta.RESTMapper, error) {
+			return mapper, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)

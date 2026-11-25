@@ -17,17 +17,24 @@ limitations under the License.
 package agentidentity
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -190,6 +197,182 @@ func TestEndpointsServeOnANonLeader(t *testing.T) {
 	}
 }
 
+// TestExchangeAuthorizesThroughTheManagerCache drives ExchangePrincipalToken
+// over the served endpoint, with the Authorizer reading AgentRoleBindings
+// through the manager's own cache. A fake client has to be handed the field
+// index explicitly, so only a real cache shows that AddIssuer registers it:
+// without it every exchange fails with a 500, never a 200 or a 403.
+//
+// Statuses are written directly rather than by the controllers, which are not
+// running here, so nothing re-resolves the IdP config out from under the test.
+func TestExchangeAuthorizesThroughTheManagerCache(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("KUBEBUILDER_ASSETS is not set; run under make test or point it at envtest binaries")
+	}
+	ctrl.SetLogger(klog.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	scheme := apiruntime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("register the core scheme: %v", err)
+	}
+	if err := securityv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("register the security scheme: %v", err)
+	}
+
+	env := &envtest.Environment{
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		ErrorIfCRDPathMissing: true,
+		Scheme:                scheme,
+	}
+	restConfig, err := env.Start()
+	if err != nil {
+		t.Fatalf("start the API server: %v", err)
+	}
+	t.Cleanup(func() { stopEnvironment(t, env) })
+
+	c, err := client.New(restConfig, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatalf("build a client: %v", err)
+	}
+
+	dir := t.TempDir()
+	signingKeyFile, _ := writeLocalSigningKey(t, dir)
+	certFile, keyFile, certPEM := writeLocalServingCertificate(t, dir)
+	port := freePort(t)
+	issuerURL := fmt.Sprintf("https://127.0.0.1:%d", port)
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+		Scheme:  scheme,
+		Metrics: ctrlmetrics.Options{BindAddress: "0"},
+	})
+	if err != nil {
+		t.Fatalf("build manager: %v", err)
+	}
+	issuer, err := AddIssuer(mgr, IssuerConfig{
+		IssuerURL:       issuerURL,
+		SigningKeyFile:  signingKeyFile,
+		TLSCertFile:     certFile,
+		TLSKeyFile:      keyFile,
+		BindAddress:     fmt.Sprintf("127.0.0.1:%d", port),
+		UserInfoKeyring: userInfoKeyringForTest(t),
+	})
+	if err != nil {
+		t.Fatalf("add the issuer: %v", err)
+	}
+	// Stopped and awaited before the API server and the certificate directory
+	// are torn down, the same way startChain does.
+	managerCtx, stopManager := context.WithCancel(ctx)
+	exited := make(chan error, 1)
+	go func() { exited <- mgr.Start(managerCtx) }()
+	t.Cleanup(func() {
+		stopManager()
+		select {
+		case err := <-exited:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("the manager exited with %v", err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Error("the manager did not shut down")
+		}
+	})
+
+	idpKey := mustIDTokenKey(t)
+	jwksServer := startJWKSServer(t, publicJWKFor("idp-key-1", idpKey.Public()))
+
+	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	identityObj := readyIdentity(exchangeTestIdentity, "idp")
+	identityStatus := identityObj.Status
+	config := resolvedAuthConfig("idp", exchangeTestIDPIssuer, jwksServer.URL, exchangeTestAudience)
+	configStatus := config.Status
+	binding := agentRoleBinding("exchange-binding", "exchange-role", exchangeTestIdentity)
+	for _, obj := range []client.Object{
+		identityObj,
+		config,
+		agentRole("exchange-role", agentRoleRule(securityv1alpha1.ActionExchangePrincipalToken, "*")),
+		binding,
+	} {
+		if err := c.Create(ctx, obj); err != nil {
+			t.Fatalf("create %T: %v", obj, err)
+		}
+	}
+	// Create drops status, so the resolved state the handler checks is written
+	// through the status subresource afterwards.
+	identityObj.Status = identityStatus
+	if err := c.Status().Update(ctx, identityObj); err != nil {
+		t.Fatalf("mark the identity ready: %v", err)
+	}
+	config.Status = configStatus
+	if err := c.Status().Update(ctx, config); err != nil {
+		t.Fatalf("mark the config resolved: %v", err)
+	}
+
+	now := time.Now()
+	rawIDToken := signIDToken(t, idpKey, "idp-key-1", jwt.Claims{
+		Issuer: exchangeTestIDPIssuer, Subject: exchangeTestSubject, Audience: jwt.Audience{exchangeTestAudience},
+		IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now), Expiry: jwt.NewNumericDate(now.Add(time.Hour)),
+	})
+	rawAgentToken, _, err := issuer.IssueAgentToken(jwtissuer.AgentBinding{
+		Namespace: testNamespace, AgentIdentityName: exchangeTestIdentity, SandboxUID: exchangeTestSandboxUID,
+	}, 0)
+	if err != nil {
+		t.Fatalf("issue agent token: %v", err)
+	}
+	body, err := json.Marshal(exchangePrincipalTokenRequestBody{IDToken: rawIDToken})
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	fixture := &chain{issuerURL: issuerURL, trusting: trustingClient(certPEM)}
+	waitForEndpoint(t, fixture, issuerURL+jwtissuer.DiscoveryPath)
+
+	// The cache fills asynchronously, so each verdict is awaited rather than
+	// expected on the first request.
+	awaitExchangeStatus := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(20 * time.Second)
+		var last int
+		var lastBody string
+		for time.Now().Before(deadline) {
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+				issuerURL+ExchangePrincipalTokenPath, bytes.NewReader(body))
+			if err != nil {
+				t.Fatalf("build exchange request: %v", err)
+			}
+			request.Header.Set("Authorization", "Bearer "+rawAgentToken)
+			request.Header.Set("Content-Type", "application/json")
+			response, err := fixture.trusting.Do(request)
+			if err != nil {
+				t.Fatalf("POST %s: %v", ExchangePrincipalTokenPath, err)
+			}
+			responseBody, err := io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			if err != nil {
+				t.Fatalf("read exchange response: %v", err)
+			}
+			last, lastBody = response.StatusCode, string(responseBody)
+			if last == want {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatalf("exchange settled on %d (%s), want %d", last, lastBody, want)
+	}
+
+	awaitExchangeStatus(http.StatusOK)
+
+	// Revocation goes through the same index: once the binding's deletion
+	// reaches the cache, the identity holds no role and is refused.
+	if err := c.Delete(ctx, binding); err != nil {
+		t.Fatalf("delete the binding: %v", err)
+	}
+	awaitExchangeStatus(http.StatusForbidden)
+}
+
 // leaderGatedRunnable signals when it starts and needs the lease to do so.
 type leaderGatedRunnable struct {
 	started chan struct{}
@@ -223,8 +406,17 @@ func TestServingCertificateReloadsWithoutARestart(t *testing.T) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("register the core scheme: %v", err)
 	}
+	// AddIssuer indexes AgentRoleBindings for the exchange endpoint, so the
+	// kind has to be both in the scheme and installed.
+	if err := securityv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("register the security scheme: %v", err)
+	}
 
-	env := &envtest.Environment{Scheme: scheme}
+	env := &envtest.Environment{
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		ErrorIfCRDPathMissing: true,
+		Scheme:                scheme,
+	}
 	restConfig, err := env.Start()
 	if err != nil {
 		t.Fatalf("start the API server: %v", err)

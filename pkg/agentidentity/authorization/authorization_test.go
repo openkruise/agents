@@ -80,7 +80,7 @@ func deleting[T client.Object](obj T) T {
 // cache, so every test's reader matches what Authorize actually depends on.
 func fakeClientBuilder() *fake.ClientBuilder {
 	return fake.NewClientBuilder().WithScheme(scheme).
-		WithIndex(&securityv1alpha1.AgentRoleBinding{}, IndexFieldAgentIdentityRef, agentIdentityRefIndexFunc)
+		WithIndex(&securityv1alpha1.AgentRoleBinding{}, IndexFieldAgentIdentityRef, AgentIdentityRefIndexFunc)
 }
 
 func authorizerFor(objs ...client.Object) *Authorizer {

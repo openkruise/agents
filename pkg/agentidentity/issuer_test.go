@@ -37,6 +37,8 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4/jwt"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
@@ -108,6 +110,9 @@ func TestAddIssuer(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  IssuerConfig
+		// withoutBindingCRD runs against a cluster with no AgentRoleBinding
+		// mapping, where the exchange handler's field index cannot exist.
+		withoutBindingCRD bool
 		// wantIssuer expects issuance to be enabled.
 		wantIssuer bool
 		wantErr    string
@@ -174,6 +179,18 @@ func TestAddIssuer(t *testing.T) {
 			wantErr: "watch issuer serving certificate",
 		},
 		{
+			name: "a missing AgentRoleBinding CRD fails startup rather than every exchange",
+			cfg: IssuerConfig{
+				IssuerURL:      "https://issuer.test",
+				SigningKeyFile: signingKey,
+				TLSCertFile:    certFile,
+				TLSKeyFile:     keyFile,
+				BindAddress:    "127.0.0.1:0",
+			},
+			withoutBindingCRD: true,
+			wantErr:           "index AgentRoleBinding",
+		},
+		{
 			name: "a full configuration enables issuance",
 			cfg: IssuerConfig{
 				IssuerURL:      "https://issuer.test",
@@ -188,7 +205,13 @@ func TestAddIssuer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			issuer, err := AddIssuer(newTestManager(t), tt.cfg)
+			var mgr ctrl.Manager
+			if tt.withoutBindingCRD {
+				mgr = newTestManagerWithMapper(t, apiMeta.NewDefaultRESTMapper(nil))
+			} else {
+				mgr = newTestManager(t)
+			}
+			issuer, err := AddIssuer(mgr, tt.cfg)
 
 			if tt.wantErr != "" {
 				if err == nil {

@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/openkruise/agents/pkg/agentidentity/authorization"
 	"github.com/openkruise/agents/pkg/identity/aead"
 	"github.com/openkruise/agents/pkg/identity/jwtissuer"
 )
@@ -109,6 +110,14 @@ func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 	issuer, err := jwtissuer.New(cfg.IssuerURL, signingKey, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("build issuer: %w", err)
+	}
+
+	// The exchange handler authorizes through mgr.GetClient(), whose List over
+	// AgentRoleBindings needs this index on the same cache. It has to be
+	// registered before the manager starts, and failing here keeps a missing
+	// AgentRoleBinding CRD a startup error rather than a 500 on every exchange.
+	if err := authorization.SetupFieldIndex(context.Background(), mgr.GetCache()); err != nil {
+		return nil, err
 	}
 
 	handler, err := issuerMux(mgr.GetClient(), issuer)

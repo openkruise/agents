@@ -40,13 +40,13 @@ func TestAgentIdentityRefIndexFunc(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := agentIdentityRefIndexFunc(tt.obj)
+			got := AgentIdentityRefIndexFunc(tt.obj)
 			if len(got) != len(tt.want) {
-				t.Fatalf("agentIdentityRefIndexFunc() = %v, want %v", got, tt.want)
+				t.Fatalf("AgentIdentityRefIndexFunc() = %v, want %v", got, tt.want)
 			}
 			for i := range got {
 				if got[i] != tt.want[i] {
-					t.Errorf("agentIdentityRefIndexFunc()[%d] = %q, want %q", i, got[i], tt.want[i])
+					t.Errorf("AgentIdentityRefIndexFunc()[%d] = %q, want %q", i, got[i], tt.want[i])
 				}
 			}
 		})

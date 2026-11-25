@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	securityv1alpha1 "github.com/openkruise/agents/api/security/v1alpha1"
+	"github.com/openkruise/agents/pkg/agentidentity/authorization"
 	"github.com/openkruise/agents/pkg/identity/aead"
 	"github.com/openkruise/agents/pkg/identity/jwtissuer"
 )
@@ -92,6 +93,14 @@ func agentRoleBinding(name, roleName, identityName string) *securityv1alpha1.Age
 			AgentIdentityRef: securityv1alpha1.AgentIdentityReference{Name: identityName},
 		},
 	}
+}
+
+// indexedClientBuilder is a fake client builder carrying the AgentRoleBinding
+// field index the Authorizer lists by, the index AddIssuer registers on the
+// manager's cache.
+func indexedClientBuilder() *fake.ClientBuilder {
+	return fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&securityv1alpha1.AgentRoleBinding{}, authorization.IndexFieldAgentIdentityRef, authorization.AgentIdentityRefIndexFunc)
 }
 
 // userInfoKeyringForTest builds a fresh AEAD keyring for sealing a principal
@@ -153,7 +162,7 @@ func newExchangeFixture(t *testing.T, identityObj *securityv1alpha1.AgentIdentit
 		identityObj,
 		resolvedAuthConfig("idp", exchangeTestIDPIssuer, jwksServer.URL, exchangeTestAudience),
 	}, extra...)
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	fc := indexedClientBuilder().WithObjects(objects...).Build()
 
 	rawAgentToken, _, err := issuer.IssueAgentToken(jwtissuer.AgentBinding{
 		Namespace:         testNamespace,
@@ -206,7 +215,7 @@ func newExchangeFixtureWithInterceptor(t *testing.T, identityObj *securityv1alph
 		identityObj,
 		resolvedAuthConfig("idp", exchangeTestIDPIssuer, jwksServer.URL, exchangeTestAudience),
 	}, extra...)
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
+	fc := indexedClientBuilder().WithObjects(objects...).
 		WithInterceptorFuncs(funcs).Build()
 
 	rawAgentToken, _, err := issuer.IssueAgentToken(jwtissuer.AgentBinding{
@@ -305,7 +314,7 @@ func TestExchangePrincipalTokenInternalFailures(t *testing.T) {
 			readyIdentity(exchangeTestIdentity, "idp"),
 			resolvedAuthConfig("idp", exchangeTestIDPIssuer, jwksServer.URL, exchangeTestAudience),
 		}, grantingObjects...)
-		fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+		fc := indexedClientBuilder().WithObjects(objects...).Build()
 		rawAgentToken, _, err := issuerWithoutKeyring.IssueAgentToken(jwtissuer.AgentBinding{
 			Namespace: testNamespace, AgentIdentityName: exchangeTestIdentity, SandboxUID: exchangeTestSandboxUID,
 		}, 0)
