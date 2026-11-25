@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -57,6 +58,9 @@ func TestPrepareSandboxFromCheckpoint_AccessToken(t *testing.T) {
 			original := checkpoint.DeepCopy()
 			template := &v1alpha1.SandboxTemplate{
 				ObjectMeta: metav1.ObjectMeta{Name: "snapshot-template", Namespace: "default"},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{},
+				},
 			}
 			var previousToken string
 			for _, name := range []string{"clone-a", "clone-b"} {

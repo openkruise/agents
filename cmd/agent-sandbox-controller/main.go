@@ -76,6 +76,8 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+var defaultPeerSelector = "component=sandbox-manager"
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -149,7 +151,7 @@ func main() {
 			"injection template already serves HTTPS, since the capability annotation is write-once.")
 
 	flag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip; only used when SandboxRouteSync is enabled; non-positive values use the default.")
-	flag.StringVar(&peerSelector, "peer-selector", "component=sandbox-manager", "Label selector of memberlist seed Pods in sandbox-system; only used when SandboxRouteSync is enabled; empty disables sync.")
+	flag.StringVar(&peerSelector, "peer-selector", defaultPeerSelector, "Label selector of memberlist seed Pods in sandbox-system; only used when SandboxRouteSync is enabled; empty disables sync.")
 	flag.StringVar(&networkInterface, "network-interface", "eni1", "Network interface whose single global-unicast address (IPv4 preferred, IPv6 otherwise) binds and advertises controller memberlist; only used when SandboxRouteSync is enabled; empty uses POD_IP or the first non-loopback IPv4.")
 
 	flag.StringVar(&peerKeySecret, "peer-key-secret", "", "Existing 32-byte memberlist key Secret (namespace/name); only used when SandboxRouteSync is enabled.")
