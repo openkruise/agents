@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -34,6 +35,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -133,6 +135,81 @@ func waitExecutionCondition(t *testing.T, r *Reconciler, version *api.SandboxTem
 		return condition != nil && condition.Reason == reason && !r.hasWorker(version.UID)
 	}, 5*time.Second, time.Millisecond)
 	return current
+}
+
+// mutateStoredVersion applies mutate to the stored Version and writes it back.
+func mutateStoredVersion(t *testing.T, r *Reconciler, version *api.SandboxTemplate, mutate func(*api.SandboxTemplate)) {
+	t.Helper()
+	current := &api.SandboxTemplate{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
+	mutate(current)
+	require.NoError(t, r.Update(t.Context(), current))
+}
+
+// mutateStoredBox applies mutate to the stored Sandbox and writes it back.
+func mutateStoredBox(t *testing.T, r *Reconciler, box *api.Sandbox, mutate func(*api.Sandbox)) {
+	t.Helper()
+	current := &api.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(box), current))
+	mutate(current)
+	require.NoError(t, r.Update(t.Context(), current))
+}
+
+// removeStoredVersion strips the finalizer and deletes the stored Version.
+func removeStoredVersion(t *testing.T, r *Reconciler, version *api.SandboxTemplate) {
+	t.Helper()
+	mutateStoredVersion(t, r, version, func(v *api.SandboxTemplate) { v.Finalizers = nil })
+	require.NoError(t, r.Delete(t.Context(), version))
+}
+
+// setStoredIdentity overwrites the execution identity annotation on the stored Version.
+func setStoredIdentity(t *testing.T, r *Reconciler, version *api.SandboxTemplate, value string) {
+	t.Helper()
+	mutateStoredVersion(t, r, version, func(v *api.SandboxTemplate) { v.Annotations[executionIdentityAnnotation] = value })
+}
+
+// failGetFor makes reads of proto's type return failure.
+func failGetFor(proto client.Object, failure error) interceptor.Funcs {
+	return interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+		if reflect.TypeOf(obj) == reflect.TypeOf(proto) {
+			return failure
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}}
+}
+
+// failListFor makes list calls of proto's type return failure.
+func failListFor(proto client.ObjectList, failure error) interceptor.Funcs {
+	return interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+		if reflect.TypeOf(list) == reflect.TypeOf(proto) {
+			return failure
+		}
+		return c.List(ctx, list, opts...)
+	}}
+}
+
+// failUpdateFor makes writes of proto's type return failure.
+func failUpdateFor(proto client.Object, failure error) interceptor.Funcs {
+	return interceptor.Funcs{Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+		if reflect.TypeOf(obj) == reflect.TypeOf(proto) {
+			return failure
+		}
+		return c.Update(ctx, obj, opts...)
+	}}
+}
+
+// foreignLeaseFor answers lease reads with a foreign, active, correctly owned lease.
+func foreignLeaseFor(name string, uid types.UID) interceptor.Funcs {
+	return interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+		if lease, ok := obj.(*coordinationv1.Lease); ok {
+			*lease = coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name, UID: "lease-uid", OwnerReferences: []metav1.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: "SandboxTemplate", Name: name, UID: uid, Controller: ptr.To(true)}}},
+				Spec:       coordinationv1.LeaseSpec{HolderIdentity: ptr.To("other-process"), LeaseDurationSeconds: ptr.To(int32(180)), RenewTime: ptr.To(metav1.NewMicroTime(time.Now()))},
+			}
+			return nil
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}}
 }
 
 func TestBuildExecutionAsyncSerialCaptureAndCleanup(t *testing.T) {
@@ -521,7 +598,7 @@ func TestBuildExecutionCOPY(t *testing.T) {
 }
 
 func TestBuildExecutionInterruptions(t *testing.T) {
-	for _, mode := range []string{"leadership lost", "logical label removed", "Version deleting", "missing end", "nonzero exit", "nonzero with process error", "nonzero then stream error", "transport unknown", "budget expired"} {
+	for _, mode := range []string{"leadership lost", "logical label removed", "Version deleting", "missing end", "nonzero exit", "nonzero with process error", "nonzero then stream error", "transport unknown", "transport invalid argument", "budget expired"} {
 		t.Run(mode, func(t *testing.T) {
 			r, version, box, _ := executionFixture(t)
 			if mode == "budget expired" {
@@ -551,6 +628,9 @@ func TestBuildExecutionInterruptions(t *testing.T) {
 				}
 				if mode == "transport unknown" {
 					return connect.NewError(connect.CodeUnknown, errors.New("unknown stream outcome"))
+				}
+				if mode == "transport invalid argument" {
+					return connect.NewError(connect.CodeInvalidArgument, errors.New("rejected build command"))
 				}
 				if err := stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_Start{Start: &process.ProcessEvent_StartEvent{Pid: 123}}}}); err != nil {
 					return err
@@ -590,6 +670,8 @@ func TestBuildExecutionInterruptions(t *testing.T) {
 				reason = buildReasonExecutionFailed
 			} else if mode == "budget expired" {
 				reason = buildReasonTimeout
+			} else if mode == "transport invalid argument" {
+				reason = buildReasonExecutionFailed
 			}
 			current := waitExecutionCondition(t, r, version, reason)
 			require.Equal(t, api.SandboxTemplatePhaseFailed, current.Status.Phase)
@@ -785,34 +867,706 @@ func TestBuildCaptureBoundaries(t *testing.T) {
 }
 
 func TestBuildImageConvergence(t *testing.T) {
-	for _, mode := range []string{"old container", "same image replacement", "changed image", "terminated container"} {
+	for _, mode := range []string{"old container", "same image replacement", "changed image", "terminated container", "terminated original container", "corrupt update state", "update in progress"} {
 		t.Run(mode, func(t *testing.T) {
 			r, version, box, pod := executionFixture(t)
 			status := &pod.Status.ContainerStatuses[0]
 			oldImageID := status.ImageID
 			status.ContainerID = "containerd://replacement"
-			if mode == "old container" {
+			switch mode {
+			case "old container":
 				status.ContainerID = "containerd://original"
-			} else if mode == "changed image" {
+			case "changed image":
 				oldImageID = "sha256:" + strings.Repeat("b", 64)
-			} else if mode == "terminated container" {
+			case "terminated container", "terminated original container":
 				status.State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}
+				if mode == "terminated original container" {
+					status.ContainerID = "containerd://original"
+				}
 			}
-			state, err := json.Marshal(inplaceupdate.InPlaceUpdateState{UpdateImages: true, LastContainerStatuses: map[string]inplaceupdate.InPlaceUpdateContainerStatus{"runtime": {ImageID: oldImageID, ContainerID: "containerd://original"}}})
+			last := inplaceupdate.InPlaceUpdateContainerStatus{ImageID: oldImageID, ContainerID: "containerd://original"}
+			if mode == "update in progress" {
+				last.ContainerID = "containerd://replacement"
+			}
+			state, err := json.Marshal(inplaceupdate.InPlaceUpdateState{UpdateImages: true, LastContainerStatuses: map[string]inplaceupdate.InPlaceUpdateContainerStatus{"runtime": last}})
 			require.NoError(t, err)
-			pod.Annotations = map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: string(state)}
+			annotation := string(state)
+			if mode == "corrupt update state" {
+				annotation = "{"
+			}
+			pod.Annotations = map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: annotation}
 			desiredStatus := pod.Status.DeepCopy()
 			require.NoError(t, r.Update(t.Context(), pod))
 			pod.Status = *desiredStatus
 			require.NoError(t, r.Status().Update(t.Context(), pod))
 			session := &executionSession{versionName: version.Name, versionUID: version.UID, namespace: version.Namespace, sandboxUID: box.UID, podUID: pod.UID, initialContainerID: "containerd://original", imageChanged: true}
 			_, ready, err := r.executionSnapshot(t.Context(), session, version.Spec.Template.Spec.Containers[0].Image, box.Status.UpdateRevision)
-			if mode == "terminated container" {
+			switch mode {
+			case "terminated container", "corrupt update state":
+				require.ErrorIs(t, err, errExecutionInterrupted)
+			default:
+				require.NoError(t, err)
+				require.Equal(t, mode == "same image replacement" || mode == "changed image", ready)
+			}
+		})
+	}
+}
+
+func TestExecutionStatusRunningGuards(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*api.SandboxTemplate)
+	}{
+		{name: "terminal Version cannot restart a build", mutate: func(v *api.SandboxTemplate) {
+			v.Status = api.SandboxTemplateStatus{Phase: api.SandboxTemplatePhaseReady, ObservedGeneration: v.Generation}
+		}},
+		{name: "existing condition blocks a second Running write", mutate: func(v *api.SandboxTemplate) {
+			v.Status = api.SandboxTemplateStatus{Phase: api.SandboxTemplatePhaseBuilding, Conditions: []metav1.Condition{{Type: buildReadyCondition, Status: metav1.ConditionFalse, Reason: buildReasonProvisioned}}}
+		}},
+		{name: "deleting Version blocks a Running write", mutate: func(v *api.SandboxTemplate) {
+			v.DeletionTimestamp = ptr.To(metav1.Now())
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			version := modelFixtures()
+			tt.mutate(version)
+			r := modelReconciler(t, version)
+			err := r.executionStatus(t.Context(), version, api.SandboxTemplatePhaseBuilding, metav1.ConditionFalse, buildReasonRunning, "start")
+			require.ErrorIs(t, err, errExecutionInterrupted)
+		})
+	}
+}
+
+func TestBuildBudgetHelpers(t *testing.T) {
+	r, version, _, _ := executionFixture(t)
+	started := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	running := metav1.Condition{Type: buildReadyCondition, Status: metav1.ConditionFalse, Reason: buildReasonRunning, LastTransitionTime: started}
+	require.Equal(t, started.Add(r.Options.Timeout), r.buildDeadline(&running))
+	defaults := &Reconciler{Options: Options{}}
+	require.Equal(t, started.Add(DefaultBuildTimeout), defaults.buildDeadline(&running))
+	version.Status.Conditions = []metav1.Condition{running}
+	expired := &coordinationv1.Lease{Spec: coordinationv1.LeaseSpec{RenewTime: ptr.To(metav1.NewMicroTime(time.Now().Add(-4 * time.Minute)))}}
+	require.Equal(t, retryInterval, r.buildRequeueAfter(version, expired))
+	require.NoError(t, r.failRunningBuild(t.Context(), version, buildReasonTimeout, "expired"))
+	version.Status.Conditions[0].Reason = buildReasonProvisioned
+	require.NoError(t, r.failRunningBuild(t.Context(), version, buildReasonTimeout, "expired"))
+	current := &api.SandboxTemplate{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
+	require.Equal(t, api.SandboxTemplatePhaseFailed, current.Status.Phase)
+}
+
+func TestRunExecutionBoundaries(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		runtime   bool
+		mutate    func(*testing.T, *Reconciler, *api.SandboxTemplate, *api.Sandbox, *corev1.Pod)
+		funcs     interceptor.Funcs
+		wantError error
+		contains  string
+		phase     api.SandboxTemplateBuildPhase
+		reason    string
+	}{
+		{
+			name:      "lease lost before execution",
+			funcs:     foreignLeaseFor("st-abcdefghijklmnopqrst", "version-uid"),
+			wantError: errExecutionInterrupted,
+		},
+		{
+			name: "another replica already started the build",
+			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *api.Sandbox, _ *corev1.Pod) {
+				version.Status = api.SandboxTemplateStatus{Phase: api.SandboxTemplatePhaseBuilding, ObservedGeneration: version.Generation, Conditions: []metav1.Condition{{Type: buildReadyCondition, Status: metav1.ConditionFalse, Reason: buildReasonRunning, LastTransitionTime: metav1.Now()}}}
+				require.NoError(t, r.Status().Update(t.Context(), version))
+			},
+			phase:  api.SandboxTemplatePhaseFailed,
+			reason: buildReasonInterrupted,
+		},
+		{
+			name: "budget expires before the Sandbox binds",
+			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, box *api.Sandbox, pod *corev1.Pod) {
+				r.Options.Timeout = 150 * time.Millisecond
+				current := &api.SandboxTemplate{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
+				current.Annotations[executionIdentityAnnotation] = ""
+				require.NoError(t, r.Update(t.Context(), current))
+				require.NoError(t, r.Delete(t.Context(), box))
+				require.NoError(t, r.Delete(t.Context(), pod))
+			},
+			phase:  api.SandboxTemplatePhaseFailed,
+			reason: buildReasonTimeout,
+		},
+		{
+			name:    "renewal interrupted after execution",
+			runtime: true,
+			funcs:   failUpdateFor(&coordinationv1.Lease{}, apierrors.NewNotFound(coordinationv1.SchemeGroupVersion.WithResource("leases").GroupResource(), "template-build")),
+			phase:   api.SandboxTemplatePhaseFailed,
+			reason:  buildReasonInterrupted,
+		},
+		{
+			name:     "renewal fails after execution",
+			runtime:  true,
+			funcs:    failUpdateFor(&coordinationv1.Lease{}, errors.New("renew storage unavailable")),
+			contains: "renew storage unavailable",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, version, box, pod := executionFixture(t)
+			lease := createTestBuildLease(t, r, version, r.instanceID, time.Now())
+			handler := &buildProcessHandler{start: func(_ context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+				return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{Exited: true}}}})
+			}}
+			if tt.runtime {
+				bindBuildRuntime(t, r, box, handler)
+			}
+			if tt.mutate != nil {
+				tt.mutate(t, r, version, box, pod)
+			}
+			if tt.funcs.Get != nil || tt.funcs.Update != nil {
+				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), tt.funcs)
+			}
+			err := r.runExecution(t.Context(), version, lease)
+			switch {
+			case tt.wantError != nil:
+				require.ErrorIs(t, err, tt.wantError)
+			case tt.contains != "":
+				require.ErrorContains(t, err, tt.contains)
+			default:
+				require.NoError(t, err)
+			}
+			if tt.phase != "" {
+				current := &api.SandboxTemplate{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
+				require.Equal(t, tt.phase, current.Status.Phase)
+				require.Equal(t, tt.reason, meta.FindStatusCondition(current.Status.Conditions, buildReadyCondition).Reason)
+			}
+		})
+	}
+}
+
+func TestBindExecutionSandboxBoundaries(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		mutate    func(*testing.T, *Reconciler, *api.SandboxTemplate, *api.Sandbox)
+		funcs     interceptor.Funcs
+		wantError error
+		deadline  bool
+	}{
+		{
+			name: "missing Version interrupts",
+			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *api.Sandbox) {
+				removeStoredVersion(t, r, version)
+			},
+			wantError: errExecutionInterrupted,
+		},
+		{
+			name: "corrupt identity annotation fails",
+			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *api.Sandbox) {
+				setStoredIdentity(t, r, version, "{")
+			},
+		},
+		{
+			name: "Sandbox not yet created keeps waiting",
+			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, box *api.Sandbox) {
+				setStoredIdentity(t, r, version, "")
+				require.NoError(t, r.Delete(t.Context(), box))
+			},
+			deadline: true,
+		},
+		{
+			name: "bound Pod identity is lost",
+			mutate: func(t *testing.T, r *Reconciler, _ *api.SandboxTemplate, box *api.Sandbox) {
+				require.NoError(t, r.Delete(t.Context(), box))
+			},
+			wantError: errExecutionInterrupted,
+		},
+		{
+			name:      "Sandbox read failure",
+			funcs:     failGetFor(&api.Sandbox{}, errors.New("sandbox read unavailable")),
+			wantError: errors.New("sandbox read unavailable"),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, version, box, _ := executionFixture(t)
+			if tt.mutate != nil {
+				tt.mutate(t, r, version, box)
+			}
+			if tt.funcs.Get != nil {
+				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), tt.funcs)
+			}
+			ctx := t.Context()
+			if tt.deadline {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 300*time.Millisecond)
+				defer cancel()
+			}
+			session := &executionSession{versionName: version.Name, versionUID: version.UID, namespace: version.Namespace}
+			err := r.bindExecutionSandbox(ctx, session)
+			if tt.deadline {
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				return
+			}
+			if tt.wantError != nil {
+				require.ErrorContains(t, err, tt.wantError.Error())
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestReadExecutionSandboxIdentityDivergence(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		identity  string
+		interrupt bool
+	}{
+		{name: "corrupt identity annotation fails", identity: "{"},
+		{name: "identity recorded for another execution", identity: `{"sandboxUID":"replacement"}`, interrupt: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, version, box, _ := executionFixture(t)
+			setStoredIdentity(t, r, version, tt.identity)
+			session := &executionSession{versionName: version.Name, versionUID: version.UID, namespace: version.Namespace, sandboxUID: box.UID, podUID: "pod-uid"}
+			_, err := r.readExecutionSandbox(t.Context(), session)
+			if tt.interrupt {
 				require.ErrorIs(t, err, errExecutionInterrupted)
 			} else {
-				require.NoError(t, err)
-				require.Equal(t, mode != "old container", ready)
+				require.Error(t, err)
 			}
+		})
+	}
+}
+
+func TestExecutionSnapshotPodAccess(t *testing.T) {
+	t.Run("Pod read failure", func(t *testing.T) {
+		r, version, box, _ := executionFixture(t)
+		failure := errors.New("pod read unavailable")
+		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), failGetFor(&corev1.Pod{}, failure))
+		session := &executionSession{versionName: version.Name, versionUID: version.UID, namespace: version.Namespace, sandboxUID: box.UID, podUID: "pod-uid"}
+		_, _, err := r.executionSnapshot(t.Context(), session, version.Spec.Template.Spec.Containers[0].Image, box.Status.UpdateRevision)
+		require.ErrorIs(t, err, failure)
+	})
+	t.Run("unrelated container statuses are skipped", func(t *testing.T) {
+		r, version, box, pod := executionFixture(t)
+		sidecar := corev1.ContainerStatus{Name: "sidecar", Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}, ContainerID: "containerd://sidecar"}
+		pod.Status.ContainerStatuses = append([]corev1.ContainerStatus{sidecar}, pod.Status.ContainerStatuses...)
+		require.NoError(t, r.Status().Update(t.Context(), pod))
+		session := &executionSession{versionName: version.Name, versionUID: version.UID, namespace: version.Namespace, sandboxUID: box.UID, podUID: "pod-uid"}
+		_, ready, err := r.executionSnapshot(t.Context(), session, version.Spec.Template.Spec.Containers[0].Image, box.Status.UpdateRevision)
+		require.NoError(t, err)
+		require.True(t, ready)
+	})
+}
+
+func TestRecordExecutionIdentityBoundaries(t *testing.T) {
+	t.Run("corrupt identity annotation fails", func(t *testing.T) {
+		r, version, box, pod := executionFixture(t)
+		setStoredIdentity(t, r, version, "{")
+		session := &executionSession{versionName: version.Name, versionUID: version.UID, namespace: version.Namespace, sandboxUID: box.UID, podUID: pod.UID}
+		require.Error(t, r.recordExecutionIdentity(t.Context(), session))
+	})
+	t.Run("recording initializes the annotation map", func(t *testing.T) {
+		r, version, box, pod := executionFixture(t)
+		mutateStoredVersion(t, r, version, func(v *api.SandboxTemplate) { v.Annotations = nil })
+		session := &executionSession{versionName: version.Name, versionUID: version.UID, namespace: version.Namespace, sandboxUID: box.UID, podUID: pod.UID, containerID: "containerd://original"}
+		require.NoError(t, r.recordExecutionIdentity(t.Context(), session))
+		updated := &api.SandboxTemplate{}
+		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), updated))
+		recorded, err := parseExecutionIdentity(updated.Annotations[executionIdentityAnnotation])
+		require.NoError(t, err)
+		require.Equal(t, executionIdentity{SandboxUID: box.UID, PodUID: pod.UID, ContainerID: "containerd://original"}, recorded)
+	})
+}
+
+func TestBindBuildRuntimeBoundaries(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		mutate    func(*testing.T, *Reconciler, *api.SandboxTemplate, *api.Sandbox)
+		mode      string
+		wantToken string
+		wantError error
+		notFound  bool
+	}{
+		{
+			name: "Sandbox lost during binding",
+			mutate: func(t *testing.T, r *Reconciler, _ *api.SandboxTemplate, box *api.Sandbox) {
+				require.NoError(t, r.Delete(t.Context(), box))
+			},
+			notFound: true,
+		},
+		{
+			name:      "lease lost during binding",
+			mode:      "lease lost",
+			wantError: errExecutionInterrupted,
+		},
+		{
+			name: "runtime container missing",
+			mutate: func(t *testing.T, r *Reconciler, _ *api.SandboxTemplate, box *api.Sandbox) {
+				mutateStoredBox(t, r, box, func(b *api.Sandbox) { b.Spec.Template = nil })
+			},
+			wantError: errExecutionInterrupted,
+		},
+		{
+			name: "existing token is reused",
+			mutate: func(t *testing.T, r *Reconciler, _ *api.SandboxTemplate, box *api.Sandbox) {
+				mutateStoredBox(t, r, box, func(b *api.Sandbox) {
+					b.Annotations = map[string]string{api.AnnotationRuntimeAccessToken: "existing-runtime-token"}
+				})
+			},
+			wantToken: "existing-runtime-token",
+		},
+		{name: "metadata conflict retries", mode: "conflict"},
+		{name: "patch failure", mode: "patch failure"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, version, box, pod := executionFixture(t)
+			lease := createTestBuildLease(t, r, version, r.instanceID, time.Now())
+			if tt.mutate != nil {
+				tt.mutate(t, r, version, box)
+			}
+			failure := errors.New("runtime patch unavailable")
+			var attempts atomic.Int32
+			if tt.mode == "lease lost" {
+				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), foreignLeaseFor(version.Name, version.UID))
+			}
+			if tt.mode == "conflict" || tt.mode == "patch failure" {
+				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if _, ok := obj.(*api.Sandbox); ok {
+						if tt.mode == "patch failure" {
+							return failure
+						}
+						if attempts.Add(1) == 1 {
+							return apierrors.NewConflict(schema.GroupResource{Group: api.GroupVersion.Group, Resource: "sandboxes"}, obj.GetName(), errors.New("edited"))
+						}
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				}})
+			}
+			session := &executionSession{versionName: version.Name, versionUID: version.UID, namespace: version.Namespace, sandboxUID: box.UID, podUID: pod.UID}
+			bound, token, err := r.bindBuildRuntime(t.Context(), session, version, lease, "fresh-token")
+			switch {
+			case tt.wantError != nil:
+				require.ErrorIs(t, err, tt.wantError)
+				require.Nil(t, bound)
+			case tt.notFound:
+				require.True(t, apierrors.IsNotFound(err), "%v", err)
+				require.Nil(t, bound)
+			case tt.mode == "patch failure":
+				require.ErrorIs(t, err, failure)
+				require.Nil(t, bound)
+			default:
+				require.NoError(t, err)
+				require.NotNil(t, bound)
+				if tt.wantToken != "" {
+					require.Equal(t, tt.wantToken, token)
+					require.Equal(t, tt.wantToken, bound.Annotations[api.AnnotationRuntimeAccessToken])
+				}
+				if tt.mode == "conflict" {
+					require.EqualValues(t, 2, attempts.Load())
+				}
+			}
+		})
+	}
+}
+
+func TestExecuteBoundaries(t *testing.T) {
+	interrupted := func(t *testing.T, err error) {
+		t.Helper()
+		require.ErrorIs(t, err, errExecutionInterrupted)
+	}
+	for _, tt := range []struct {
+		name     string
+		runtime  bool
+		initFail bool
+		mutate   func(*testing.T, *Reconciler, *api.SandboxTemplate, *api.Sandbox, *corev1.Pod)
+		funcs    func() interceptor.Funcs
+		assert   func(*testing.T, error)
+	}{
+		{
+			name: "Sandbox lost before execution",
+			mutate: func(t *testing.T, r *Reconciler, _ *api.SandboxTemplate, box *api.Sandbox, _ *corev1.Pod) {
+				require.NoError(t, r.Delete(t.Context(), box))
+			},
+			assert: func(t *testing.T, err error) {
+				t.Helper()
+				require.True(t, apierrors.IsNotFound(err), "%v", err)
+			},
+		},
+		{
+			name:   "lease lost after the Sandbox binds",
+			funcs:  func() interceptor.Funcs { return foreignLeaseFor("st-abcdefghijklmnopqrst", "version-uid") },
+			assert: interrupted,
+		},
+		{
+			name: "runtime container missing after binding",
+			mutate: func(t *testing.T, r *Reconciler, _ *api.SandboxTemplate, box *api.Sandbox, _ *corev1.Pod) {
+				mutateStoredBox(t, r, box, func(b *api.Sandbox) { b.Spec.Template = nil })
+			},
+			assert: interrupted,
+		},
+		{
+			name: "Pod replaced after binding",
+			funcs: func() interceptor.Funcs {
+				var reads atomic.Int32
+				return interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*corev1.Pod); ok && reads.Add(1) >= 2 {
+						return apierrors.NewNotFound(corev1.SchemeGroupVersion.WithResource("pods").GroupResource(), key.Name)
+					}
+					return c.Get(ctx, key, obj, opts...)
+				}}
+			},
+			assert: interrupted,
+		},
+		{
+			name:   "runtime transport missing",
+			assert: func(t *testing.T, err error) { t.Helper(); require.Error(t, err) },
+		},
+		{
+			name: "runtime URL invalid",
+			mutate: func(t *testing.T, r *Reconciler, _ *api.SandboxTemplate, box *api.Sandbox, _ *corev1.Pod) {
+				mutateStoredBox(t, r, box, func(b *api.Sandbox) { b.Annotations = map[string]string{api.AnnotationRuntimeURL: "://not-a-url"} })
+			},
+			assert: func(t *testing.T, err error) { t.Helper(); require.Error(t, err) },
+		},
+		{
+			name:     "runtime init fails",
+			initFail: true,
+			assert:   func(t *testing.T, err error) { t.Helper(); require.Error(t, err) },
+		},
+		{
+			name:    "lease lost during a step refresh",
+			runtime: true,
+			funcs: func() interceptor.Funcs {
+				var reads atomic.Int32
+				return interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if lease, ok := obj.(*coordinationv1.Lease); ok && reads.Add(1) >= 3 {
+						require.NoError(t, c.Get(ctx, key, lease, opts...))
+						lease.Spec.HolderIdentity = ptr.To("other-process")
+						return nil
+					}
+					return c.Get(ctx, key, obj, opts...)
+				}}
+			},
+			assert: interrupted,
+		},
+		{
+			name:    "empty build step",
+			runtime: true,
+			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *api.Sandbox, _ *corev1.Pod) {
+				version.Spec.BuildOptions.Steps = []api.TemplateBuildStep{{}}
+				current := &api.SandboxTemplate{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
+				current.Spec = version.Spec
+				require.NoError(t, r.Update(t.Context(), current))
+			},
+			assert: func(t *testing.T, err error) {
+				t.Helper()
+				var stepError *buildStepError
+				require.ErrorAs(t, err, &stepError)
+				require.Equal(t, "build step 1 failed", err.Error())
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, version, box, pod := executionFixture(t)
+			lease := createTestBuildLease(t, r, version, r.instanceID, time.Now())
+			handler := &buildProcessHandler{start: func(_ context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+				return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{Exited: true}}}})
+			}}
+			if tt.runtime {
+				bindBuildRuntime(t, r, box, handler)
+			}
+			if tt.initFail {
+				mux := http.NewServeMux()
+				path, processHandler := processconnect.NewProcessHandler(handler)
+				mux.Handle(path, processHandler)
+				mux.HandleFunc("/init", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) })
+				server := httptest.NewServer(mux)
+				t.Cleanup(server.Close)
+				current := &api.Sandbox{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(box), current))
+				current.Annotations = map[string]string{api.AnnotationRuntimeURL: server.URL}
+				require.NoError(t, r.Update(t.Context(), current))
+			}
+			if tt.mutate != nil {
+				tt.mutate(t, r, version, box, pod)
+			}
+			if tt.funcs != nil {
+				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), tt.funcs())
+			}
+			session := &executionSession{versionName: version.Name, versionUID: version.UID, namespace: version.Namespace, sandboxUID: box.UID, podUID: pod.UID}
+			tt.assert(t, r.execute(t.Context(), session, version, lease))
+		})
+	}
+}
+
+func TestBuildCaptureFailurePaths(t *testing.T) {
+	failed := func(reason string) func(*testing.T, ctrl.Result, error, *api.SandboxTemplate) {
+		return func(t *testing.T, _ ctrl.Result, err error, current *api.SandboxTemplate) {
+			t.Helper()
+			require.NoError(t, err)
+			require.Equal(t, api.SandboxTemplatePhaseFailed, current.Status.Phase)
+			require.Equal(t, reason, meta.FindStatusCondition(current.Status.Conditions, buildReadyCondition).Reason)
+		}
+	}
+	errContains := func(text string) func(*testing.T, ctrl.Result, error, *api.SandboxTemplate) {
+		return func(t *testing.T, _ ctrl.Result, err error, _ *api.SandboxTemplate) {
+			t.Helper()
+			require.ErrorContains(t, err, text)
+		}
+	}
+	phaseStays := func(phase api.SandboxTemplateBuildPhase) func(*testing.T, ctrl.Result, error, *api.SandboxTemplate) {
+		return func(t *testing.T, _ ctrl.Result, err error, current *api.SandboxTemplate) {
+			t.Helper()
+			require.NoError(t, err)
+			require.Equal(t, phase, current.Status.Phase)
+		}
+	}
+	// prepare runs a first reconcileCapture that creates the checkpoint and
+	// leaves it in a state that the second call must observe.
+	prepare := func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, persist func(*testing.T, *Reconciler, *api.Checkpoint)) {
+		t.Helper()
+		_, err := r.reconcileCapture(t.Context(), version)
+		require.NoError(t, err)
+		checkpoint := &api.Checkpoint{}
+		require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: version.Namespace, Name: version.Name + "-checkpoint"}, checkpoint))
+		persist(t, r, checkpoint)
+	}
+	for _, tt := range []struct {
+		name    string
+		mutate  func(*testing.T, *Reconciler, *api.SandboxTemplate, *api.Sandbox, *corev1.Pod)
+		funcs   interceptor.Funcs
+		prepare func(*testing.T, *Reconciler, *api.Checkpoint)
+		assert  func(*testing.T, ctrl.Result, error, *api.SandboxTemplate)
+	}{
+		{
+			name: "corrupt identity annotation",
+			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *api.Sandbox, _ *corev1.Pod) {
+				version.Annotations[executionIdentityAnnotation] = "{"
+				setStoredIdentity(t, r, version, "{")
+			},
+			assert: errContains("decode template execution identity"),
+		},
+		{
+			name: "missing business runtime definition",
+			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *api.Sandbox, _ *corev1.Pod) {
+				version.Spec.Template = nil
+				mutateStoredVersion(t, r, version, func(v *api.SandboxTemplate) { v.Spec.Template = nil })
+			},
+			assert: failed(buildReasonCaptureConflict),
+		},
+		{
+			name: "provisioned Sandbox lost",
+			mutate: func(t *testing.T, r *Reconciler, _ *api.SandboxTemplate, box *api.Sandbox, _ *corev1.Pod) {
+				require.NoError(t, r.Delete(t.Context(), box))
+			},
+			assert: failed(buildReasonInterrupted),
+		},
+		{
+			name: "provisioned runtime template missing",
+			mutate: func(t *testing.T, r *Reconciler, _ *api.SandboxTemplate, box *api.Sandbox, _ *corev1.Pod) {
+				mutateStoredBox(t, r, box, func(b *api.Sandbox) { b.Spec.Template = nil })
+			},
+			assert: failed(buildReasonCaptureConflict),
+		},
+		{
+			name: "business container not ready",
+			mutate: func(t *testing.T, r *Reconciler, _ *api.SandboxTemplate, _ *api.Sandbox, pod *corev1.Pod) {
+				pod.Status.ContainerStatuses[0].Ready = false
+				require.NoError(t, r.Status().Update(t.Context(), pod))
+			},
+			assert: phaseStays(api.SandboxTemplatePhaseBuilding),
+		},
+		{
+			name: "capture without checkpoint",
+			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *api.Sandbox, _ *corev1.Pod) {
+				version.Spec.BuildOptions.Checkpoint.Enable = false
+				mutateStoredVersion(t, r, version, func(v *api.SandboxTemplate) { v.Spec.BuildOptions.Checkpoint.Enable = false })
+			},
+			assert: func(t *testing.T, _ ctrl.Result, err error, current *api.SandboxTemplate) {
+				t.Helper()
+				require.NoError(t, err)
+				require.Equal(t, api.SandboxTemplatePhaseReady, current.Status.Phase)
+				require.Equal(t, metav1.ConditionTrue, meta.FindStatusCondition(current.Status.Conditions, buildReadyCondition).Status)
+			},
+		},
+		{
+			name: "checkpoint progress pending",
+			prepare: func(t *testing.T, r *Reconciler, checkpoint *api.Checkpoint) {
+				checkpoint.Generation = 1
+				require.NoError(t, r.Update(t.Context(), checkpoint))
+			},
+			assert: phaseStays(api.SandboxTemplatePhaseBuilding),
+		},
+		{
+			name:   "snapshot read failure",
+			funcs:  failGetFor(&corev1.Pod{}, errors.New("pod read unavailable")),
+			assert: errContains("pod read unavailable"),
+		},
+		{
+			name:   "checkpoint read failure",
+			funcs:  failGetFor(&api.Checkpoint{}, errors.New("checkpoint read unavailable")),
+			assert: errContains("checkpoint read unavailable"),
+		},
+		{
+			name: "checkpoint create race",
+			funcs: interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*api.Checkpoint); ok {
+						return apierrors.NewNotFound(api.GroupVersion.WithResource("checkpoints").GroupResource(), key.Name)
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*api.Checkpoint); ok {
+						return apierrors.NewAlreadyExists(api.GroupVersion.WithResource("checkpoints").GroupResource(), obj.GetName())
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+			},
+			assert: phaseStays(api.SandboxTemplatePhaseBuilding),
+		},
+		{
+			name: "status publication fails",
+			funcs: interceptor.Funcs{SubResourcePatch: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+				return errors.New("status write unavailable")
+			}},
+			prepare: func(t *testing.T, r *Reconciler, checkpoint *api.Checkpoint) {
+				checkpoint.Status = api.CheckpointStatus{Phase: api.CheckpointSucceeded, CheckpointId: "backend-id", ObservedGeneration: checkpoint.Generation}
+				require.NoError(t, r.Status().Update(t.Context(), checkpoint))
+			},
+			assert: errContains("status write unavailable"),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, version, box, pod := executionFixture(t)
+			version.Status = api.SandboxTemplateStatus{Phase: api.SandboxTemplatePhaseBuilding, ObservedGeneration: version.Generation, Conditions: []metav1.Condition{
+				{Type: buildReadyCondition, Status: metav1.ConditionFalse, Reason: buildReasonProvisioned, ObservedGeneration: version.Generation, LastTransitionTime: metav1.Now()},
+			}}
+			require.NoError(t, r.Status().Update(t.Context(), version))
+			identity, err := parseExecutionIdentity(version.Annotations[executionIdentityAnnotation])
+			require.NoError(t, err)
+			identity.ContainerID = pod.Status.ContainerStatuses[0].ContainerID
+			data, err := json.Marshal(identity)
+			require.NoError(t, err)
+			version.Annotations[executionIdentityAnnotation] = string(data)
+			require.NoError(t, r.Update(t.Context(), version))
+			currentBox := &api.Sandbox{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(box), currentBox))
+			currentBox.Annotations = map[string]string{api.AnnotationInitRuntimeRequest: `{"accessToken":"test-runtime-token"}`}
+			require.NoError(t, r.Update(t.Context(), currentBox))
+			if tt.mutate != nil {
+				tt.mutate(t, r, version, box, pod)
+			}
+			if tt.funcs.Get != nil || tt.funcs.Create != nil || tt.funcs.SubResourcePatch != nil {
+				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), tt.funcs)
+			}
+			if tt.prepare != nil {
+				prepare(t, r, version, tt.prepare)
+			}
+			result, err := r.reconcileCapture(t.Context(), version)
+			current := &api.SandboxTemplate{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
+			tt.assert(t, result, err, current)
 		})
 	}
 }

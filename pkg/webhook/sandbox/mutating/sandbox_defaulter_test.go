@@ -19,6 +19,7 @@ package mutating
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	jsonpatch "github.com/evanphx/json-patch/v5"
@@ -56,6 +57,7 @@ func TestSandboxTemplateInlining(t *testing.T) {
 		{name: "template without pod template is rejected", template: &v1alpha1.SandboxTemplate{}, ref: true, denied: "has no pod template"},
 		{name: "missing template is rejected", ref: true, denied: "not found"},
 		{name: "missing kind passes through", ref: true, getError: &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: v1alpha1.GroupVersion.Group, Kind: "SandboxTemplate"}}},
+		{name: "template read failure rejects creation", ref: true, getError: errors.New("read unavailable"), denied: "resolve sandbox template"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			sandbox := &v1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "default"}}

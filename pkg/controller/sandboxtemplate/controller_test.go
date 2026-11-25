@@ -18,8 +18,10 @@ package sandboxtemplate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/clock"
 	"k8s.io/utils/ptr"
@@ -342,4 +345,210 @@ func TestDeletingVersionIgnoresRestoredSandboxReferences(t *testing.T) {
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(consumer), &api.Sandbox{}))
 	err := r.Get(t.Context(), client.ObjectKeyFromObject(checkpoint), &api.Checkpoint{})
 	require.True(t, apierrors.IsNotFound(err), "checkpoint should be removed with the Version")
+}
+
+func TestRequestDeletionBoundaries(t *testing.T) {
+	t.Run("already deleting reports pending", func(t *testing.T) {
+		version := modelFixtures()
+		version.DeletionTimestamp = ptr.To(metav1.Now())
+		version.Finalizers = []string{api.SandboxTemplateFinalizer}
+		r := modelReconciler(t, version)
+		pending, err := r.requestDeletion(t.Context(), version, metav1.DeletePropagationForeground)
+		require.NoError(t, err)
+		require.True(t, pending)
+	})
+	t.Run("missing object reports done", func(t *testing.T) {
+		version := modelFixtures()
+		r := modelReconciler(t)
+		pending, err := r.requestDeletion(t.Context(), version, metav1.DeletePropagationForeground)
+		require.NoError(t, err)
+		require.False(t, pending)
+	})
+}
+
+func TestFinishCleanupBoundaries(t *testing.T) {
+	t.Run("object gone after deletion", func(t *testing.T) {
+		version := modelFixtures()
+		version.Finalizers = nil
+		r := modelReconciler(t, version)
+		require.NoError(t, r.finishCleanup(t.Context(), version, api.SandboxTemplateFinalizer))
+		require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(version), &api.SandboxTemplate{})))
+	})
+	t.Run("finalizer already removed", func(t *testing.T) {
+		version := modelFixtures()
+		version.Finalizers = []string{"test/retain"}
+		r := modelReconciler(t, version)
+		require.NoError(t, r.finishCleanup(t.Context(), version, api.SandboxTemplateFinalizer))
+	})
+	t.Run("recreated object fails identity check", func(t *testing.T) {
+		version := modelFixtures()
+		version.Finalizers = nil
+		r := modelReconciler(t, version)
+		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			require.NoError(t, c.Delete(ctx, obj, opts...))
+			replacement := modelFixtures()
+			replacement.UID = "replacement-uid"
+			replacement.Finalizers = []string{api.SandboxTemplateFinalizer}
+			return c.Create(ctx, replacement)
+		}})
+		err := r.finishCleanup(t.Context(), version, api.SandboxTemplateFinalizer)
+		require.ErrorContains(t, err, "identity changed")
+	})
+	t.Run("finalizer removal conflict retries", func(t *testing.T) {
+		version := modelFixtures()
+		r := modelReconciler(t, version)
+		var patches atomic.Int32
+		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if current, ok := obj.(*api.SandboxTemplate); ok && patches.Add(1) == 1 {
+				edited := current.DeepCopy()
+				edited.Finalizers = []string{api.SandboxTemplateFinalizer}
+				edited.Labels["editor"] = "winner"
+				require.NoError(t, c.Update(ctx, edited))
+				return apierrors.NewConflict(schema.GroupResource{Group: api.GroupVersion.Group, Resource: "sandboxtemplates"}, obj.GetName(), errors.New("edited"))
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		}})
+		require.NoError(t, r.finishCleanup(t.Context(), version, api.SandboxTemplateFinalizer))
+		require.EqualValues(t, 2, patches.Load())
+		require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(version), &api.SandboxTemplate{})))
+	})
+}
+
+func TestCleanupVersionStorageBoundaries(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		deleting bool
+		noFinal  bool
+		listKind string
+		patch    bool
+		delete40 bool
+	}{
+		{name: "finalizer patch fails", noFinal: true, patch: true},
+		{name: "Sandbox list fails", deleting: true, listKind: "sandboxes"},
+		{name: "Checkpoint list fails", deleting: true, listKind: "checkpoints"},
+		{name: "deletion already finished", delete40: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			version := modelFixtures()
+			switch {
+			case tt.deleting:
+				version.DeletionTimestamp = ptr.To(metav1.Now())
+			case tt.noFinal:
+				version.Finalizers = nil
+			}
+			r := modelReconciler(t, version)
+			failure := errors.New("storage unavailable")
+			funcs := interceptor.Funcs{}
+			switch {
+			case tt.patch:
+				funcs.Patch = func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+					return failure
+				}
+			case tt.listKind == "sandboxes":
+				funcs = failListFor(&api.SandboxList{}, failure)
+			case tt.listKind == "checkpoints":
+				funcs = failListFor(&api.CheckpointList{}, failure)
+			case tt.delete40:
+				funcs.Delete = func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if _, ok := obj.(*api.SandboxTemplate); ok {
+						return apierrors.NewNotFound(api.GroupVersion.WithResource("sandboxtemplates").GroupResource(), obj.GetName())
+					}
+					return c.Delete(ctx, obj, opts...)
+				}
+			}
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), funcs)
+			pending, err := r.cleanupVersion(t.Context(), version)
+			if tt.delete40 {
+				require.NoError(t, err)
+				require.False(t, pending)
+				current := &api.SandboxTemplate{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
+				require.Contains(t, current.Finalizers, api.SandboxTemplateFinalizer)
+				require.Nil(t, current.DeletionTimestamp)
+				return
+			}
+			require.False(t, pending)
+			require.ErrorIs(t, err, failure)
+		})
+	}
+}
+
+func TestBuildCleanupBoundaries(t *testing.T) {
+	t.Run("running worker defers cleanup", func(t *testing.T) {
+		r, version, _, _ := executionFixture(t)
+		version.Status = api.SandboxTemplateStatus{Phase: api.SandboxTemplatePhaseReady, ObservedGeneration: version.Generation}
+		require.NoError(t, r.Status().Update(t.Context(), version))
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		r.workers = map[types.UID]*buildWorker{version.UID: {key: client.ObjectKeyFromObject(version), cancel: cancel}}
+		result, err := r.reconcileBuildCleanup(t.Context(), version)
+		require.NoError(t, err)
+		require.Equal(t, retryInterval, result.RequeueAfter)
+		require.ErrorIs(t, ctx.Err(), context.Canceled)
+	})
+	t.Run("Sandbox read failure", func(t *testing.T) {
+		r, version, _, _ := executionFixture(t)
+		version.Status = api.SandboxTemplateStatus{Phase: api.SandboxTemplatePhaseReady, ObservedGeneration: version.Generation}
+		require.NoError(t, r.Status().Update(t.Context(), version))
+		failure := errors.New("sandbox read unavailable")
+		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), failGetFor(&api.Sandbox{}, failure))
+		_, err := r.reconcileBuildCleanup(t.Context(), version)
+		require.ErrorIs(t, err, failure)
+	})
+	t.Run("Checkpoint list failure", func(t *testing.T) {
+		r, version, box, _ := executionFixture(t)
+		version.Status = api.SandboxTemplateStatus{Phase: api.SandboxTemplatePhaseFailed, ObservedGeneration: version.Generation}
+		require.NoError(t, r.Status().Update(t.Context(), version))
+		require.NoError(t, r.Delete(t.Context(), box))
+		failure := errors.New("checkpoint list unavailable")
+		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), failListFor(&api.CheckpointList{}, failure))
+		_, err := r.reconcileBuildCleanup(t.Context(), version)
+		require.ErrorIs(t, err, failure)
+	})
+}
+
+func TestDraftExpiryStopsWorkerBeforeDeletion(t *testing.T) {
+	version := modelFixtures()
+	version.CreationTimestamp = metav1.NewTime(time.Now().Add(-2 * time.Hour))
+	r := modelReconciler(t, version)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	r.workers = map[types.UID]*buildWorker{version.UID: {key: client.ObjectKeyFromObject(version), cancel: cancel}}
+	result, err := r.ReconcileVersion(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(version)})
+	require.NoError(t, err)
+	require.Equal(t, retryInterval, result.RequeueAfter)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	current := &api.SandboxTemplate{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
+	require.Nil(t, current.DeletionTimestamp)
+}
+
+func TestFinalizerPatchFailure(t *testing.T) {
+	r, version, _, _ := executionFixture(t)
+	current := &api.SandboxTemplate{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
+	current.Finalizers = nil
+	require.NoError(t, r.Update(t.Context(), current))
+	failure := errors.New("finalizer patch unavailable")
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+		return failure
+	}})
+	_, err := r.ReconcileVersion(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(version)})
+	require.ErrorIs(t, err, failure)
+}
+
+func TestSetPhaseIsIdempotent(t *testing.T) {
+	version := modelFixtures()
+	r := modelReconciler(t, version)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(version)}
+	_, err := r.ReconcileVersion(t.Context(), req)
+	require.NoError(t, err)
+	first := &api.SandboxTemplate{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, first))
+	require.Equal(t, api.SandboxTemplatePhasePending, first.Status.Phase)
+	_, err = r.ReconcileVersion(t.Context(), req)
+	require.NoError(t, err)
+	second := &api.SandboxTemplate{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, second))
+	require.Equal(t, first.ResourceVersion, second.ResourceVersion)
 }

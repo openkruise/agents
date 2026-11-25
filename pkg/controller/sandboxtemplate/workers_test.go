@@ -396,6 +396,159 @@ func TestBuildLeaseExpiryCancelsBlockedRenewal(t *testing.T) {
 	require.ErrorIs(t, ctx.Err(), context.Canceled)
 }
 
+func TestBuildLeaseCurrentStateBoundaries(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		mutate    func(*testing.T, *Reconciler, *api.SandboxTemplate, *coordinationv1.Lease)
+		funcs     interceptor.Funcs
+		wantError error
+		plain     bool
+	}{
+		{
+			name: "missing Version interrupts",
+			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *coordinationv1.Lease) {
+				removeStoredVersion(t, r, version)
+			},
+			wantError: errExecutionInterrupted,
+		},
+		{
+			name:      "Version read failure",
+			funcs:     failGetFor(&api.SandboxTemplate{}, errors.New("version read unavailable")),
+			wantError: errors.New("version read unavailable"),
+		},
+		{
+			name: "changed generation interrupts",
+			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *coordinationv1.Lease) {
+				current := &api.SandboxTemplate{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
+				current.Generation = 2
+				require.NoError(t, r.Update(t.Context(), current))
+			},
+			wantError: errExecutionInterrupted,
+		},
+		{
+			name:      "lease read failure",
+			funcs:     failGetFor(&coordinationv1.Lease{}, errors.New("lease read unavailable")),
+			wantError: errors.New("lease read unavailable"),
+		},
+		{
+			name: "foreign active holder interrupts",
+			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *coordinationv1.Lease) {
+				current := &coordinationv1.Lease{}
+				require.NoError(t, r.Get(t.Context(), buildLeaseKey(version), current))
+				current.Spec.HolderIdentity = ptr.To("other-process")
+				require.NoError(t, r.Update(t.Context(), current))
+			},
+			wantError: errExecutionInterrupted,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, version, lease, _ := leaseFixture(t)
+			if tt.mutate != nil {
+				tt.mutate(t, r, version, lease)
+			}
+			if tt.funcs.Get != nil {
+				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), tt.funcs)
+			}
+			current, err := r.currentBuildLease(t.Context(), version, lease)
+			require.Nil(t, current)
+			require.ErrorContains(t, err, tt.wantError.Error())
+		})
+	}
+}
+
+func TestBuildLeaseRenewalBoundaries(t *testing.T) {
+	t.Run("update conflict retries", func(t *testing.T) {
+		r, version, lease, clock := leaseFixture(t)
+		var writes atomic.Int32
+		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*coordinationv1.Lease); ok && writes.Add(1) == 1 {
+				return apierrors.NewConflict(coordinationv1.SchemeGroupVersion.WithResource("leases").GroupResource(), obj.GetName(), errors.New("edited"))
+			}
+			return c.Update(ctx, obj, opts...)
+		}})
+		clock.Step(time.Minute)
+		renewed, err := r.renewBuildLease(t.Context(), version, lease)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, writes.Load())
+		require.True(t, clock.Now().Equal(renewed.Spec.RenewTime.Time))
+	})
+	t.Run("lease deleted between renewals interrupts", func(t *testing.T) {
+		r, version, lease, clock := leaseFixture(t)
+		require.NoError(t, r.Delete(t.Context(), lease))
+		clock.Step(time.Minute)
+		_, err := r.renewBuildLease(t.Context(), version, lease)
+		require.ErrorIs(t, err, errExecutionInterrupted)
+	})
+	t.Run("expired takeover update fails", func(t *testing.T) {
+		version := modelFixtures()
+		r := modelReconciler(t, version)
+		createTestBuildLease(t, r, version, "old-process", time.Now().Add(-4*time.Minute))
+		r.Client = interceptor.NewClient(r.Client.(client.WithWatch), failUpdateFor(&coordinationv1.Lease{}, errors.New("acquire rejected")))
+		lease, acquired, err := r.acquireBuildLease(t.Context(), version, false)
+		require.Nil(t, lease)
+		require.False(t, acquired)
+		require.ErrorContains(t, err, "acquire expired build lease")
+	})
+	t.Run("lease ownership change blocks deletion", func(t *testing.T) {
+		r, version, _, _ := leaseFixture(t)
+		current := &coordinationv1.Lease{}
+		require.NoError(t, r.Get(t.Context(), buildLeaseKey(version), current))
+		current.OwnerReferences[0].UID = "other-version"
+		require.NoError(t, r.Update(t.Context(), current))
+		_, err := r.deleteBuildLease(t.Context(), version)
+		require.ErrorContains(t, err, "build lease ownership changed")
+	})
+	t.Run("worker start without the manager", func(t *testing.T) {
+		version := modelFixtures()
+		r := modelReconciler(t, version)
+		lease := createTestBuildLease(t, r, version, r.instanceID, time.Now())
+		require.False(t, r.startWorker(version, lease))
+		require.False(t, r.hasWorker(version.UID))
+	})
+	t.Run("worker start deduplicates", func(t *testing.T) {
+		version := modelFixtures()
+		r := modelReconciler(t, version)
+		lease := createTestBuildLease(t, r, version, r.instanceID, time.Now())
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		r.workerCtx = ctx
+		r.workers = map[types.UID]*buildWorker{version.UID: {key: client.ObjectKeyFromObject(version), cancel: cancel}}
+		require.True(t, r.startWorker(version, lease))
+	})
+}
+
+func TestBuildLeaseHeartbeatRenewal(t *testing.T) {
+	t.Run("successful renewal resets the ownership timer", func(t *testing.T) {
+		r, version, lease, clock := leaseFixture(t)
+		ctx, _ := runTestHeartbeat(t, t.Context(), r, version, lease, clock)
+		clock.Step(time.Minute)
+		require.Eventually(t, func() bool {
+			current := &coordinationv1.Lease{}
+			if err := r.Get(t.Context(), buildLeaseKey(version), current); err != nil {
+				return false
+			}
+			return clock.Now().Equal(current.Spec.RenewTime.Time)
+		}, 3*time.Second, time.Millisecond)
+		require.NoError(t, ctx.Err())
+	})
+	t.Run("interrupted renewal cancels the worker", func(t *testing.T) {
+		r, version, lease, clock := leaseFixture(t)
+		ctx, done := runTestHeartbeat(t, t.Context(), r, version, lease, clock)
+		current := &coordinationv1.Lease{}
+		require.NoError(t, r.Get(t.Context(), buildLeaseKey(version), current))
+		current.Spec.HolderIdentity = ptr.To("other-process")
+		require.NoError(t, r.Update(t.Context(), current))
+		clock.Step(time.Minute)
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("interrupted renewal did not cancel the worker")
+		}
+		require.ErrorIs(t, ctx.Err(), context.Canceled)
+	})
+}
+
 func TestRunningBuildLeaseObservations(t *testing.T) {
 	for _, tt := range []struct {
 		name         string
