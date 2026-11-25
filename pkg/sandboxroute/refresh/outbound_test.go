@@ -36,14 +36,18 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/hashicorp/memberlist"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/openkruise/agents/pkg/peers"
@@ -100,7 +104,10 @@ func TestRequestPeerAddressAndTransport(t *testing.T) {
 }
 
 func TestSyncRouteWithPeers(t *testing.T) {
-	route := sandboxroute.Route{ID: "sb-1", Namespace: "ns", Name: "sb-1", IP: "1.2.3.4", UID: "uid-sb-1", ResourceVersion: "1"}
+	route := sandboxroute.Route{
+		ID: "sb-1", Namespace: "ns", Name: "sb-1", IP: "1.2.3.4", UID: "uid-sb-1",
+		ResourceVersion: "1", AccessToken: "test-sensitive-token",
+	}
 	threePeers := staticPeers{
 		{IP: "10.0.0.1", Name: "node-1"},
 		{IP: "10.0.0.2", Name: "node-2"},
@@ -112,10 +119,19 @@ func TestSyncRouteWithPeers(t *testing.T) {
 		outbound        *PeerOutbound
 		expectErr       string
 		expectPeerCount float64
+		expectSkipLog   bool
 	}{
 		{name: "nil peers manager is a no-op"},
 		{name: "no peers is a no-op without an outbound client", peers: staticPeers{}},
 		{name: "sender-only members need no outbound client", peers: staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}}},
+		{name: "nil peers logs a rate-limited skip", outbound: NewPeerOutbound(nil), expectSkipLog: true},
+		{name: "empty peers logs a rate-limited skip", peers: staticPeers{}, outbound: NewPeerOutbound(nil), expectSkipLog: true},
+		{
+			name:          "sender-only peers logs a rate-limited skip",
+			peers:         staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}},
+			outbound:      NewPeerOutbound(nil),
+			expectSkipLog: true,
+		},
 		{
 			name:            "mixed membership counts only refresh targets",
 			peers:           staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}, {Name: "sm-manager", IP: "127.0.0.2"}},
@@ -143,22 +159,63 @@ func TestSyncRouteWithPeers(t *testing.T) {
 	// The peerCount gauge is process-global: rows run serially and reset it.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Cleanup(tt.outbound.CloseIdleConnections)
-			var before []peers.Peer
-			if tt.peers != nil {
-				before = append([]peers.Peer(nil), tt.peers.GetPeers()...)
-			}
-			peerCount.Set(-1)
-			err := SyncRouteWithPeers(t.Context(), tt.peers, route, tt.outbound)
-			if tt.expectErr == "" {
-				assert.NoError(t, err)
-			} else {
-				assert.ErrorContains(t, err, tt.expectErr)
-			}
-			assert.Equal(t, tt.expectPeerCount, testutil.ToFloat64(peerCount))
-			if tt.peers != nil {
-				assert.Equal(t, before, append([]peers.Peer(nil), tt.peers.GetPeers()...), "membership must not be modified")
-			}
+			synctest.Test(t, func(t *testing.T) {
+				t.Cleanup(tt.outbound.CloseIdleConnections)
+				logs := make(chan string, 64)
+				ctx := klog.NewContext(t.Context(), funcr.New(func(_, line string) { logs <- line }, funcr.Options{}))
+				var before []peers.Peer
+				if tt.peers != nil {
+					before = append([]peers.Peer(nil), tt.peers.GetPeers()...)
+				}
+				peerCount.Set(-1)
+				err := SyncRouteWithPeers(ctx, tt.peers, route, tt.outbound)
+				if tt.expectErr == "" {
+					assert.NoError(t, err)
+				} else {
+					assert.ErrorContains(t, err, tt.expectErr)
+				}
+				assert.Equal(t, tt.expectPeerCount, testutil.ToFloat64(peerCount))
+				if tt.peers != nil {
+					assert.Equal(t, before, append([]peers.Peer(nil), tt.peers.GetPeers()...), "membership must not be modified")
+				}
+				if tt.expectSkipLog {
+					require.Len(t, logs, 1, "the first skip must be visible at default verbosity")
+					otherOutbound := NewPeerOutbound(nil)
+					t.Cleanup(otherOutbound.CloseIdleConnections)
+					require.NoError(t, SyncRouteWithPeers(ctx, tt.peers, route, otherOutbound))
+					require.Len(t, logs, 2, "each outbound client has an independent log budget")
+					// Virtual time exercises the boundary without modifying sender internals.
+					for _, checkpoint := range []struct {
+						delay    time.Duration
+						wantLogs int
+					}{
+						{wantLogs: 2},
+						{delay: 29 * time.Second, wantLogs: 2},
+						{delay: time.Second, wantLogs: 3},
+					} {
+						time.Sleep(checkpoint.delay)
+						var wg sync.WaitGroup
+						for range 16 {
+							wg.Add(1)
+							go func() {
+								defer wg.Done()
+								assert.NoError(t, SyncRouteWithPeers(ctx, tt.peers, route, tt.outbound))
+							}()
+						}
+						wg.Wait()
+						require.Len(t, logs, checkpoint.wantLogs, "concurrent skips must share the 30-second log budget")
+					}
+				} else {
+					assert.Empty(t, logs)
+				}
+				for len(logs) > 0 {
+					line := <-logs
+					assert.Contains(t, line, "route sync skipped: no refresh targets")
+					assert.NotContains(t, line, route.AccessToken)
+					assert.NotContains(t, line, route.ID)
+					assert.NotContains(t, line, route.IP)
+				}
+			})
 		})
 	}
 }
@@ -205,7 +262,8 @@ func TestSyncRouteDelivery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			route := *fullRoute("running", "1")
 			route.IP = "10.0.0.5"
-			ctx, cancel := context.WithCancel(t.Context())
+			logs := make(chan string, 16)
+			ctx, cancel := context.WithCancel(klog.NewContext(t.Context(), funcr.New(func(_, line string) { logs <- line }, funcr.Options{})))
 			defer cancel()
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -254,6 +312,7 @@ func TestSyncRouteDelivery(t *testing.T) {
 			if tt.canceled || tt.cancelDuring {
 				assert.ErrorIs(t, err, context.Canceled)
 			}
+			assert.Empty(t, logs, "mixed membership with receivers must not log a no-target skip")
 			assert.Equal(t, tt.wantRequests, requests.Load())
 			if tt.secondPeer && !tt.failSecond {
 				assert.Equal(t, int32(1), secondRequests.Load())

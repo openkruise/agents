@@ -117,13 +117,17 @@ reconcile retries. Failed/NotFound patches and unchanged routability/IP do not
 send. An observed DeletionTimestamp triggers a versioned deletion before
 termination control, even if cleanup fails or the Pod is absent. NotFound alone
 cannot create a deletion fence. Receiving Sandbox informers retain convergence;
-there is no queue or replay. No refresh targets is a silent no-op.
+there is no queue or replay. No refresh targets remains a successful no-op. With
+an outbound client configured, the sender logs this skip at default verbosity,
+initially and at most once every 30 seconds per client, without route data or
+credentials. A nil outbound client keeps the no-op silent.
 
 Controller configuration:
 - Alpha `SandboxRouteSync` defaults to false. A disabled gate skips peer validation,
   client creation and listeners. Empty/whitespace `--peer-selector` disables sync.
-- `--peer-selector` defaults to
-  `agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager` in `sandbox-system`.
+- `--peer-selector` defaults to `component=sandbox-manager` in `sandbox-system`,
+  matching the repository's manager/gateway deployment labels. Other deployments
+  must provide a selector matching their seed Pods.
 - `--network-interface=eni1` reuses the existing address resolver, overriding POD_IP.
   Invalid interfaces fail enabled startup; an empty flag preserves POD_IP/first
   non-loopback IPv4 fallback. This selects gossip identity, not outbound routing.
@@ -171,7 +175,9 @@ there is no protocol probing or plaintext downgrade.
 
 Tests cover controller status/deletion dispatch, returned versions and PodIP
 clearing, with existing sender transport/retry/TLS coverage migrated alongside
-the implementation. Store and receiver tests retain their existing contracts.
+the implementation. Sender tests also cover empty/sender-only membership,
+default-level skip logs, concurrent calls, per-client throttling and credential
+redaction. Store and receiver tests retain their existing contracts.
 
 ### Bounded peer listing
 
