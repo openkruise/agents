@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/pkg/utils"
@@ -41,6 +42,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	cachepkg "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/cache/controllers"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -1217,6 +1219,77 @@ func TestSandbox_Resume(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSandbox_ResumeRefreshesAfterRequestDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		paused := &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: "resume-near-deadline", Namespace: "default", ResourceVersion: "10"},
+			Spec:       v1alpha1.SandboxSpec{Paused: true},
+			Status:     v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxPaused},
+		}
+		SetSandboxCondition(paused, string(v1alpha1.SandboxConditionPaused), metav1.ConditionTrue, "Paused", "")
+		builder, err := controllers.NewMockManagerBuilder(t)
+		require.NoError(t, err)
+		stored := fake.NewClientBuilder().WithScheme(builder.Build().GetScheme()).
+			WithStatusSubresource(paused).WithObjects(paused).Build()
+		deadlineAware := interceptor.NewClient(stored, interceptor.Funcs{
+			Get: func(ctx context.Context, c ctrl.WithWatch, key ctrl.ObjectKey, obj ctrl.Object, opts ...ctrl.GetOption) error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+
+		const requestTimeout = time.Second
+		requestCtx, cancel := context.WithTimeout(t.Context(), requestTimeout)
+		defer cancel()
+		waitReadStarted := make(chan struct{})
+		// Hold the waiter's in-flight read so it returns after readiness has
+		// been observed and the request's deadline has elapsed.
+		waitClient := interceptor.NewClient(stored, interceptor.Funcs{
+			Get: func(ctx context.Context, _ ctrl.WithWatch, _ ctrl.ObjectKey, _ ctrl.Object, _ ...ctrl.GetOption) error {
+				close(waitReadStarted)
+				<-ctx.Done()
+				<-requestCtx.Done()
+				return ctx.Err()
+			},
+		})
+		waitCache, err := cachepkg.NewCache(builder.WithClient(waitClient).Build(), false)
+		require.NoError(t, err)
+		s := AsSandbox(paused, &apiReaderOverrideCache{Provider: waitCache, apiReader: deadlineAware, client: deadlineAware})
+		finished := make(chan error, 1)
+		go func() { finished <- s.Resume(requestCtx, infra.ResumeOptions{}) }()
+		synctest.Wait()
+		select {
+		case <-waitReadStarted:
+		default:
+			t.Fatal("Resume did not start waiting for readiness")
+		}
+		value, ok := waitCache.GetWaitHooks().Load(cacheutils.WaitHookKey(paused))
+		require.True(t, ok)
+		entry := value.(*cacheutils.WaitEntry[*v1alpha1.Sandbox])
+
+		time.Sleep(requestTimeout - time.Millisecond)
+		var latest v1alpha1.Sandbox
+		require.NoError(t, stored.Get(t.Context(), ctrl.ObjectKeyFromObject(paused), &latest))
+		require.False(t, latest.Spec.Paused)
+		latest.Status.Phase = v1alpha1.SandboxRunning
+		latest.Status.Conditions = []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready"}}
+		require.NoError(t, stored.Status().Update(t.Context(), &latest))
+		entry.Observe(latest.DeepCopy())
+		require.NoError(t, requestCtx.Err())
+
+		// The refresh must load a newer version than the snapshot that satisfied the wait.
+		latest.Status.PodInfo.PodIP = "10.0.0.2"
+		require.NoError(t, stored.Status().Update(t.Context(), &latest))
+		require.NoError(t, <-finished)
+		require.ErrorIs(t, requestCtx.Err(), context.DeadlineExceeded)
+		require.Equal(t, latest.ResourceVersion, s.ResourceVersion)
+		require.Equal(t, latest.Status.PodInfo.PodIP, s.Status.PodInfo.PodIP)
+		require.Equal(t, v1alpha1.SandboxRunning, s.Status.Phase)
+	})
 }
 
 func TestSandbox_ResumeConflictsWithActivePauseWaitHook(t *testing.T) {

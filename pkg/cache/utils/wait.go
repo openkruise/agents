@@ -18,6 +18,7 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -38,9 +39,13 @@ const (
 	WaitActionPVCBind    WaitAction = "PVCBind"
 )
 
-// Polling covers missed informer notifications.
+// Polling covers missed informer notifications. Reads still use the informer
+// cache unless the object is missing, so a stale cached object stays stale
+// until the informer catches up.
 var defaultWaitPollInterval = 10 * time.Second
 
+// CheckFunc must be fast and non-blocking: the reconciler calls it while
+// holding the entry lock shared by all waiters on the object.
 type CheckFunc[T client.Object] func(obj T) (bool, error)
 type UpdateFunc[T client.Object] func(ctx context.Context, obj T) (T, error)
 
@@ -201,12 +206,18 @@ func (e *WaitEntry[T]) wait(ctx context.Context, target T, update UpdateFunc[T],
 	if w.completed {
 		return w.object, w.err
 	}
-	if readCtx.Err() == context.Canceled {
-		return zero, context.Canceled
+	cause := context.Cause(readCtx)
+	if cause == timeoutErr {
+		return zero, timeoutErr
 	}
-	if readCtx.Err() == context.DeadlineExceeded && context.Cause(readCtx) != timeoutErr {
-		deadline, _ := readCtx.Deadline()
-		return zero, &WaitNotSatisfiedError{Action: e.Action, Object: timeoutErr.Object, Timeout: max(0, deadline.Sub(start)), cause: context.DeadlineExceeded}
+	// Preserve both the caller's cause and the standard context classification.
+	ctxErr := readCtx.Err()
+	if !errors.Is(cause, ctxErr) {
+		cause = fmt.Errorf("%w: %w", ctxErr, cause)
 	}
-	return zero, timeoutErr
+	if ctxErr == context.Canceled {
+		return zero, cause
+	}
+	deadline, _ := readCtx.Deadline()
+	return zero, &WaitNotSatisfiedError{Action: e.Action, Object: timeoutErr.Object, Timeout: max(0, deadline.Sub(start)), cause: cause}
 }

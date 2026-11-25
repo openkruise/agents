@@ -410,6 +410,7 @@ func TestWaitTask_CoalescesReadRequests(t *testing.T) {
 // on the latter.
 func TestWaitTask_TimeoutClassification(t *testing.T) {
 	const budget = time.Second
+	customCause := errors.New("caller stopped waiting")
 	tests := []struct {
 		name       string
 		timeout    time.Duration
@@ -417,6 +418,7 @@ func TestWaitTask_TimeoutClassification(t *testing.T) {
 		canceled   bool
 		deadline   bool
 		notSat     bool
+		wantCause  bool
 		wantBudget time.Duration
 	}{
 		{
@@ -450,6 +452,30 @@ func TestWaitTask_TimeoutClassification(t *testing.T) {
 			},
 			canceled: true,
 		},
+		{
+			name:    "caller cancels with a cause",
+			timeout: 5 * time.Minute,
+			ctx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithCancelCause(t.Context())
+				cancel(customCause)
+				return ctx
+			},
+			canceled:  true,
+			wantCause: true,
+		},
+		{
+			name:    "caller deadline expires with a cause",
+			timeout: 5 * time.Minute,
+			ctx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeoutCause(t.Context(), budget, customCause)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			deadline:   true,
+			notSat:     true,
+			wantCause:  true,
+			wantBudget: budget,
+		},
 	}
 
 	for _, tt := range tests {
@@ -466,6 +492,7 @@ func TestWaitTask_TimeoutClassification(t *testing.T) {
 				assert.Equal(t, tt.canceled, errors.Is(err, context.Canceled), "context.Canceled match")
 				assert.Equal(t, tt.deadline, errors.Is(err, context.DeadlineExceeded), "context.DeadlineExceeded match")
 				assert.Equal(t, tt.notSat, errors.Is(err, ErrWaitNotSatisfied), "ErrWaitNotSatisfied match")
+				assert.Equal(t, tt.wantCause, errors.Is(err, customCause), "custom cause match")
 				if tt.wantBudget != 0 {
 					var waitErr *WaitNotSatisfiedError
 					require.ErrorAs(t, err, &waitErr)
