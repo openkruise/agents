@@ -94,9 +94,14 @@ func TestSandboxTemplateCRDSchema(t *testing.T) {
 	if !ok {
 		t.Fatal("spec.buildOptions is missing")
 	}
-	for _, name := range []string{"fromTemplate", "steps", "startCommand", "readyCommand", "checkpoint", "imageAcceleration"} {
+	for _, name := range []string{"steps", "startCommand", "readyCommand"} {
 		if _, ok := buildOptions.Properties[name]; !ok {
 			t.Errorf("spec.buildOptions.%s is missing", name)
+		}
+	}
+	for _, name := range []string{"checkpoint", "imageAcceleration"} {
+		if _, ok := spec.Properties[name]; !ok {
+			t.Errorf("spec.%s is missing", name)
 		}
 	}
 	steps := buildOptions.Properties["steps"]
@@ -112,6 +117,9 @@ func TestSandboxTemplateCRDSchema(t *testing.T) {
 		if _, ok := buildOptions.Properties[name]; ok {
 			t.Errorf("legacy spec.buildOptions.%s must not be exposed", name)
 		}
+	}
+	if _, ok := buildOptions.Properties["fromTemplate"]; ok {
+		t.Error("legacy spec.buildOptions.fromTemplate must not be exposed")
 	}
 
 	startup := spec.Properties["startupMode"]
@@ -183,7 +191,6 @@ func TestSandboxTemplateCRDCELRules(t *testing.T) {
 		oldObj  map[string]interface{}
 		wantErr string
 	}{
-		{name: "buildOptions with fromTemplate passes", obj: buildOnly(map[string]interface{}{"fromTemplate": "base"})},
 		{name: "empty buildOptions passes", obj: buildOnly(map[string]interface{}{})},
 		{name: "empty steps passes", obj: buildOnly(map[string]interface{}{"steps": []interface{}{}})},
 		{name: "steps pass", obj: buildOnly(map[string]interface{}{"steps": []interface{}{map[string]interface{}{"command": command}}})},

@@ -45,14 +45,6 @@ const sdk256ImageRecipe = `{
   "readyCmd": "curl -f localhost:8080/health"
 }`
 
-// Captured from e2b Python SDK 2.56.0 Template.to_json() for
-// Template().from_template("python-base").run_cmd("echo derived").
-const sdk256FromTemplateRecipe = `{
-  "steps": [{"type":"RUN","args":["echo derived"],"force":false}],
-  "force": false,
-  "fromTemplate": "python-base"
-}`
-
 // Captured from e2b Python SDK 2.56.0 after calling skip_cache before
 // from_image. Both the whole-build force and the generated step force are
 // accepted, but neither is persisted because this implementation has no
@@ -113,16 +105,6 @@ func TestConvertBuildRecipeSDK256WireFixture(t *testing.T) {
 				require.Len(t, request.Steps, 5)
 				assert.False(t, request.Steps[3].Force)
 				assert.True(t, request.Steps[4].Force)
-			},
-		},
-		{
-			name:    "from template recipe",
-			fixture: sdk256FromTemplateRecipe,
-			expected: &convertedBuild{
-				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
-					FromTemplate: "python-base",
-					Steps:        expectedBuildSteps(agentsv1alpha1.TemplateBuildCommand{Command: "echo derived"}),
-				},
 			},
 		},
 		{
@@ -230,7 +212,7 @@ func TestConvertBuildRecipeFolding(t *testing.T) {
 		{
 			name: "context after the last RUN shapes start and ready",
 			request: models.TemplateBuildStartV2{
-				FromTemplate: strPtr("base"),
+				FromImage: strPtr("example/runtime@sha256:abc"),
 				Steps: []models.TemplateStep{
 					runStep("prepare"),
 					{Type: "WORKDIR", Args: []string{"/srv"}},
@@ -241,9 +223,9 @@ func TestConvertBuildRecipeFolding(t *testing.T) {
 				ReadyCmd: strPtr("curl -f localhost:8080/health"),
 			},
 			expected: &convertedBuild{
+				Image: "example/runtime@sha256:abc",
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
-					FromTemplate: "base",
-					Steps:        expectedBuildSteps(agentsv1alpha1.TemplateBuildCommand{Command: "prepare"}),
+					Steps: expectedBuildSteps(agentsv1alpha1.TemplateBuildCommand{Command: "prepare"}),
 					StartCommand: &agentsv1alpha1.TemplateBuildCommand{
 						Command: "python server.py", User: "agent", Cwd: "/srv", Env: map[string]string{"PORT": "8080"},
 					},
@@ -300,9 +282,9 @@ func TestConvertBuildRecipeRejects(t *testing.T) {
 		wantMessage string
 	}{
 		{
-			name:        "a build base is required",
+			name:        "fromImage is required",
 			request:     models.TemplateBuildStartV2{},
-			wantMessage: "exactly one of fromImage or fromTemplate",
+			wantMessage: "fromImage is required",
 		},
 		{
 			name:        "fromImage must not be empty",
@@ -310,16 +292,14 @@ func TestConvertBuildRecipeRejects(t *testing.T) {
 			wantMessage: "fromImage must not be empty",
 		},
 		{
-			name:        "fromTemplate must not be empty",
-			request:     models.TemplateBuildStartV2{FromTemplate: strPtr("")},
-			wantMessage: "fromTemplate must not be empty",
+			name:        "fromTemplate is not supported",
+			request:     models.TemplateBuildStartV2{FromTemplate: strPtr("python-base")},
+			wantMessage: "fromTemplate is not supported",
 		},
 		{
-			name: "fromImage and fromTemplate are mutually exclusive",
-			request: valid(func(r *models.TemplateBuildStartV2) {
-				r.FromTemplate = strPtr("base")
-			}),
-			wantMessage: "mutually exclusive",
+			name:        "empty fromTemplate is not supported",
+			request:     models.TemplateBuildStartV2{FromTemplate: strPtr("")},
+			wantMessage: "fromTemplate is not supported",
 		},
 		{
 			name: "fromImageRegistry is rejected",

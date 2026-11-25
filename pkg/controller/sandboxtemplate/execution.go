@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -104,33 +103,24 @@ func (r *Reconciler) reconcileExecution(ctx context.Context, version *api.Sandbo
 	if condition != nil && condition.Reason == buildReasonProvisioned {
 		return r.reconcileCapture(ctx, version)
 	}
-	if lease := r.confirmedBuildLease(version, nil); lease != nil {
-		return ctrl.Result{RequeueAfter: r.buildRequeueAfter(version, lease)}, nil
+	if r.hasWorker(version.UID) {
+		return ctrl.Result{RequeueAfter: r.buildRequeueAfter(version)}, nil
 	}
 	if condition != nil {
 		if !time.Now().Before(r.buildDeadline(condition)) {
-			return ctrl.Result{RequeueAfter: retryInterval}, r.failRunningBuild(ctx, version, buildReasonTimeout, "The total build execution budget expired.")
+			return requeueAfter(retryInterval, r.failRunningBuild(ctx, version, buildReasonTimeout, "The total build execution budget expired."))
 		}
-	} else if buildContainer(version.Spec.Template) == nil {
-		return ctrl.Result{RequeueAfter: retryInterval}, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonInvalidDefinition, "The business runtime container is missing.")
+		// A started build without a live worker means the worker was lost to a
+		// leader change or a process restart; steps are not replayed.
+		return requeueAfter(retryInterval, r.failRunningBuild(ctx, version, buildReasonInterrupted, "The build execution worker was lost; steps will not be replayed."))
 	}
-	lease, acquired, err := r.acquireBuildLease(ctx, version, condition != nil)
-	if err != nil {
-		return ctrl.Result{RequeueAfter: retryInterval}, err
+	if buildContainer(version.Spec.Template) == nil {
+		return requeueAfter(retryInterval, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonInvalidDefinition, "The business runtime container is missing."))
 	}
-	if !acquired {
-		if lease != nil {
-			return ctrl.Result{RequeueAfter: r.buildRequeueAfter(version, lease)}, nil
-		}
-		return ctrl.Result{RequeueAfter: retryInterval}, nil
+	if !r.startWorker(version) {
+		return requeueAfter(retryInterval, r.setPhase(ctx, version, api.SandboxTemplatePhaseBuilding))
 	}
-	if condition != nil {
-		return ctrl.Result{RequeueAfter: retryInterval}, r.failRunningBuild(ctx, version, buildReasonInterrupted, "The build execution heartbeat expired; steps will not be replayed.")
-	}
-	if !r.startWorker(version, lease) {
-		return ctrl.Result{RequeueAfter: retryInterval}, r.setPhase(ctx, version, api.SandboxTemplatePhaseBuilding)
-	}
-	return ctrl.Result{RequeueAfter: r.buildRequeueAfter(version, lease)}, nil
+	return ctrl.Result{RequeueAfter: r.buildRequeueAfter(version)}, nil
 }
 
 func (r *Reconciler) buildDeadline(started *metav1.Condition) time.Time {
@@ -141,15 +131,15 @@ func (r *Reconciler) buildDeadline(started *metav1.Condition) time.Time {
 	return started.LastTransitionTime.Add(budget)
 }
 
-func (r *Reconciler) buildRequeueAfter(version *api.SandboxTemplate, lease *coordinationv1.Lease) time.Duration {
-	remaining := lease.Spec.RenewTime.Add(buildLeaseDuration).Sub(r.leaseClock.Now())
+func (r *Reconciler) buildRequeueAfter(version *api.SandboxTemplate) time.Duration {
 	if condition := meta.FindStatusCondition(version.Status.Conditions, buildReadyCondition); condition != nil {
-		remaining = min(remaining, time.Until(r.buildDeadline(condition)))
+		if remaining := time.Until(r.buildDeadline(condition)); remaining <= 0 {
+			return retryInterval
+		} else if remaining < buildWorkerPollInterval {
+			return remaining
+		}
 	}
-	if remaining <= 0 {
-		return retryInterval
-	}
-	return remaining
+	return buildWorkerPollInterval
 }
 
 func (r *Reconciler) failRunningBuild(ctx context.Context, version *api.SandboxTemplate, reason, message string) error {
@@ -164,10 +154,7 @@ func (r *Reconciler) failRunningBuild(ctx context.Context, version *api.SandboxT
 	return r.Status().Patch(ctx, version, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 
-func (r *Reconciler) runExecution(ctx context.Context, version *api.SandboxTemplate, lease *coordinationv1.Lease) error {
-	if _, err := r.currentBuildLease(ctx, version, lease); err != nil {
-		return err
-	}
+func (r *Reconciler) runExecution(ctx context.Context, version *api.SandboxTemplate) error {
 	if err := r.executionStatus(ctx, version, api.SandboxTemplatePhaseBuilding, metav1.ConditionFalse, buildReasonRunning, "Build execution started."); err != nil {
 		if errors.Is(err, errExecutionInterrupted) {
 			finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -182,7 +169,7 @@ func (r *Reconciler) runExecution(ctx context.Context, version *api.SandboxTempl
 	session := &executionSession{versionName: version.Name, versionUID: version.UID, namespace: version.Namespace}
 	err := r.bindExecutionSandbox(executionCtx, session)
 	if err == nil {
-		err = r.execute(executionCtx, session, version, lease)
+		err = r.execute(executionCtx, session, version)
 	}
 	if executionCtx.Err() != nil {
 		err = executionCtx.Err()
@@ -204,12 +191,6 @@ func (r *Reconciler) runExecution(ctx context.Context, version *api.SandboxTempl
 		}
 		return r.executionStatus(finishCtx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, reason, message)
 	}
-	if _, err := r.renewBuildLease(finishCtx, version, lease); err != nil {
-		if errors.Is(err, errExecutionInterrupted) {
-			return r.executionStatus(finishCtx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonInterrupted, "The build execution holder changed before result publication.")
-		}
-		return err
-	}
 	// Pending stages stay False so capture retains the original build deadline.
 	return r.executionStatus(finishCtx, version, api.SandboxTemplatePhaseBuilding, metav1.ConditionFalse, buildReasonProvisioned, "All build steps completed; artifact capture is pending.")
 }
@@ -223,11 +204,11 @@ func (r *Reconciler) runExecution(ctx context.Context, version *api.SandboxTempl
 //	capture done -- Captured --> Ready (terminal)
 //
 // A terminal phase at the observed generation is immutable: another write
-// reports it back as done, except Running, which means another replica
+// reports it back as done, except Running, which means another worker
 // restarted a finished build and fails as Interrupted. A write whose last
 // observed condition showed a running execution also accepts a Provisioned
-// condition that another replica already published, so replicas converge
-// instead of overwriting each other.
+// condition that another worker already published, so overlapping workers
+// converge instead of overwriting each other.
 func (r *Reconciler) executionStatus(ctx context.Context, version *api.SandboxTemplate, phase api.SandboxTemplateBuildPhase, status metav1.ConditionStatus, reason, message string) error {
 	expected := meta.FindStatusCondition(version.Status.Conditions, buildReadyCondition)
 	pendingExecution := expected != nil && expected.Status == metav1.ConditionFalse && expected.Reason != buildReasonProvisioned
@@ -248,7 +229,7 @@ func (r *Reconciler) executionStatus(ctx context.Context, version *api.SandboxTe
 		}
 		condition := meta.FindStatusCondition(current.Status.Conditions, buildReadyCondition)
 		// Running is the first write only: an existing condition or a
-		// deleting Version means another replica already owns this build.
+		// deleting Version means another worker already owns this build.
 		if reason == buildReasonRunning && (condition != nil || current.DeletionTimestamp != nil) {
 			*version = *current
 			return false, errExecutionInterrupted
@@ -279,7 +260,7 @@ func buildTerminal(version *api.SandboxTemplate) bool {
 		(version.Status.Phase == api.SandboxTemplatePhaseReady || version.Status.Phase == api.SandboxTemplatePhaseFailed)
 }
 
-// supersededByProvisioned reports whether another replica already published
+// supersededByProvisioned reports whether another worker already published
 // the Provisioned step that this write was about to publish.
 func supersededByProvisioned(condition *metav1.Condition) bool {
 	return condition != nil && condition.Reason == buildReasonProvisioned
@@ -503,14 +484,11 @@ func (r *Reconciler) recordExecutionIdentity(ctx context.Context, session *execu
 // business image on the build Sandbox, reusing an existing token and
 // retrying on conflict. It returns the bound Sandbox and the effective
 // token.
-func (r *Reconciler) bindBuildRuntime(ctx context.Context, session *executionSession, version *api.SandboxTemplate, lease *coordinationv1.Lease, token string) (*api.Sandbox, string, error) {
+func (r *Reconciler) bindBuildRuntime(ctx context.Context, session *executionSession, version *api.SandboxTemplate, token string) (*api.Sandbox, string, error) {
 	var box *api.Sandbox
 	err := wait.ExponentialBackoffWithContext(ctx, retry.DefaultBackoff, func(ctx context.Context) (bool, error) {
 		current, err := r.readExecutionSandbox(ctx, session)
 		if err != nil {
-			return false, err
-		}
-		if _, err := r.currentBuildLease(ctx, version, lease); err != nil {
 			return false, err
 		}
 		container, definition := buildContainer(current.Spec.Template), buildContainer(version.Spec.Template)
@@ -548,19 +526,16 @@ func (r *Reconciler) bindBuildRuntime(ctx context.Context, session *executionSes
 	return box, token, nil
 }
 
-func (r *Reconciler) execute(ctx context.Context, session *executionSession, version *api.SandboxTemplate, lease *coordinationv1.Lease) error {
+func (r *Reconciler) execute(ctx context.Context, session *executionSession, version *api.SandboxTemplate) error {
 	box, err := r.waitExecutionSandbox(ctx, session, "", "")
 	if err != nil {
-		return err
-	}
-	if _, err := r.currentBuildLease(ctx, version, lease); err != nil {
 		return err
 	}
 	if err := r.recordExecutionIdentity(ctx, session); err != nil {
 		return err
 	}
 	token := runtimeconfig.NewDefaultAccessToken()
-	box, token, err = r.bindBuildRuntime(ctx, session, version, lease, token)
+	box, token, err = r.bindBuildRuntime(ctx, session, version, token)
 	if err != nil {
 		return err
 	}
@@ -584,9 +559,6 @@ func (r *Reconciler) execute(ctx context.Context, session *executionSession, ver
 	refresh := func(ctx context.Context) (*api.Sandbox, error) {
 		current, err := r.waitExecutionSandbox(ctx, session, image, revision)
 		if err != nil {
-			return nil, err
-		}
-		if _, err := r.currentBuildLease(ctx, version, lease); err != nil {
 			return nil, err
 		}
 		return current, nil
@@ -651,6 +623,13 @@ type buildStepError struct {
 func (e *buildStepError) Error() string { return fmt.Sprintf("build step %d failed", e.index+1) }
 func (e *buildStepError) Unwrap() error { return e.cause }
 
+// buildCheckpointKey is the deterministic key of the Version's capture
+// Checkpoint: reconcileCapture creates it and the failed-build cleanup
+// removes it.
+func buildCheckpointKey(version *api.SandboxTemplate) client.ObjectKey {
+	return client.ObjectKey{Namespace: version.Namespace, Name: version.Name + "-checkpoint"}
+}
+
 // reconcileCapture runs the artifact-capture tail of the build: it verifies
 // the execution identity, snapshots the provisioned Sandbox, and either
 // marks the Version Ready directly or creates and tracks the Version-owned
@@ -658,11 +637,11 @@ func (e *buildStepError) Unwrap() error { return e.cause }
 func (r *Reconciler) reconcileCapture(ctx context.Context, version *api.SandboxTemplate) (ctrl.Result, error) {
 	started := meta.FindStatusCondition(version.Status.Conditions, buildReadyCondition)
 	if started == nil {
-		return ctrl.Result{RequeueAfter: retryInterval}, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonInterrupted, "Build execution progress is missing.")
+		return requeueAfter(retryInterval, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonInterrupted, "Build execution progress is missing."))
 	}
 	deadline := r.buildDeadline(started)
 	if !time.Now().Before(deadline) {
-		return ctrl.Result{RequeueAfter: retryInterval}, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonTimeout, "The total build and capture budget expired.")
+		return requeueAfter(retryInterval, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonTimeout, "The total build and capture budget expired."))
 	}
 	captureCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
@@ -675,18 +654,18 @@ func (r *Reconciler) reconcileCapture(ctx context.Context, version *api.SandboxT
 	}
 	definition := buildContainer(version.Spec.Template)
 	if definition == nil {
-		return ctrl.Result{RequeueAfter: retryInterval}, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonCaptureConflict, "The business runtime definition is missing.")
+		return requeueAfter(retryInterval, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonCaptureConflict, "The business runtime definition is missing."))
 	}
 	session := &executionSession{namespace: version.Namespace, versionName: version.Name, versionUID: version.UID, sandboxUID: identity.SandboxUID, podUID: identity.PodUID, containerID: identity.ContainerID}
 	box, err := r.readExecutionSandbox(captureCtx, session)
 	if err != nil {
 		if errors.Is(err, errExecutionInterrupted) || apierrors.IsNotFound(err) {
-			return ctrl.Result{RequeueAfter: retryInterval}, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonInterrupted, "The provisioned Sandbox was lost before capture.")
+			return requeueAfter(retryInterval, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonInterrupted, "The provisioned Sandbox was lost before capture."))
 		}
 		return ctrl.Result{}, err
 	}
 	if buildContainer(box.Spec.Template) == nil {
-		return ctrl.Result{RequeueAfter: retryInterval}, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonCaptureConflict, "The provisioned business runtime is missing.")
+		return requeueAfter(retryInterval, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonCaptureConflict, "The provisioned business runtime is missing."))
 	}
 	revisionData, err := json.Marshal(*box.Spec.Template)
 	if err != nil {
@@ -695,20 +674,19 @@ func (r *Reconciler) reconcileCapture(ctx context.Context, version *api.SandboxT
 	box, ready, err := r.executionSnapshot(captureCtx, session, definition.Image, utils.HashData(revisionData))
 	if err != nil {
 		if errors.Is(err, errExecutionInterrupted) {
-			return ctrl.Result{RequeueAfter: retryInterval}, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonInterrupted, "The execution Pod or container was replaced before capture.")
+			return requeueAfter(retryInterval, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonInterrupted, "The execution Pod or container was replaced before capture."))
 		}
 		return ctrl.Result{}, err
 	}
 	if !ready {
 		return ctrl.Result{RequeueAfter: retryInterval}, nil
 	}
-	if version.Spec.BuildOptions == nil || version.Spec.BuildOptions.Checkpoint == nil || !version.Spec.BuildOptions.Checkpoint.Enable {
-		return ctrl.Result{RequeueAfter: retryInterval}, r.executionStatus(ctx, version, api.SandboxTemplatePhaseReady, metav1.ConditionTrue, buildReasonProvisioned, "All declared build work completed.")
+	if version.Spec.Checkpoint == nil || !version.Spec.Checkpoint.Enable {
+		return requeueAfter(retryInterval, r.executionStatus(ctx, version, api.SandboxTemplatePhaseReady, metav1.ConditionTrue, buildReasonProvisioned, "All declared build work completed."))
 	}
-	name := version.Name + "-checkpoint"
-	key := client.ObjectKey{Namespace: version.Namespace, Name: name}
+	key := buildCheckpointKey(version)
 	expected := &api.Checkpoint{
-		ObjectMeta: metav1.ObjectMeta{Namespace: version.Namespace, Name: name, Labels: maps.Clone(version.Labels), Annotations: map[string]string{api.AnnotationInitRuntimeRequest: box.Annotations[api.AnnotationInitRuntimeRequest]},
+		ObjectMeta: metav1.ObjectMeta{Namespace: version.Namespace, Name: key.Name, Labels: maps.Clone(version.Labels), Annotations: map[string]string{api.AnnotationInitRuntimeRequest: box.Annotations[api.AnnotationInitRuntimeRequest]},
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: "SandboxTemplate", Name: version.Name, UID: version.UID, Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)}}},
 		Spec: api.CheckpointSpec{SandboxName: ptr.To(box.Name), PodName: ptr.To(box.Name), Containers: []string{buildContainerName}, KeepRunning: ptr.To(true), PersistentContents: slices.Clone(version.Spec.PersistentContents)},
 	}
@@ -727,17 +705,17 @@ func (r *Reconciler) reconcileCapture(ctx context.Context, version *api.SandboxT
 		}
 	}
 	if !ownedByVersion(checkpoint, version) || checkpoint.DeletionTimestamp != nil || !equality.Semantic.DeepEqual(checkpoint.Spec, expected.Spec) || checkpoint.Annotations[api.AnnotationInitRuntimeRequest] != expected.Annotations[api.AnnotationInitRuntimeRequest] {
-		return ctrl.Result{RequeueAfter: retryInterval}, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonCaptureConflict, "The capture resource identity or scope changed.")
+		return requeueAfter(retryInterval, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonCaptureConflict, "The capture resource identity or scope changed."))
 	}
 	if checkpoint.Status.ObservedGeneration != checkpoint.Generation {
 		return ctrl.Result{RequeueAfter: retryInterval}, nil
 	}
 	switch checkpoint.Status.Phase {
 	case api.CheckpointFailed:
-		return ctrl.Result{RequeueAfter: retryInterval}, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonCaptureFailed, "The backend could not capture build artifacts.")
+		return requeueAfter(retryInterval, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonCaptureFailed, "The backend could not capture build artifacts."))
 	case api.CheckpointSucceeded:
 		if checkpoint.Status.CheckpointId == "" {
-			return ctrl.Result{RequeueAfter: retryInterval}, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonCaptureFailed, "The completed checkpoint has no backend identity.")
+			return requeueAfter(retryInterval, r.executionStatus(ctx, version, api.SandboxTemplatePhaseFailed, metav1.ConditionFalse, buildReasonCaptureFailed, "The completed checkpoint has no backend identity."))
 		}
 		before := version.DeepCopy()
 		version.Status.Artifacts = []api.SandboxTemplateArtifact{{Type: api.SandboxTemplateArtifactCheckpoint, Name: checkpoint.Name, Value: checkpoint.Status.CheckpointId}}

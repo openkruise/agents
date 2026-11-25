@@ -180,25 +180,8 @@ func validateDraftSpec(spec agentsv1alpha1.SandboxTemplateSpec) field.ErrorList 
 }
 
 func validateBuildOptions(spec agentsv1alpha1.SandboxTemplateSpec) field.ErrorList {
-	options := spec.BuildOptions
-	if options == nil {
-		return nil
-	}
-	p := field.NewPath("spec", "buildOptions")
 	var errs field.ErrorList
-	if options.StartCommand != nil {
-		errs = append(errs, field.Forbidden(p.Child("startCommand"), "not supported"))
-	}
-	if options.ReadyCommand != nil {
-		errs = append(errs, field.Forbidden(p.Child("readyCommand"), "not supported"))
-	}
-	if options.FromTemplate != "" {
-		errs = append(errs, field.Forbidden(p.Child("fromTemplate"), "not supported"))
-	}
-	if len(options.Steps) > 0 && (options.Checkpoint == nil || !options.Checkpoint.Enable) {
-		errs = append(errs, field.Forbidden(p.Child("checkpoint"), "steps require artifact capture"))
-	}
-	if options.Checkpoint != nil && options.Checkpoint.Enable {
+	if spec.Checkpoint != nil && spec.Checkpoint.Enable {
 		if len(spec.PersistentContents) == 0 {
 			errs = append(errs, field.Required(field.NewPath("spec", "persistentContents"), "artifact capture requires a non-empty scope"))
 		}
@@ -207,6 +190,20 @@ func validateBuildOptions(spec agentsv1alpha1.SandboxTemplateSpec) field.ErrorLi
 				errs = append(errs, field.NotSupported(field.NewPath("spec", "persistentContents").Index(i), content, []string{agentsv1alpha1.PersistentContentFilesystem, agentsv1alpha1.PersistentContentMemory}))
 			}
 		}
+	}
+	options := spec.BuildOptions
+	if options == nil {
+		return errs
+	}
+	p := field.NewPath("spec", "buildOptions")
+	if options.StartCommand != nil {
+		errs = append(errs, field.Forbidden(p.Child("startCommand"), "not supported"))
+	}
+	if options.ReadyCommand != nil {
+		errs = append(errs, field.Forbidden(p.Child("readyCommand"), "not supported"))
+	}
+	if len(options.Steps) > 0 && (spec.Checkpoint == nil || !spec.Checkpoint.Enable) {
+		errs = append(errs, field.Forbidden(field.NewPath("spec", "checkpoint"), "steps require artifact capture"))
 	}
 	for i, step := range options.Steps {
 		stepPath := p.Child("steps").Index(i)

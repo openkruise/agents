@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
@@ -30,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
-	"k8s.io/kubernetes/pkg/util/parsers"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -83,8 +81,7 @@ type InPlaceUpdateState struct {
 // InPlaceUpdateContainerStatus records the statuses of the container that are mainly used
 // to determine whether the InPlaceUpdate is completed.
 type InPlaceUpdateContainerStatus struct {
-	ImageID     string `json:"imageID,omitempty"`
-	ContainerID string `json:"containerID,omitempty"`
+	ImageID string `json:"imageID,omitempty"`
 }
 
 func GetPodInPlaceUpdateState(pod *corev1.Pod) (*InPlaceUpdateState, error) {
@@ -160,10 +157,10 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		obj := box.Spec.Template.Spec.Containers[i]
 		originContainers[obj.Name] = obj
 	}
-	// container.name -> previous identity
-	originStatus := map[string]InPlaceUpdateContainerStatus{}
+	// container.name -> imageId
+	originStatus := map[string]string{}
 	for _, status := range pod.Status.ContainerStatuses {
-		originStatus[status.Name] = InPlaceUpdateContainerStatus{ImageID: status.ImageID, ContainerID: status.ContainerID}
+		originStatus[status.Name] = status.ImageID
 	}
 
 	if box.Spec.Template != nil {
@@ -195,7 +192,8 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		patchContainer.Image = origin.Image
 		patchSpec.Containers = append(patchSpec.Containers, patchContainer)
 		state.UpdateImages = true
-		state.LastContainerStatuses[container.Name] = originStatus[container.Name]
+		imageId := originStatus[container.Name]
+		state.LastContainerStatuses[container.Name] = InPlaceUpdateContainerStatus{ImageID: imageId}
 	}
 	annotationsPatch := map[string]string{}
 	if state.UpdateImages || state.UpdateResources {
@@ -592,46 +590,20 @@ func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod) (bool, error
 	return true, nil
 }
 
-// Equivalent image references can replace a container without changing its ImageID.
+// isPodImageUpdateCompleted checks whether image updates have been applied by comparing
+// each container's current ImageID against the ImageID recorded before the update.
+// Returns true if all containers have a new (different) ImageID.
 func isPodImageUpdateCompleted(pod *corev1.Pod, state *InPlaceUpdateState) bool {
-	current := make(map[string]corev1.ContainerStatus, len(pod.Status.ContainerStatuses))
+	currentImageIDs := make(map[string]string, len(pod.Status.ContainerStatuses))
 	for _, status := range pod.Status.ContainerStatuses {
-		current[status.Name] = status
+		currentImageIDs[status.Name] = status.ImageID
 	}
-	for containerName, last := range state.LastContainerStatuses {
-		status, ok := current[containerName]
-		if !ok {
-			return false
-		}
-		if status.ImageID != last.ImageID {
-			continue
-		}
-		if last.ContainerID == "" || status.ContainerID == "" || status.ContainerID == last.ContainerID || status.ImageID == "" || !containerImageMatches(pod, status) {
+	for name, lastStatus := range state.LastContainerStatuses {
+		if curID, ok := currentImageIDs[name]; !ok || curID == lastStatus.ImageID {
 			return false
 		}
 	}
 	return true
-}
-
-func containerImageMatches(pod *corev1.Pod, status corev1.ContainerStatus) bool {
-	for _, container := range pod.Spec.Containers {
-		if container.Name != status.Name {
-			continue
-		}
-		if container.Image == status.Image {
-			return true
-		}
-		repository, tag, digest, err := parsers.ParseImageName(container.Image)
-		if err != nil {
-			return false
-		}
-		if digest != "" {
-			return strings.HasSuffix(status.ImageID, digest)
-		}
-		actualRepository, actualTag, _, err := parsers.ParseImageName(status.Image)
-		return err == nil && actualRepository == repository && actualTag == tag
-	}
-	return false
 }
 
 // isPodResourceResizeCompleted checks whether the in-place resource resize has been

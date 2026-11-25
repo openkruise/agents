@@ -22,8 +22,6 @@ import (
 )
 
 const (
-	SandboxTemplateFinalizer = "agents.kruise.io/sandbox-template"
-
 	// SandboxTemplateBackendKubernetes selects the Kubernetes sandboxcr
 	// backend. Its public wire value is "k8s".
 	SandboxTemplateBackendKubernetes = "k8s"
@@ -61,6 +59,14 @@ type SandboxTemplateSpec struct {
 	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
 	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`
+
+	// Checkpoint captures the completed build as a restorable artifact.
+	// +optional
+	Checkpoint *CheckpointStrategy `json:"checkpoint,omitempty"`
+
+	// ImageAcceleration requests best-effort image pre-warming.
+	// +optional
+	ImageAcceleration *ImageAccelerationStrategy `json:"imageAcceleration,omitempty"`
 
 	// Runtimes - Runtime configuration for sandbox object
 	// +optional
@@ -112,10 +118,6 @@ type SandboxTemplateSpec struct {
 // SandboxTemplateBuildOptions is the immutable declarative input of one
 // Template Build.
 type SandboxTemplateBuildOptions struct {
-	// FromTemplate names an existing logical Template used as the build base.
-	// +optional
-	FromTemplate string `json:"fromTemplate,omitempty"`
-
 	// Steps is the ordered provisioning sequence.
 	// +listType=atomic
 	// +optional
@@ -128,14 +130,6 @@ type SandboxTemplateBuildOptions struct {
 	// ReadyCommand checks business process readiness before capture.
 	// +optional
 	ReadyCommand *TemplateBuildCommand `json:"readyCommand,omitempty"`
-
-	// Checkpoint captures the completed build as a restorable artifact.
-	// +optional
-	Checkpoint *CheckpointStrategy `json:"checkpoint,omitempty"`
-
-	// ImageAcceleration requests best-effort image pre-warming.
-	// +optional
-	ImageAcceleration *ImageAccelerationStrategy `json:"imageAcceleration,omitempty"`
 }
 
 // CheckpointStrategy configures artifact capture. Future options such as

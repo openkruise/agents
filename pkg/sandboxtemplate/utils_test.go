@@ -70,7 +70,8 @@ func TestTemplateDefinitionState(t *testing.T) {
 		}},
 		{name: "Ready reader trusts observed status", static: true, change: func(v *api.SandboxTemplate) {
 			v.Spec.Template.Spec.Containers[0].Image = ""
-			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}, Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo build"}}}}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo build"}}}}
+			v.Spec.Checkpoint = &api.CheckpointStrategy{Enable: true}
 		}},
 		{name: "missing Pod template is not submitted", change: func(v *api.SandboxTemplate) {
 			v.Spec.Template = nil

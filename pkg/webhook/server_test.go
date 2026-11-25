@@ -36,5 +36,5 @@ func TestHandlerGettersRegisterUniquePaths(t *testing.T) {
 		require.False(t, paths[path], "duplicate webhook path %s", path)
 		paths[path] = true
 	}
-	require.Contains(t, paths, "/default-sandbox")
+	require.Contains(t, paths, "/default-sandboxset")
 }

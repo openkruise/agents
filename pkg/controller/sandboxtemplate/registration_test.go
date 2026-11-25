@@ -27,7 +27,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -78,14 +77,12 @@ func TestBuildControllerRegistration(t *testing.T) {
 	require.NoError(t, client.NewRegistry(config))
 	s := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(s))
-	require.NoError(t, coordinationv1.AddToScheme(s))
 	require.NoError(t, api.AddToScheme(s))
-	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{api.GroupVersion, corev1.SchemeGroupVersion, coordinationv1.SchemeGroupVersion})
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{api.GroupVersion, corev1.SchemeGroupVersion})
 	for _, kind := range []string{"SandboxTemplate", "Sandbox", "Checkpoint"} {
 		mapper.Add(api.GroupVersion.WithKind(kind), meta.RESTScopeNamespace)
 	}
 	mapper.Add(corev1.SchemeGroupVersion.WithKind("Pod"), meta.RESTScopeNamespace)
-	mapper.Add(coordinationv1.SchemeGroupVersion.WithKind("Lease"), meta.RESTScopeNamespace)
 	mgr, err := ctrl.NewManager(config, ctrl.Options{Scheme: s, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0", MapperProvider: func(*rest.Config, *http.Client) (meta.RESTMapper, error) { return mapper, nil }})
 	require.NoError(t, err)
 	require.NoError(t, Add(mgr, Options{}))

@@ -52,6 +52,7 @@ func TestExecutionIdentityFences(t *testing.T) {
 		{name: "replaced Version", mutate: func(v *api.SandboxTemplate, _ *api.Sandbox) { v.UID = "replacement" }},
 		{name: "deleting Version", mutate: func(v *api.SandboxTemplate, _ *api.Sandbox) {
 			v.DeletionTimestamp = ptr.To(metav1.Now())
+			v.Finalizers = []string{"test/retain"}
 		}},
 		{name: "failed Version", mutate: func(v *api.SandboxTemplate, _ *api.Sandbox) {
 			v.Status.Phase = api.SandboxTemplatePhaseFailed
@@ -220,10 +221,6 @@ func TestBuildCleanupRetainsPublishedArtifacts(t *testing.T) {
 			}
 			for i := 0; i < 3; i++ {
 				_, err := r.reconcileBuildCleanup(t.Context(), version)
-				if tt.wrongOwner {
-					require.ErrorContains(t, err, "ownership changed")
-					break
-				}
 				if tt.replaceDuringDelete {
 					require.True(t, apierrors.IsConflict(err), "%v", err)
 					break
@@ -254,11 +251,9 @@ func TestBuildCleanupRetainsPublishedArtifacts(t *testing.T) {
 func TestMissingVersionRequestStopsOnlyTargetWorker(t *testing.T) {
 	version := modelFixtures()
 	r := modelReconciler(t, version)
-	require.False(t, r.NeedLeaderElection())
+	require.True(t, r.NeedLeaderElection())
 	current := &api.SandboxTemplate{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
-	current.Finalizers = nil
-	require.NoError(t, r.Update(t.Context(), current))
 	require.NoError(t, r.Delete(t.Context(), current))
 	targetCtx, cancelTarget := context.WithCancel(t.Context())
 	defer cancelTarget()
@@ -285,6 +280,7 @@ func TestExecutionIdentityBinding(t *testing.T) {
 		{name: "replaced Version", change: func(v *api.SandboxTemplate, _ *api.Sandbox) { v.UID = "replacement" }},
 		{name: "deleting Version", change: func(v *api.SandboxTemplate, _ *api.Sandbox) {
 			v.DeletionTimestamp = ptr.To(metav1.Now())
+			v.Finalizers = []string{"test/retain"}
 		}},
 		{name: "absent logical name", change: func(v *api.SandboxTemplate, _ *api.Sandbox) { v.Labels = nil }},
 		{name: "empty logical name", change: func(v *api.SandboxTemplate, _ *api.Sandbox) { v.Labels[api.LabelTemplateName] = "" }},
@@ -325,7 +321,10 @@ func TestExecutionIdentityRecording(t *testing.T) {
 		}},
 		{name: "metadata conflict preserves edit", conflict: true, writes: 2},
 		{name: "Version replaced", interrupt: true, change: func(v *api.SandboxTemplate, _ *executionIdentity) { v.UID = "replacement" }},
-		{name: "Version deleting", interrupt: true, change: func(v *api.SandboxTemplate, _ *executionIdentity) { v.DeletionTimestamp = ptr.To(metav1.Now()) }},
+		{name: "Version deleting", interrupt: true, change: func(v *api.SandboxTemplate, _ *executionIdentity) {
+			v.DeletionTimestamp = ptr.To(metav1.Now())
+			v.Finalizers = []string{"test/retain"}
+		}},
 		{name: "Version failed", interrupt: true, change: func(v *api.SandboxTemplate, _ *executionIdentity) { v.Status.Phase = api.SandboxTemplatePhaseFailed }},
 		{name: "absent logical name", interrupt: true, change: func(v *api.SandboxTemplate, _ *executionIdentity) { v.Labels = nil }},
 		{name: "empty logical name", interrupt: true, change: func(v *api.SandboxTemplate, _ *executionIdentity) { v.Labels[api.LabelTemplateName] = "" }},
@@ -446,19 +445,9 @@ func TestControllerStorageFailures(t *testing.T) {
 			_, err := r.reconcileBuildCleanup(t.Context(), v)
 			return err
 		}},
-		{name: "deletion", operation: "delete", invoke: func(r *Reconciler, v *api.SandboxTemplate, _ *api.Sandbox) error {
-			_, err := r.cleanupVersion(t.Context(), v)
+		{name: "draft expiry deletion", operation: "delete", invoke: func(r *Reconciler, v *api.SandboxTemplate, _ *api.Sandbox) error {
+			_, err := r.requestDeletion(t.Context(), v, metav1.DeletePropagationForeground)
 			return err
-		}},
-		{name: "finalizer patch", operation: "patch", invoke: func(r *Reconciler, v *api.SandboxTemplate, _ *api.Sandbox) error {
-			v.Finalizers = nil
-			return r.ensureVersionFinalizer(t.Context(), v)
-		}},
-		{name: "Version finalizer removal patch", operation: "patch", invoke: func(r *Reconciler, v *api.SandboxTemplate, _ *api.Sandbox) error {
-			return r.finishCleanup(t.Context(), v, api.SandboxTemplateFinalizer)
-		}},
-		{name: "Version foreground deletion", operation: "delete", invoke: func(r *Reconciler, v *api.SandboxTemplate, _ *api.Sandbox) error {
-			return r.finishCleanup(t.Context(), v, api.SandboxTemplateFinalizer)
 		}},
 		{name: "checkpoint creation", operation: "create", invoke: func(r *Reconciler, v *api.SandboxTemplate, _ *api.Sandbox) error {
 			_, err := r.reconcileCapture(t.Context(), v)

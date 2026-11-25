@@ -18,7 +18,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -1024,42 +1023,6 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchCompletedSucceeded(t *testing.T)
 	}
 	if !found {
 		t.Error("InplaceUpdate Succeeded condition not found")
-	}
-}
-
-func TestHandleInPlaceUpdateCommon_SameImageContainerReplacement(t *testing.T) {
-	for _, tt := range []struct {
-		name        string
-		containerID string
-		completed   bool
-	}{
-		{name: "same container remains pending", containerID: "containerd://old"},
-		{name: "replacement completes equivalent reference", containerID: "containerd://new", completed: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			podSpec := corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "example.com/runtime:tag"}}}
-			box := buildMatchingHashBox("sandbox", "default", podSpec)
-			state, err := json.Marshal(inplaceupdate.InPlaceUpdateState{UpdateImages: true, LastContainerStatuses: map[string]inplaceupdate.InPlaceUpdateContainerStatus{"main": {ImageID: "sha256:same", ContainerID: "containerd://old"}}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "default", Labels: map[string]string{agentsv1alpha1.PodLabelTemplateHash: "target"}, Annotations: map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: string(state)}},
-				Spec:       podSpec,
-				Status:     corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "main", Image: "example.com/runtime:tag", ImageID: "sha256:same", ContainerID: tt.containerID}}},
-			}
-			status := &agentsv1alpha1.SandboxStatus{UpdateRevision: "target"}
-			handler := &MockInPlaceUpdateHandler{control: inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc), recorder: createTestRecorder(), logger: logr.Discard()}
-			completed, err := handleInPlaceUpdateCommon(t.Context(), handler, pod, box, status)
-			if err != nil || completed != tt.completed {
-				t.Fatalf("completed=%v, want=%v, err=%v", completed, tt.completed, err)
-			}
-			if tt.completed {
-				if len(status.Conditions) != 1 || status.Conditions[0].Reason != agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded || status.Conditions[0].Status != metav1.ConditionTrue {
-					t.Fatalf("expected successful in-place condition, got %+v", status.Conditions)
-				}
-			}
-		})
 	}
 }
 

@@ -133,8 +133,7 @@ func TestBuildCOPYRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestBuildCOPYFilesystem(t *testing.T) {
-	binary := ""
+func gnuTarBinary() string {
 	for _, name := range []string{"gtar", "tar"} {
 		candidate, err := exec.LookPath(name)
 		if err != nil {
@@ -142,10 +141,28 @@ func TestBuildCOPYFilesystem(t *testing.T) {
 		}
 		version, err := exec.Command(candidate, "--version").Output()
 		if err == nil && strings.Contains(string(version), "GNU tar") {
-			binary = candidate
-			break
+			return candidate
 		}
 	}
+	return ""
+}
+
+func writeCopyArchive(t *testing.T, archive string) {
+	t.Helper()
+	file, err := os.Create(archive)
+	require.NoError(t, err)
+	compressed := gzip.NewWriter(file)
+	writer := tar.NewWriter(compressed)
+	require.NoError(t, writer.WriteHeader(&tar.Header{Name: "tree/file", Mode: 0644, Size: 7}))
+	_, err = writer.Write([]byte("content"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, compressed.Close())
+	require.NoError(t, file.Close())
+}
+
+func TestBuildCOPYFilesystem(t *testing.T) {
+	binary := gnuTarBinary()
 	if binary == "" {
 		if runtime.GOOS == "linux" {
 			t.Fatal("GNU tar is required by the runtime COPY script")
@@ -217,6 +234,46 @@ func TestBuildCOPYFilesystem(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, "content", string(data))
 			}
+		})
+	}
+}
+
+func TestBuildCOPYOwnerNormalization(t *testing.T) {
+	binary := gnuTarBinary()
+	if binary == "" {
+		if runtime.GOOS == "linux" {
+			t.Fatal("GNU tar is required by the runtime COPY script")
+		}
+		t.Skip("COPY owner verification requires GNU tar")
+	}
+	for _, tt := range []struct {
+		user     string
+		expected string
+	}{
+		{user: "1000", expected: "1000:1000"},
+		{user: "1000:", expected: "1000:1000"},
+		{user: "app", expected: "app:543"},
+		{user: "app:", expected: "app:543"},
+		{user: "app:group", expected: "app:group"},
+		{user: "1000:1001", expected: "1000:1001"},
+	} {
+		t.Run(tt.user, func(t *testing.T) {
+			root := t.TempDir()
+			archive := filepath.Join(root, "archive.tar.gz")
+			writeCopyArchive(t, archive)
+			destination := filepath.Join(root, "destination")
+			hash := strings.Repeat("a", 64)
+			command, err := materializeCommand(&api.TemplateBuildCopy{FilesHash: hash, Src: "tree/file", Dest: destination, User: tt.user})
+			require.NoError(t, err)
+			command.Command = strings.Replace(command.Command, shellQuote("/blobs/"+hash+".tar.gz"), shellQuote(archive), 1)
+			command.Command = strings.ReplaceAll(command.Command, "tar -", shellQuote(binary)+" -")
+			// chown and id are stubbed so ownership resolution is asserted
+			// without privileges: the numeric path must not consult id, and
+			// the named path resolves through the stubbed primary group.
+			command.Command = "chown() { printf 'CHOWN %s\\n' \"$*\"; }\nid() { printf '543\\n'; }\n" + command.Command
+			output, err := exec.CommandContext(t.Context(), "/bin/bash", "-c", command.Command).CombinedOutput()
+			require.NoError(t, err, string(output))
+			require.Contains(t, string(output), "CHOWN -- "+tt.expected+" ")
 		})
 	}
 }

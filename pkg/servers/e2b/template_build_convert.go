@@ -30,8 +30,8 @@ import (
 	"github.com/openkruise/agents/pkg/servers/web"
 )
 
-// convertedBuild is the protocol-neutral recipe submitted to Manager. Exactly
-// one of Image and BuildOptions.FromTemplate is non-empty.
+// convertedBuild is the protocol-neutral recipe submitted to Manager. Image
+// is always non-empty.
 type convertedBuild struct {
 	Image        string
 	BuildOptions agentsv1alpha1.SandboxTemplateBuildOptions
@@ -59,17 +59,12 @@ func convertBuildRecipe(req models.TemplateBuildStartV2) (*convertedBuild, *web.
 		return nil, badRequest("fromImageRegistry is not supported")
 	}
 
-	image, fromTemplate, apiErr := convertBuildBase(req.FromImage, req.FromTemplate)
+	image, apiErr := convertBuildBase(req.FromImage, req.FromTemplate)
 	if apiErr != nil {
 		return nil, apiErr
 	}
 
-	converted := &convertedBuild{
-		Image: image,
-		BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
-			FromTemplate: fromTemplate,
-		},
-	}
+	converted := &convertedBuild{Image: image}
 	cursor := &buildCursor{env: map[string]string{}}
 	for i, step := range req.Steps {
 		switch step.Type {
@@ -119,23 +114,17 @@ func convertBuildRecipe(req models.TemplateBuildStartV2) (*convertedBuild, *web.
 	return converted, nil
 }
 
-func convertBuildBase(fromImage, fromTemplate *string) (string, string, *web.ApiError) {
+func convertBuildBase(fromImage, fromTemplate *string) (string, *web.ApiError) {
+	if fromTemplate != nil {
+		return "", badRequest("fromTemplate is not supported")
+	}
 	if fromImage != nil && strings.TrimSpace(*fromImage) == "" {
-		return "", "", badRequest("fromImage must not be empty")
+		return "", badRequest("fromImage must not be empty")
 	}
-	if fromTemplate != nil && strings.TrimSpace(*fromTemplate) == "" {
-		return "", "", badRequest("fromTemplate must not be empty")
+	if fromImage == nil {
+		return "", badRequest("fromImage is required")
 	}
-	if fromImage != nil && fromTemplate != nil {
-		return "", "", badRequest("fromImage and fromTemplate are mutually exclusive")
-	}
-	if fromImage == nil && fromTemplate == nil {
-		return "", "", badRequest("exactly one of fromImage or fromTemplate is required")
-	}
-	if fromImage != nil {
-		return *fromImage, "", nil
-	}
-	return "", *fromTemplate, nil
+	return *fromImage, nil
 }
 
 func convertLifecycleCommand(field string, command *string, cursor *buildCursor) (*agentsv1alpha1.TemplateBuildCommand, *web.ApiError) {

@@ -30,7 +30,6 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/stretchr/testify/require"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -64,7 +63,8 @@ func executionFixture(t *testing.T) (*Reconciler, *api.SandboxTemplate, *api.San
 	t.Helper()
 	version := modelFixtures()
 	version.Spec.Template.Spec.Containers[0].Image = "example.com/runtime@sha256:" + strings.Repeat("a", 64)
-	version.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: &api.CheckpointStrategy{Enable: true}, Steps: []api.TemplateBuildStep{
+	version.Spec.Checkpoint = &api.CheckpointStrategy{Enable: true}
+	version.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Steps: []api.TemplateBuildStep{
 		{Command: &api.TemplateBuildCommand{Command: "first", User: "alice", Cwd: "/app", Env: map[string]string{"BUILD_ENV": "value"}}},
 		{Command: &api.TemplateBuildCommand{Command: "second"}},
 	}}
@@ -155,10 +155,9 @@ func mutateStoredBox(t *testing.T, r *Reconciler, box *api.Sandbox, mutate func(
 	require.NoError(t, r.Update(t.Context(), current))
 }
 
-// removeStoredVersion strips the finalizer and deletes the stored Version.
+// removeStoredVersion deletes the stored Version.
 func removeStoredVersion(t *testing.T, r *Reconciler, version *api.SandboxTemplate) {
 	t.Helper()
-	mutateStoredVersion(t, r, version, func(v *api.SandboxTemplate) { v.Finalizers = nil })
 	require.NoError(t, r.Delete(t.Context(), version))
 }
 
@@ -178,16 +177,6 @@ func failGetFor(proto client.Object, failure error) interceptor.Funcs {
 	}}
 }
 
-// failListFor makes list calls of proto's type return failure.
-func failListFor(proto client.ObjectList, failure error) interceptor.Funcs {
-	return interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-		if reflect.TypeOf(list) == reflect.TypeOf(proto) {
-			return failure
-		}
-		return c.List(ctx, list, opts...)
-	}}
-}
-
 // failUpdateFor makes writes of proto's type return failure.
 func failUpdateFor(proto client.Object, failure error) interceptor.Funcs {
 	return interceptor.Funcs{Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
@@ -195,20 +184,6 @@ func failUpdateFor(proto client.Object, failure error) interceptor.Funcs {
 			return failure
 		}
 		return c.Update(ctx, obj, opts...)
-	}}
-}
-
-// foreignLeaseFor answers lease reads with a foreign, active, correctly owned lease.
-func foreignLeaseFor(name string, uid types.UID) interceptor.Funcs {
-	return interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-		if lease, ok := obj.(*coordinationv1.Lease); ok {
-			*lease = coordinationv1.Lease{
-				ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name, UID: "lease-uid", OwnerReferences: []metav1.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: "SandboxTemplate", Name: name, UID: uid, Controller: ptr.To(true)}}},
-				Spec:       coordinationv1.LeaseSpec{HolderIdentity: ptr.To("other-process"), LeaseDurationSeconds: ptr.To(int32(180)), RenewTime: ptr.To(metav1.NewMicroTime(time.Now()))},
-			}
-			return nil
-		}
-		return c.Get(ctx, key, obj, opts...)
 	}}
 }
 
@@ -365,21 +340,16 @@ func TestSameLogicalNameVersionsExecuteIndependently(t *testing.T) {
 	}
 	require.True(t, r.hasWorker(version.UID))
 	require.True(t, r.hasWorker(sibling.UID))
-	require.NotEqual(t, buildLeaseKey(version), buildLeaseKey(sibling))
 	current := &api.SandboxTemplate{}
 	require.NoError(t, r.Get(t.Context(), req.NamespacedName, current))
 	require.NoError(t, r.Delete(t.Context(), current))
 	_, err = r.ReconcileVersion(t.Context(), req)
 	require.NoError(t, err)
-	interrupted := waitExecutionCondition(t, r, version, buildReasonInterrupted)
-	require.Equal(t, api.SandboxTemplatePhaseFailed, interrupted.Status.Phase)
-	for range 4 {
-		_, err = r.ReconcileVersion(t.Context(), req)
-		require.NoError(t, err)
-	}
+	// The deleted Version is gone; its worker is cancelled without a
+	// replay, and its Sandbox is left to ownerReference garbage collection.
+	require.Eventually(t, func() bool { return !r.hasWorker(version.UID) }, 5*time.Second, 10*time.Millisecond)
 	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), req.NamespacedName, &api.SandboxTemplate{})))
-	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), buildLeaseKey(version), &coordinationv1.Lease{})))
-	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(box), &api.Sandbox{})))
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(box), &api.Sandbox{}))
 	require.EqualValues(t, 1, calls.Load())
 	require.True(t, r.hasWorker(sibling.UID), "deleting a Version must not cancel another Version with the same logical name")
 	require.EqualValues(t, 1, siblingCalls.Load())
@@ -390,9 +360,6 @@ func TestSameLogicalNameVersionsExecuteIndependently(t *testing.T) {
 	require.Equal(t, buildReasonRunning, meta.FindStatusCondition(currentSibling.Status.Conditions, buildReadyCondition).Reason)
 	require.Equal(t, "python-agent", currentSibling.Labels[api.LabelTemplateName])
 	require.Empty(t, currentSibling.OwnerReferences)
-	lease := &coordinationv1.Lease{}
-	require.NoError(t, r.Get(t.Context(), buildLeaseKey(sibling), lease))
-	require.True(t, ownedByVersion(lease, sibling))
 	currentBox := &api.Sandbox{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(siblingBox), currentBox))
 	require.Equal(t, siblingBox.UID, currentBox.UID)
@@ -421,62 +388,6 @@ func TestSameLogicalNameVersionsExecuteIndependently(t *testing.T) {
 	require.Equal(t, []api.SandboxTemplateArtifact{{Type: "checkpoint", Name: key.Name, Value: "sibling-backend-snapshot"}}, currentSibling.Status.Artifacts)
 	require.EqualValues(t, 1, calls.Load())
 	require.EqualValues(t, 2, siblingCalls.Load())
-}
-
-func TestBuildExecutionAcrossReplicas(t *testing.T) {
-	first, version, box, _ := executionFixture(t)
-	second := modelReconciler(t)
-	second.Client = first.Client
-	started, release := make(chan struct{}), make(chan struct{})
-	var calls atomic.Int32
-	bindBuildRuntime(t, first, box, &buildProcessHandler{start: func(ctx context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
-		if calls.Add(1) == 1 {
-			close(started)
-			select {
-			case <-release:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{Exited: true}}}})
-	}})
-	startExecutionManager(t, first)
-	startExecutionManager(t, second)
-	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(version)}
-	_, err := first.ReconcileVersion(t.Context(), req)
-	require.NoError(t, err)
-	select {
-	case <-started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("first replica did not start execution")
-	}
-	_, err = second.ReconcileVersion(t.Context(), req)
-	require.NoError(t, err)
-	require.EqualValues(t, 1, calls.Load())
-	require.False(t, second.hasWorker(version.UID))
-	current := &api.SandboxTemplate{}
-	require.NoError(t, second.Get(t.Context(), req.NamespacedName, current))
-	require.Equal(t, buildReasonRunning, meta.FindStatusCondition(current.Status.Conditions, buildReadyCondition).Reason)
-	close(release)
-	waitExecutionCondition(t, first, version, buildReasonProvisioned)
-	require.EqualValues(t, 2, calls.Load())
-	_, err = second.ReconcileVersion(t.Context(), req)
-	require.NoError(t, err)
-	checkpoint := &api.Checkpoint{}
-	key := client.ObjectKey{Namespace: version.Namespace, Name: version.Name + "-checkpoint"}
-	require.NoError(t, second.Get(t.Context(), key, checkpoint))
-	checkpoint.Status = api.CheckpointStatus{Phase: api.CheckpointSucceeded, CheckpointId: "backend-snapshot", ObservedGeneration: checkpoint.Generation}
-	require.NoError(t, second.Status().Update(t.Context(), checkpoint))
-	_, err = second.ReconcileVersion(t.Context(), req)
-	require.NoError(t, err)
-	require.NoError(t, second.Get(t.Context(), req.NamespacedName, current))
-	require.Equal(t, api.SandboxTemplatePhaseReady, current.Status.Phase)
-	_, err = first.ReconcileVersion(t.Context(), req)
-	require.NoError(t, err)
-	require.True(t, apierrors.IsNotFound(first.Get(t.Context(), buildLeaseKey(version), &coordinationv1.Lease{})))
-	require.True(t, apierrors.IsNotFound(first.Get(t.Context(), client.ObjectKeyFromObject(box), &api.Sandbox{})))
-	require.NoError(t, first.Get(t.Context(), key, &api.Checkpoint{}))
-	require.NoError(t, first.Get(t.Context(), client.ObjectKeyFromObject(version), &api.SandboxTemplate{}))
 }
 
 func TestBuildExecutionLostRunningResponse(t *testing.T) {
@@ -510,57 +421,10 @@ func TestBuildExecutionLostRunningResponse(t *testing.T) {
 	_, err = r.ReconcileVersion(t.Context(), req)
 	require.NoError(t, err)
 	require.False(t, r.hasWorker(version.UID))
-	lease := &coordinationv1.Lease{}
-	require.NoError(t, r.Get(t.Context(), buildLeaseKey(version), lease))
-	lease.Spec.RenewTime = ptr.To(metav1.NewMicroTime(time.Now().Add(-4 * time.Minute)))
-	require.NoError(t, r.Update(t.Context(), lease))
 	_, err = r.ReconcileVersion(t.Context(), req)
 	require.NoError(t, err)
 	require.Equal(t, api.SandboxTemplatePhaseFailed, waitExecutionCondition(t, r, version, buildReasonInterrupted).Status.Phase)
 	require.Zero(t, calls.Load())
-}
-
-func TestBuildExecutionDeletionAcrossReplicas(t *testing.T) {
-	first, version, box, _ := executionFixture(t)
-	second := modelReconciler(t)
-	second.Client = first.Client
-	started, release := make(chan struct{}), make(chan struct{})
-	var calls atomic.Int32
-	bindBuildRuntime(t, first, box, &buildProcessHandler{start: func(ctx context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
-		if calls.Add(1) == 1 {
-			close(started)
-			select {
-			case <-release:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{Exited: true}}}})
-	}})
-	startExecutionManager(t, first)
-	startExecutionManager(t, second)
-	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(version)}
-	_, err := first.ReconcileVersion(t.Context(), req)
-	require.NoError(t, err)
-	select {
-	case <-started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("execution did not start")
-	}
-	current := &api.SandboxTemplate{}
-	require.NoError(t, second.Get(t.Context(), req.NamespacedName, current))
-	require.NoError(t, second.Delete(t.Context(), current))
-	for range 2 {
-		_, err = second.ReconcileVersion(t.Context(), req)
-		require.NoError(t, err)
-	}
-	close(release)
-	waitExecutionCondition(t, first, version, buildReasonInterrupted)
-	require.EqualValues(t, 1, calls.Load())
-	_, err = second.ReconcileVersion(t.Context(), req)
-	require.NoError(t, err)
-	require.True(t, apierrors.IsNotFound(second.Get(t.Context(), req.NamespacedName, &api.SandboxTemplate{})))
-	require.True(t, apierrors.IsNotFound(second.Get(t.Context(), buildLeaseKey(version), &coordinationv1.Lease{})))
 }
 
 func TestBuildExecutionCOPY(t *testing.T) {
@@ -656,6 +520,13 @@ func TestBuildExecutionInterruptions(t *testing.T) {
 					require.NoError(t, r.Delete(t.Context(), current))
 					_, err = r.ReconcileVersion(t.Context(), req)
 					require.NoError(t, err)
+					// The deleted Version is gone, so no failure condition can
+					// be recorded on it: the worker is cancelled without a
+					// replay.
+					require.Eventually(t, func() bool { return !r.hasWorker(version.UID) }, 5*time.Second, 10*time.Millisecond)
+					require.True(t, apierrors.IsNotFound(r.Get(t.Context(), req.NamespacedName, &api.SandboxTemplate{})))
+					require.EqualValues(t, 1, calls.Load())
+					return
 				} else {
 					current := &api.SandboxTemplate{}
 					require.NoError(t, r.Get(t.Context(), req.NamespacedName, current))
@@ -773,7 +644,6 @@ func TestBuildExecutionRestartDoesNotReplay(t *testing.T) {
 		{Type: buildReadyCondition, Status: metav1.ConditionFalse, Reason: buildReasonRunning, LastTransitionTime: metav1.NewTime(started)},
 	}}
 	require.NoError(t, r.Status().Update(t.Context(), version))
-	createTestBuildLease(t, r, version, "old-process", started)
 	var calls atomic.Int32
 	bindBuildRuntime(t, r, box, &buildProcessHandler{start: func(_ context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
 		calls.Add(1)
@@ -812,8 +682,9 @@ func TestBuildCaptureBoundaries(t *testing.T) {
 			currentBox.Annotations = map[string]string{api.AnnotationInitRuntimeRequest: `{"accessToken":"test-runtime-token"}`}
 			require.NoError(t, r.Update(t.Context(), currentBox))
 			if mode == "worker exiting" {
-				lease := createTestBuildLease(t, r, version, r.instanceID, time.Now())
-				r.workers = map[types.UID]*buildWorker{version.UID: {key: client.ObjectKeyFromObject(version), lease: lease.DeepCopy()}}
+				_, workerCancel := context.WithCancel(t.Context())
+				t.Cleanup(workerCancel)
+				r.workers = map[types.UID]*buildWorker{version.UID: {key: client.ObjectKeyFromObject(version), cancel: workerCancel}}
 			}
 			_, err = r.reconcileExecution(t.Context(), version)
 			require.NoError(t, err)
@@ -867,7 +738,7 @@ func TestBuildCaptureBoundaries(t *testing.T) {
 }
 
 func TestBuildImageConvergence(t *testing.T) {
-	for _, mode := range []string{"old container", "same image replacement", "changed image", "terminated container", "terminated original container", "corrupt update state", "update in progress"} {
+	for _, mode := range []string{"old container", "changed image", "terminated container", "terminated original container", "corrupt update state", "update in progress"} {
 		t.Run(mode, func(t *testing.T) {
 			r, version, box, pod := executionFixture(t)
 			status := &pod.Status.ContainerStatuses[0]
@@ -884,10 +755,7 @@ func TestBuildImageConvergence(t *testing.T) {
 					status.ContainerID = "containerd://original"
 				}
 			}
-			last := inplaceupdate.InPlaceUpdateContainerStatus{ImageID: oldImageID, ContainerID: "containerd://original"}
-			if mode == "update in progress" {
-				last.ContainerID = "containerd://replacement"
-			}
+			last := inplaceupdate.InPlaceUpdateContainerStatus{ImageID: oldImageID}
 			state, err := json.Marshal(inplaceupdate.InPlaceUpdateState{UpdateImages: true, LastContainerStatuses: map[string]inplaceupdate.InPlaceUpdateContainerStatus{"runtime": last}})
 			require.NoError(t, err)
 			annotation := string(state)
@@ -906,7 +774,7 @@ func TestBuildImageConvergence(t *testing.T) {
 				require.ErrorIs(t, err, errExecutionInterrupted)
 			default:
 				require.NoError(t, err)
-				require.Equal(t, mode == "same image replacement" || mode == "changed image", ready)
+				require.Equal(t, mode == "changed image", ready)
 			}
 		})
 	}
@@ -925,6 +793,7 @@ func TestExecutionStatusRunningGuards(t *testing.T) {
 		}},
 		{name: "deleting Version blocks a Running write", mutate: func(v *api.SandboxTemplate) {
 			v.DeletionTimestamp = ptr.To(metav1.Now())
+			v.Finalizers = []string{"test/retain"}
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -945,8 +814,7 @@ func TestBuildBudgetHelpers(t *testing.T) {
 	defaults := &Reconciler{Options: Options{}}
 	require.Equal(t, started.Add(DefaultBuildTimeout), defaults.buildDeadline(&running))
 	version.Status.Conditions = []metav1.Condition{running}
-	expired := &coordinationv1.Lease{Spec: coordinationv1.LeaseSpec{RenewTime: ptr.To(metav1.NewMicroTime(time.Now().Add(-4 * time.Minute)))}}
-	require.Equal(t, retryInterval, r.buildRequeueAfter(version, expired))
+	require.Equal(t, retryInterval, r.buildRequeueAfter(version))
 	require.NoError(t, r.failRunningBuild(t.Context(), version, buildReasonTimeout, "expired"))
 	version.Status.Conditions[0].Reason = buildReasonProvisioned
 	require.NoError(t, r.failRunningBuild(t.Context(), version, buildReasonTimeout, "expired"))
@@ -957,22 +825,14 @@ func TestBuildBudgetHelpers(t *testing.T) {
 
 func TestRunExecutionBoundaries(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		runtime   bool
-		mutate    func(*testing.T, *Reconciler, *api.SandboxTemplate, *api.Sandbox, *corev1.Pod)
-		funcs     interceptor.Funcs
-		wantError error
-		contains  string
-		phase     api.SandboxTemplateBuildPhase
-		reason    string
+		name    string
+		runtime bool
+		mutate  func(*testing.T, *Reconciler, *api.SandboxTemplate, *api.Sandbox, *corev1.Pod)
+		phase   api.SandboxTemplateBuildPhase
+		reason  string
 	}{
 		{
-			name:      "lease lost before execution",
-			funcs:     foreignLeaseFor("st-abcdefghijklmnopqrst", "version-uid"),
-			wantError: errExecutionInterrupted,
-		},
-		{
-			name: "another replica already started the build",
+			name: "another worker already started the build",
 			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *api.Sandbox, _ *corev1.Pod) {
 				version.Status = api.SandboxTemplateStatus{Phase: api.SandboxTemplatePhaseBuilding, ObservedGeneration: version.Generation, Conditions: []metav1.Condition{{Type: buildReadyCondition, Status: metav1.ConditionFalse, Reason: buildReasonRunning, LastTransitionTime: metav1.Now()}}}
 				require.NoError(t, r.Status().Update(t.Context(), version))
@@ -994,23 +854,9 @@ func TestRunExecutionBoundaries(t *testing.T) {
 			phase:  api.SandboxTemplatePhaseFailed,
 			reason: buildReasonTimeout,
 		},
-		{
-			name:    "renewal interrupted after execution",
-			runtime: true,
-			funcs:   failUpdateFor(&coordinationv1.Lease{}, apierrors.NewNotFound(coordinationv1.SchemeGroupVersion.WithResource("leases").GroupResource(), "template-build")),
-			phase:   api.SandboxTemplatePhaseFailed,
-			reason:  buildReasonInterrupted,
-		},
-		{
-			name:     "renewal fails after execution",
-			runtime:  true,
-			funcs:    failUpdateFor(&coordinationv1.Lease{}, errors.New("renew storage unavailable")),
-			contains: "renew storage unavailable",
-		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r, version, box, pod := executionFixture(t)
-			lease := createTestBuildLease(t, r, version, r.instanceID, time.Now())
 			handler := &buildProcessHandler{start: func(_ context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
 				return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{Exited: true}}}})
 			}}
@@ -1020,24 +866,12 @@ func TestRunExecutionBoundaries(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(t, r, version, box, pod)
 			}
-			if tt.funcs.Get != nil || tt.funcs.Update != nil {
-				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), tt.funcs)
-			}
-			err := r.runExecution(t.Context(), version, lease)
-			switch {
-			case tt.wantError != nil:
-				require.ErrorIs(t, err, tt.wantError)
-			case tt.contains != "":
-				require.ErrorContains(t, err, tt.contains)
-			default:
-				require.NoError(t, err)
-			}
-			if tt.phase != "" {
-				current := &api.SandboxTemplate{}
-				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
-				require.Equal(t, tt.phase, current.Status.Phase)
-				require.Equal(t, tt.reason, meta.FindStatusCondition(current.Status.Conditions, buildReadyCondition).Reason)
-			}
+			err := r.runExecution(t.Context(), version)
+			require.NoError(t, err)
+			current := &api.SandboxTemplate{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(version), current))
+			require.Equal(t, tt.phase, current.Status.Phase)
+			require.Equal(t, tt.reason, meta.FindStatusCondition(current.Status.Conditions, buildReadyCondition).Reason)
 		})
 	}
 }
@@ -1194,11 +1028,6 @@ func TestBindBuildRuntimeBoundaries(t *testing.T) {
 			notFound: true,
 		},
 		{
-			name:      "lease lost during binding",
-			mode:      "lease lost",
-			wantError: errExecutionInterrupted,
-		},
-		{
 			name: "runtime container missing",
 			mutate: func(t *testing.T, r *Reconciler, _ *api.SandboxTemplate, box *api.Sandbox) {
 				mutateStoredBox(t, r, box, func(b *api.Sandbox) { b.Spec.Template = nil })
@@ -1219,15 +1048,11 @@ func TestBindBuildRuntimeBoundaries(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r, version, box, pod := executionFixture(t)
-			lease := createTestBuildLease(t, r, version, r.instanceID, time.Now())
 			if tt.mutate != nil {
 				tt.mutate(t, r, version, box)
 			}
 			failure := errors.New("runtime patch unavailable")
 			var attempts atomic.Int32
-			if tt.mode == "lease lost" {
-				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), foreignLeaseFor(version.Name, version.UID))
-			}
 			if tt.mode == "conflict" || tt.mode == "patch failure" {
 				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 					if _, ok := obj.(*api.Sandbox); ok {
@@ -1242,7 +1067,7 @@ func TestBindBuildRuntimeBoundaries(t *testing.T) {
 				}})
 			}
 			session := &executionSession{versionName: version.Name, versionUID: version.UID, namespace: version.Namespace, sandboxUID: box.UID, podUID: pod.UID}
-			bound, token, err := r.bindBuildRuntime(t.Context(), session, version, lease, "fresh-token")
+			bound, token, err := r.bindBuildRuntime(t.Context(), session, version, "fresh-token")
 			switch {
 			case tt.wantError != nil:
 				require.ErrorIs(t, err, tt.wantError)
@@ -1292,11 +1117,6 @@ func TestExecuteBoundaries(t *testing.T) {
 			},
 		},
 		{
-			name:   "lease lost after the Sandbox binds",
-			funcs:  func() interceptor.Funcs { return foreignLeaseFor("st-abcdefghijklmnopqrst", "version-uid") },
-			assert: interrupted,
-		},
-		{
 			name: "runtime container missing after binding",
 			mutate: func(t *testing.T, r *Reconciler, _ *api.SandboxTemplate, box *api.Sandbox, _ *corev1.Pod) {
 				mutateStoredBox(t, r, box, func(b *api.Sandbox) { b.Spec.Template = nil })
@@ -1333,22 +1153,6 @@ func TestExecuteBoundaries(t *testing.T) {
 			assert:   func(t *testing.T, err error) { t.Helper(); require.Error(t, err) },
 		},
 		{
-			name:    "lease lost during a step refresh",
-			runtime: true,
-			funcs: func() interceptor.Funcs {
-				var reads atomic.Int32
-				return interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-					if lease, ok := obj.(*coordinationv1.Lease); ok && reads.Add(1) >= 3 {
-						require.NoError(t, c.Get(ctx, key, lease, opts...))
-						lease.Spec.HolderIdentity = ptr.To("other-process")
-						return nil
-					}
-					return c.Get(ctx, key, obj, opts...)
-				}}
-			},
-			assert: interrupted,
-		},
-		{
 			name:    "empty build step",
 			runtime: true,
 			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *api.Sandbox, _ *corev1.Pod) {
@@ -1368,7 +1172,6 @@ func TestExecuteBoundaries(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r, version, box, pod := executionFixture(t)
-			lease := createTestBuildLease(t, r, version, r.instanceID, time.Now())
 			handler := &buildProcessHandler{start: func(_ context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
 				return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{Exited: true}}}})
 			}}
@@ -1394,7 +1197,7 @@ func TestExecuteBoundaries(t *testing.T) {
 				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), tt.funcs())
 			}
 			session := &executionSession{versionName: version.Name, versionUID: version.UID, namespace: version.Namespace, sandboxUID: box.UID, podUID: pod.UID}
-			tt.assert(t, r.execute(t.Context(), session, version, lease))
+			tt.assert(t, r.execute(t.Context(), session, version))
 		})
 	}
 }
@@ -1479,8 +1282,8 @@ func TestBuildCaptureFailurePaths(t *testing.T) {
 		{
 			name: "capture without checkpoint",
 			mutate: func(t *testing.T, r *Reconciler, version *api.SandboxTemplate, _ *api.Sandbox, _ *corev1.Pod) {
-				version.Spec.BuildOptions.Checkpoint.Enable = false
-				mutateStoredVersion(t, r, version, func(v *api.SandboxTemplate) { v.Spec.BuildOptions.Checkpoint.Enable = false })
+				version.Spec.Checkpoint.Enable = false
+				mutateStoredVersion(t, r, version, func(v *api.SandboxTemplate) { v.Spec.Checkpoint.Enable = false })
 			},
 			assert: func(t *testing.T, _ ctrl.Result, err error, current *api.SandboxTemplate) {
 				t.Helper()

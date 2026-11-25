@@ -1373,7 +1373,7 @@ func TestDefaultGeneratePatchBodyFunc_ImageOnly(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{
-				{Name: "c", ImageID: "old-id", ContainerID: "containerd://old"},
+				{Name: "c", ImageID: "old-id"},
 			},
 		},
 	}
@@ -1429,8 +1429,8 @@ func TestDefaultGeneratePatchBodyFunc_ImageOnly(t *testing.T) {
 	if !state.UpdateImages || state.UpdateResources {
 		t.Fatalf("expected only updateImages=true, got %+v", state)
 	}
-	if state.LastContainerStatuses["c"].ImageID != "old-id" || state.LastContainerStatuses["c"].ContainerID != "containerd://old" {
-		t.Fatalf("expected previous image and container identity captured, got %+v", state.LastContainerStatuses)
+	if state.LastContainerStatuses["c"].ImageID != "old-id" {
+		t.Fatalf("expected previous image id captured, got %+v", state.LastContainerStatuses)
 	}
 }
 
@@ -1944,13 +1944,12 @@ func TestIsPodResourceResizeCompleted(t *testing.T) {
 }
 
 func TestIsInplaceUpdateCompleted(t *testing.T) {
-	type testCase struct {
+	tests := []struct {
 		name              string
 		pod               *corev1.Pod
 		expectedCompleted bool
 		expectTerminalErr bool
-	}
-	tests := []testCase{
+	}{
 		{
 			name: "no state annotation",
 			pod: &corev1.Pod{
@@ -2061,104 +2060,6 @@ func TestIsInplaceUpdateCompleted(t *testing.T) {
 			},
 			expectedCompleted: false,
 		},
-		{
-			name: "additional spec containers are skipped",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-pod",
-					Namespace: "default",
-					Annotations: map[string]string{
-						PodAnnotationInPlaceUpdateStateKey: `{"revision":"abc123","updateTimestamp":"2023-01-01T00:00:00Z","updateImages":true,"lastContainerStatuses":{"runtime":{"imageID":"image123","containerID":"original"}}}`,
-					},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{Name: "sidecar", Image: "busybox:latest"},
-						{Name: "runtime", Image: "nginx:latest"},
-					},
-				},
-				Status: corev1.PodStatus{
-					ContainerStatuses: []corev1.ContainerStatus{
-						{Name: "runtime", Image: "nginx:latest", ImageID: "image123", ContainerID: "replacement"},
-					},
-				},
-			},
-			expectedCompleted: true,
-		},
-		{
-			name: "invalid spec image reference",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-pod",
-					Namespace: "default",
-					Annotations: map[string]string{
-						PodAnnotationInPlaceUpdateStateKey: `{"revision":"abc123","updateTimestamp":"2023-01-01T00:00:00Z","updateImages":true,"lastContainerStatuses":{"runtime":{"imageID":"image123","containerID":"original"}}}`,
-					},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{Name: "runtime", Image: "in valid ref"},
-					},
-				},
-				Status: corev1.PodStatus{
-					ContainerStatuses: []corev1.ContainerStatus{
-						{Name: "runtime", Image: "different:latest", ImageID: "image123", ContainerID: "replacement"},
-					},
-				},
-			},
-			expectedCompleted: false,
-		},
-		{
-			name: "status container missing from spec",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-pod",
-					Namespace: "default",
-					Annotations: map[string]string{
-						PodAnnotationInPlaceUpdateStateKey: `{"revision":"abc123","updateTimestamp":"2023-01-01T00:00:00Z","updateImages":true,"lastContainerStatuses":{"ghost":{"imageID":"image123","containerID":"original"}}}`,
-					},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{Name: "runtime", Image: "nginx:latest"},
-					},
-				},
-				Status: corev1.PodStatus{
-					ContainerStatuses: []corev1.ContainerStatus{
-						{Name: "ghost", Image: "nginx:latest", ImageID: "image123", ContainerID: "replacement"},
-					},
-				},
-			},
-			expectedCompleted: false,
-		},
-	}
-
-	for _, tt := range []struct {
-		name       string
-		previousID string
-		currentID  string
-		image      string
-		requested  string
-		imageID    string
-		completed  bool
-	}{
-		{name: "same image and same container", previousID: "old", currentID: "old", image: "nginx:latest", requested: "nginx:latest", imageID: "image123"},
-		{name: "same image and replaced container", previousID: "old", currentID: "new", image: "nginx:latest", requested: "nginx:latest", imageID: "image123", completed: true},
-		{name: "replacement with normalized image reference", previousID: "old", currentID: "new", image: "nginx:latest", requested: "docker.io/library/nginx:latest", imageID: "image123", completed: true},
-		{name: "replacement without requested image", previousID: "old", currentID: "new", image: "nginx:old", requested: "nginx:new", imageID: "image123"},
-		{name: "replacement missing previous container ID", currentID: "new", image: "nginx:latest", requested: "nginx:latest", imageID: "image123"},
-		{name: "replacement missing current container ID", previousID: "old", image: "nginx:latest", requested: "nginx:latest", imageID: "image123"},
-		{name: "equivalent digest reference", previousID: "old", currentID: "new", image: "nginx:latest", requested: "nginx@sha256:" + strings.Repeat("a", 64), imageID: "docker-pullable://nginx@sha256:" + strings.Repeat("a", 64), completed: true},
-	} {
-		state, err := json.Marshal(InPlaceUpdateState{UpdateImages: true, LastContainerStatuses: map[string]InPlaceUpdateContainerStatus{"container1": {ImageID: tt.imageID, ContainerID: tt.previousID}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		tests = append(tests, testCase{name: tt.name, expectedCompleted: tt.completed, pod: &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{PodAnnotationInPlaceUpdateStateKey: string(state)}},
-			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "container1", Image: tt.requested}}},
-			Status:     corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "container1", Image: tt.image, ImageID: tt.imageID, ContainerID: tt.currentID}}},
-		}})
 	}
 
 	for _, tt := range tests {

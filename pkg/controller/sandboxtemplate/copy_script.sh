@@ -5,8 +5,20 @@ mkdir -p -- "$temp/unpack"
 tar -xzf "$archive" -C "$temp/unpack"
 sourcePath="$temp/unpack$sourcePrefix"
 if [[ "$owner" != *:* ]]; then
-    owner="$owner:$(id -g "$owner")"
+    owner="$owner:"
 fi
+ownerUser="${owner%%:*}"
+ownerGroup="${owner#*:}"
+if [[ -z "$ownerGroup" ]]; then
+    if [[ "$ownerUser" =~ ^[0-9]+$ ]]; then
+        # Docker: a numeric UID without a group uses the same numeric GID,
+        # without a /etc/passwd lookup.
+        ownerGroup="$ownerUser"
+    else
+        ownerGroup="$(id -g "$ownerUser")"
+    fi
+fi
+owner="$ownerUser:$ownerGroup"
 sourceFolder="$(dirname "$sourcePath")"
 cd "$sourceFolder"
 entry="$(basename "$sourcePath")"
