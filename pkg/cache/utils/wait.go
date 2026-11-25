@@ -151,7 +151,7 @@ func (w *objectWaiter[T]) observe(obj T, err error) {
 		return
 	}
 	if err == nil {
-		if !expectations.IsResourceVersionNewer(w.target.GetResourceVersion(), obj.GetResourceVersion()) {
+		if !expectations.IsResourceVersionNewerOrEqual(w.target.GetResourceVersion(), obj.GetResourceVersion()) {
 			return
 		}
 		if uid := w.target.GetUID(); uid != "" && obj.GetUID() != uid {
