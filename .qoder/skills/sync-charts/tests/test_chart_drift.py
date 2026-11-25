@@ -523,6 +523,156 @@ class ChartDriftTest(unittest.TestCase):
                 result.stdout,
             )
 
+    def test_copies_sessionservices_crd_to_controller_chart(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            agents_repo = root / "agents"
+            charts_repo = root / "charts"
+            source = (
+                agents_repo
+                / "config"
+                / "crd"
+                / "bases"
+                / "agents.kruise.io_sessionservices.yaml"
+            )
+            destination = (
+                charts_repo
+                / "versions"
+                / "kruise-agents-sandbox-controller"
+                / "next"
+                / "crds"
+                / "agents.kruise.io_sessionservices.yaml"
+            )
+            source.parent.mkdir(parents=True)
+            (charts_repo / "versions").mkdir(parents=True)
+            (agents_repo / "config" / "crd" / "kustomization.yaml").write_text(
+                "resources:\n"
+                "- bases/agents.kruise.io_sessionservices.yaml\n",
+                encoding="utf-8",
+            )
+            source.write_bytes(
+                b"apiVersion: apiextensions.k8s.io/v1\n"
+                b"kind: CustomResourceDefinition\n"
+                b"metadata:\n"
+                b"  name: sessionservices.agents.kruise.io\n"
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECKER),
+                    "--agents-repo",
+                    str(agents_repo),
+                    "--charts-repo",
+                    str(charts_repo),
+                    "--aspect",
+                    "crd",
+                    "--apply-crds",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(destination.read_bytes(), source.read_bytes())
+            self.assertIn(
+                "SYNCED crd controller "
+                "versions/kruise-agents-sandbox-controller/next/crds/"
+                "agents.kruise.io_sessionservices.yaml",
+                result.stdout,
+            )
+
+    def test_copies_agentroles_crd_to_manager_chart_in_wrapped_form(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            agents_repo = root / "agents"
+            charts_repo = root / "charts"
+            source = (
+                agents_repo
+                / "config"
+                / "crd"
+                / "bases"
+                / "security.agents.kruise.io_agentroles.yaml"
+            )
+            destination = (
+                charts_repo
+                / "versions"
+                / "kruise-agents-sandbox-manager"
+                / "next"
+                / "files"
+                / "agentio"
+                / "crds"
+                / "agentroles.yaml"
+            )
+            source.parent.mkdir(parents=True)
+            (charts_repo / "versions").mkdir(parents=True)
+            (agents_repo / "config" / "crd" / "kustomization.yaml").write_text(
+                "resources:\n"
+                "- bases/security.agents.kruise.io_agentroles.yaml\n"
+                "- bases/security.agents.kruise.io_agentrolebindings.yaml\n",
+                encoding="utf-8",
+            )
+            source.write_bytes(
+                b"---\n"
+                b"apiVersion: apiextensions.k8s.io/v1\n"
+                b"kind: CustomResourceDefinition\n"
+                b"metadata:\n"
+                b"  annotations:\n"
+                b"    controller-gen.kubebuilder.io/version: v0.17.0\n"
+                b"  name: agentroles.security.agents.kruise.io\n"
+            )
+            (
+                agents_repo
+                / "config"
+                / "crd"
+                / "bases"
+                / "security.agents.kruise.io_agentrolebindings.yaml"
+            ).write_bytes(
+                b"---\n"
+                b"apiVersion: apiextensions.k8s.io/v1\n"
+                b"kind: CustomResourceDefinition\n"
+                b"metadata:\n"
+                b"  annotations:\n"
+                b"    controller-gen.kubebuilder.io/version: v0.17.0\n"
+                b"  name: agentrolebindings.security.agents.kruise.io\n"
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECKER),
+                    "--agents-repo",
+                    str(agents_repo),
+                    "--charts-repo",
+                    str(charts_repo),
+                    "--aspect",
+                    "crd",
+                    "--apply-crds",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                destination.read_bytes(),
+                b"apiVersion: apiextensions.k8s.io/v1\n"
+                b"kind: CustomResourceDefinition\n"
+                b"metadata:\n"
+                b"  annotations:\n"
+                b"    controller-gen.kubebuilder.io/version: v0.17.0\n"
+                b"    helm.sh/resource-policy: keep\n"
+                b"  name: agentroles.security.agents.kruise.io\n",
+            )
+            self.assertIn(
+                "SYNCED crd manager "
+                "versions/kruise-agents-sandbox-manager/next/files/agentio/"
+                "crds/agentrolebindings.yaml",
+                result.stdout,
+            )
+
     def test_skips_excluded_security_crds_silently(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -548,6 +698,7 @@ class ChartDriftTest(unittest.TestCase):
                 "resources:\n"
                 "- bases/security.agents.kruise.io_agentidentities.yaml\n"
                 "- bases/security.agents.kruise.io_agentauthenticationconfigs.yaml\n"
+                "- bases/security.agents.kruise.io_credentialproviders.yaml\n"
                 "- bases/agents.kruise.io_checkpoints.yaml\n",
                 encoding="utf-8",
             )
@@ -657,7 +808,28 @@ class ChartDriftTest(unittest.TestCase):
             "revisit the exclusion once a consumer exists",
             "security.agents.kruise.io_agentidentities",
             "security.agents.kruise.io_agentauthenticationconfigs",
+            "security.agents.kruise.io_credentialproviders",
+            "security.agents.kruise.io_agentroles",
+            "security.agents.kruise.io_agentrolebindings",
             "manager CRDs in their wrapped form",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, content)
+
+    def test_documents_deployment_synchronization(self) -> None:
+        content = SKILL.read_text(encoding="utf-8")
+
+        self.assertIn("## Deployments", content)
+        for requirement in (
+            "The checker does not compare Deployments",
+            "previous stable release tag",
+            "git diff <stable-tag> <source-revision> --stat -- config/",
+            "config/manager config/sandbox-manager config/sandbox-gateway",
+            "a new component, not a drift",
+            "config/agent-identity-provider",
+            "obtain explicit confirmation before editing chart templates",
+            "intentional deviation from source defaults",
+            "did not change need no chart edit",
         ):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, content)

@@ -64,6 +64,10 @@ CHART_SPEC = {
         "controller",
         Path("versions/kruise-agents-sandbox-controller/next/crds/agents.kruise.io_sandboxupdateops.yaml"),
     ),
+    "agents.kruise.io_sessionservices.yaml": Target(
+        "controller",
+        Path("versions/kruise-agents-sandbox-controller/next/crds/agents.kruise.io_sessionservices.yaml"),
+    ),
     "agents.kruise.io_trafficpolicies.yaml": Target(
         "manager",
         Path("versions/kruise-agents-sandbox-manager/next/files/agentio/crds/trafficpolicies.yaml"),
@@ -84,14 +88,27 @@ CHART_SPEC = {
         Path("versions/kruise-agents-sandbox-manager/next/files/agentio/crds/globalsecurityprofiles.yaml"),
         wrapped=True,
     ),
+    "security.agents.kruise.io_agentroles.yaml": Target(
+        "manager",
+        Path("versions/kruise-agents-sandbox-manager/next/files/agentio/crds/agentroles.yaml"),
+        wrapped=True,
+    ),
+    "security.agents.kruise.io_agentrolebindings.yaml": Target(
+        "manager",
+        Path("versions/kruise-agents-sandbox-manager/next/files/agentio/crds/agentrolebindings.yaml"),
+        wrapped=True,
+    ),
 }
 
-# api/security/v1alpha1 CRDs: API-only types with no controller or webhook
-# consumer yet; the charts deliberately do not ship them.
+# agentidentities/agentauthenticationconfigs: API-only types with no controller
+# or webhook consumer yet. credentialproviders: consumed only by the opt-in
+# agent-identity-provider component, which the charts do not ship (user decision
+# 2026-11-25). The charts deliberately do not ship these CRDs.
 EXCLUDED_CRDS = frozenset(
     {
         "security.agents.kruise.io_agentidentities.yaml",
         "security.agents.kruise.io_agentauthenticationconfigs.yaml",
+        "security.agents.kruise.io_credentialproviders.yaml",
     }
 )
 
