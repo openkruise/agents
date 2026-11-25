@@ -41,14 +41,16 @@ const (
 	secretKeySize = 32
 )
 
-// Inputs 是解析后的 peer 安全启动配置；Secret 引用的 Namespace 和 Name 均为空时禁用该项。
-// gossip 加密与 peer HTTP TLS 独立启用；两个 TLS 引用必须同时配置或同时留空。
-// Load 仅在对应引用已配置时读取 Secret；两个 TLS 引用均为空时保留明文 peer HTTP。
+// Inputs is the parsed peer security startup configuration; a Secret reference with
+// empty Namespace and Name disables that item. Gossip encryption and peer HTTP TLS are
+// enabled independently; the two TLS references must be set together or both left empty.
+// Load reads Secrets only for configured references; with both TLS references empty,
+// peer HTTP stays plaintext.
 type Inputs struct {
 	PeerKeySecret types.NamespacedName
-	// TLSServerSecret 提供入站 TLS 凭证，以及验证 peer 客户端的 CA。
+	// TLSServerSecret provides inbound TLS credentials and the CA that verifies peer clients.
 	TLSServerSecret types.NamespacedName
-	// TLSClientSecret 提供本进程的出站 TLS 凭证，以及验证 peer 服务端的 CA。
+	// TLSClientSecret provides this process's outbound TLS credentials and the CA that verifies peer servers.
 	TLSClientSecret types.NamespacedName
 	// AllowedClientCNs is the raw comma-separated inbound client-identity
 	// allow-list. Empty leaves authorization at the trusted CA. A non-empty
@@ -56,8 +58,9 @@ type Inputs struct {
 	AllowedClientCNs string
 }
 
-// ParseInputs 解析三个 namespace/name Secret 引用，保留入站身份白名单原文并调用 Validate。
-// 此函数不读取 Secret，也不校验凭证材料；材料校验由 Load 负责。
+// ParseInputs parses the three namespace/name Secret references, keeps the raw inbound
+// identity allow-list, and calls Validate. It reads no Secrets and does not validate
+// credential material; Load owns material validation.
 func ParseInputs(peerKeySecret, tlsServerSecret, tlsClientSecret, allowedClientCNs string) (Inputs, error) {
 	keyRef, err := utils.ParseSecretRef(peerKeySecret)
 	if err != nil {

@@ -37,10 +37,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/hashicorp/memberlist"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -50,6 +52,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -249,6 +252,7 @@ func TestSyncRouteWithPeers(t *testing.T) {
 		Name:            "sb-1",
 		UID:             types.UID("uid-sb-1"),
 		ResourceVersion: "1",
+		AccessToken:     "test-token-do-not-log",
 	}
 	threePeers := staticPeers{
 		{IP: "10.0.0.1", Name: "node-1"},
@@ -259,8 +263,11 @@ func TestSyncRouteWithPeers(t *testing.T) {
 		name            string
 		peers           peers.Peers
 		outbound        *PeerOutbound
+		initialized     bool
+		concurrentCalls int
 		expectErr       string
 		expectPeerCount float64
+		expectSkipLogs  int
 	}{
 		{
 			name:            "nil peers manager is a no-op",
@@ -274,6 +281,30 @@ func TestSyncRouteWithPeers(t *testing.T) {
 		{
 			name:  "sender-only members need no outbound client",
 			peers: staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}},
+		},
+		{
+			name:           "nil membership logs a rate-limited skip",
+			initialized:    true,
+			expectSkipLogs: 1,
+		},
+		{
+			name:           "empty membership logs a rate-limited skip",
+			peers:          staticPeers{},
+			initialized:    true,
+			expectSkipLogs: 1,
+		},
+		{
+			name:           "sender-only membership logs a rate-limited skip",
+			peers:          staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}},
+			initialized:    true,
+			expectSkipLogs: 1,
+		},
+		{
+			name:            "concurrent calls share the sender skip log budget",
+			peers:           staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}},
+			initialized:     true,
+			concurrentCalls: 16,
+			expectSkipLogs:  1,
 		},
 		{
 			name:            "mixed membership counts only refresh targets",
@@ -302,8 +333,32 @@ func TestSyncRouteWithPeers(t *testing.T) {
 	// The peerCount gauge is process-global: rows run serially and reset it.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			out := tt.outbound
+			if tt.initialized {
+				out = NewPeerOutbound(nil)
+			}
+			t.Cleanup(out.CloseIdleConnections)
+			var mu sync.Mutex
+			var lines []string
+			logger := funcr.NewJSON(func(line string) {
+				mu.Lock()
+				defer mu.Unlock()
+				lines = append(lines, line)
+			}, funcr.Options{})
+			ctx := klog.NewContext(t.Context(), logger)
+			var wg sync.WaitGroup
+			for i := 0; i < tt.concurrentCalls; i++ {
+				wg.Go(func() {
+					assert.NoError(t, SyncRouteWithPeerList(ctx, tt.peers.GetPeers(), route, out))
+				})
+			}
+			wg.Wait()
 			for _, snapshot := range []bool{false, true} {
 				peerCount.Set(-1)
+				update := route
+				if snapshot {
+					update.ID, update.Name = "sb-2", "sb-2"
+				}
 				var err error
 				if snapshot {
 					var peerList []peers.Peer
@@ -311,10 +366,10 @@ func TestSyncRouteWithPeers(t *testing.T) {
 						peerList = tt.peers.GetPeers()
 					}
 					before := append([]peers.Peer(nil), peerList...)
-					err = SyncRouteWithPeerList(t.Context(), peerList, route, tt.outbound)
+					err = SyncRouteWithPeerList(ctx, peerList, update, out)
 					assert.Equal(t, before, append([]peers.Peer(nil), peerList...), "snapshot must not be modified")
 				} else {
-					err = SyncRouteWithPeers(t.Context(), tt.peers, route, tt.outbound)
+					err = SyncRouteWithPeers(ctx, tt.peers, update, out)
 				}
 				if tt.expectErr == "" {
 					assert.NoError(t, err, "snapshot=%t", snapshot)
@@ -323,11 +378,22 @@ func TestSyncRouteWithPeers(t *testing.T) {
 				}
 				assert.Equal(t, tt.expectPeerCount, testutil.ToFloat64(peerCount), "snapshot=%t", snapshot)
 			}
+			require.Len(t, lines, tt.expectSkipLogs, "repeated calls through both entry points must share the log budget")
+			for _, line := range lines {
+				var entry map[string]any
+				require.NoError(t, json.Unmarshal([]byte(line), &entry))
+				assert.Equal(t, "route sync skipped: no refresh targets", entry["msg"])
+				assert.Equal(t, float64(0), entry["level"])
+				assert.Equal(t, float64(0), entry["peerCount"])
+				assert.Equal(t, route.Name, entry["route"])
+				assert.Equal(t, route.Namespace, entry["namespace"])
+				assert.NotContains(t, line, route.AccessToken)
+			}
 		})
 	}
 }
 
-// 只重定向 TCP 拨号，保留公共构造器的 HTTP 策略与真实请求行为。
+// Only TCP dialing is redirected; the public constructor's HTTP policy and real request behavior are kept.
 func outboundForServers(t *testing.T, targets map[string]string) *PeerOutbound {
 	t.Helper()
 	out := NewPeerOutbound(nil)

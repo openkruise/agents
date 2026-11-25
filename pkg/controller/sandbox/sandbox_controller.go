@@ -685,7 +685,7 @@ func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.Ens
 		r.recordSandboxTerminatingEvent(box)
 	}
 	if r.syncRouteWithPeers != nil {
-		// 使用已观察到的删除对象及其 RV；NotFound 没有版本凭据，不能伪造删除 fence。
+		// Use the observed deleting object and its RV; NotFound carries no version evidence and must not fabricate a deletion fence.
 		route, err := sandboxroute.RouteFromSandbox(box)
 		if err == nil {
 			route.State = sandboxstate.Dead
@@ -759,7 +759,7 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus, statusAttrs...)
 
-	// 显式序列化 PodInfo 标量，避免 omitempty 在 merge patch 中保留已清空的值。
+	// Serialize PodInfo scalars explicitly so omitempty cannot keep cleared values in the merge patch.
 	type podInfoPatch struct {
 		agentsv1alpha1.PodInfo
 		PodIP    string    `json:"podIP"`
@@ -767,7 +767,8 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 		NodeName string    `json:"nodeName"`
 	}
 	patchBytes, err := json.Marshal(map[string]interface{}{
-		// UID 前置条件防止误写同名替换对象；旧状态没有 CAS 保护，完成计数在并发写入时为尽力而为。
+		// The UID precondition prevents writing to a same-name replacement object; there is no CAS on the old status,
+		// so completion accounting is best effort under concurrent writers.
 		"metadata": map[string]interface{}{"uid": box.UID},
 		"status": struct {
 			agentsv1alpha1.SandboxStatus

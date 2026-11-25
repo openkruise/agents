@@ -81,12 +81,12 @@ spec:
           - --webhook-cert-path=/home/nonroot/sandbox-controller-webhook-certs
           # Optional: actively sync routes to manager/gateway; disabled by default.
           # - --feature-gates=SandboxRouteSync=true
-          # 选择 sandbox-system 中可通过 PodIP 访问的 seed Pods；空 selector 禁用同步。
+          # Selects PodIP-reachable seed Pods in sandbox-system; an empty selector disables sync.
           # - --peer-selector=app=sandbox-peer
           # - --memberlist-bind-port=7946
-          # 按部署设置网卡；空值使用 POD_IP 或首个非回环 IPv4。
+          # Set the interface per deployment; empty uses POD_IP or the first non-loopback IPv4.
           # - --network-interface=
-          # 启用前先升级接收方，并确认整个 peer group 的 HTTP/mTLS 配置一致。
+          # Before enabling, upgrade receivers and confirm a consistent HTTP/mTLS setup across the peer group.
           # OpenTelemetry tracing (uncomment to enable).
           # The bundled demo Collector (config/otel-collector) serves plaintext
           # gRPC without TLS, hence insecure=true; switch to false only after
@@ -102,7 +102,7 @@ spec:
             value: commit-job:latest
           - name: CLUSTER_ID
             value: "e2e-cluster"
-          # 可选的 peer 身份与地址环境变量；使用网卡地址时不需要 POD_IP。
+          # Optional peer identity and address variables; POD_IP is not needed when an interface address is used.
           # - name: POD_NAME
           #   valueFrom:
           #     fieldRef:
@@ -111,7 +111,7 @@ spec:
           #   valueFrom:
           #     fieldRef:
           #       fieldPath: status.podIP
-        # 启用同步后仍需允许 memberlist 双向 TCP/UDP；controller 不提供 7789 接收服务。
+        # With sync enabled, allow bidirectional memberlist TCP/UDP; the controller serves no 7789 receiver.
         # ports:
         #   - name: memberlist-tcp
         #     containerPort: 7946
@@ -147,5 +147,5 @@ spec:
             cpu: 10m
             memory: 64Mi
       serviceAccountName: controller-manager
-      # gate 默认关闭时保留 E2E 停机配置；启用同步的部署需为 30 秒清理预算预留余量（例如 40 秒）。
+      # Keeps the E2E shutdown setting while the gate is off; deployments enabling sync need headroom over the 30s cleanup budget (e.g. 40s).
       terminationGracePeriodSeconds: 10

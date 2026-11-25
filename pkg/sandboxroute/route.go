@@ -44,9 +44,9 @@ type Route struct {
 	AccessToken        string    `json:"accessToken,omitempty"`
 	RequireTrafficAuth bool      `json:"requireTrafficAuth,omitempty"`
 	WakeOnTraffic      bool      `json:"wakeOnTraffic,omitempty"`
-	// Labels 是当前 CR 的标签快照，用于接收方的观察范围过滤；不作为身份认证依据。
+	// Labels is a snapshot of the CR's labels for receiver scope filtering; it is not authentication evidence.
 	Labels map[string]string `json:"labels"`
-	// Terminal 区分仍存在的终态 CR 和 legacy dead 删除标记。
+	// Terminal distinguishes a still-existing terminal CR from a legacy dead deletion marker.
 	Terminal bool `json:"terminal,omitempty"`
 }
 

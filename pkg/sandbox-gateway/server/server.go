@@ -158,8 +158,9 @@ func SetProcessStopForTest(fn func(context.Context) error) {
 	processStop = fn
 }
 
-// getMemberlistBindPort 读取 MEMBERLIST_BIND_PORT；未设置、无法解析为整数或非正数时使用默认值。
-// 此处不检查端口上限，超范围的正数由 memberlist 启动时拒绝。
+// getMemberlistBindPort reads MEMBERLIST_BIND_PORT, using the default when it is unset,
+// not an integer, or non-positive. The upper bound is not checked here; memberlist
+// rejects out-of-range positive ports at startup.
 func getMemberlistBindPort() int {
 	if val := os.Getenv(EnvMemberlistBindPort); val != "" {
 		if port, err := strconv.Atoi(val); err == nil && port > 0 {
@@ -176,8 +177,9 @@ func normalizePort(port int, defaultPort int) int {
 	return port
 }
 
-// peerSecurityFromEnv 将 gateway 环境变量交给 peersecurity.ParseInputs 统一解析和校验。
-// PEER_TLS_CLIENT_SECRET 配置 gateway 自身的客户端凭证，不使用 sandbox-manager 的凭证。
+// peerSecurityFromEnv passes the gateway environment variables to peersecurity.ParseInputs
+// for shared parsing and validation. PEER_TLS_CLIENT_SECRET configures the gateway's own
+// client credentials, not those of sandbox-manager.
 func peerSecurityFromEnv() (peersecurity.Inputs, error) {
 	in, err := peersecurity.ParseInputs(
 		os.Getenv(envPeerKeySecret),

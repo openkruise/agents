@@ -138,9 +138,13 @@ status writers.
   unchanged. During sustained outages, workers may still pay up to 200ms per
   triggered update; this is an explicit trade-off, not non-blocking delivery.
 - The controller callback directly delegates to the shared
-  `refresh.SyncRouteWithPeers`, which takes the receiving-peer snapshot and skips
-  an empty snapshot immediately. No controller-specific success or empty-peer
-  logs or rate-limit state are added; delivery errors retain reconciler logging.
+  `refresh.SyncRouteWithPeers`. After filtering sender-only members, the shared
+  sender skips an empty target snapshot and logs
+  `route sync skipped: no refresh targets` at default verbosity, at most once
+  every 30 seconds per configured outbound client. The log includes the route
+  name, namespace, and zero `peerCount`, never route credentials. Manager,
+  gateway, and controller share this implementation; no controller-specific
+  wrapper or rate-limit state is added. Delivery errors retain caller logging.
 - Changes to message or resourceVersion alone do not send. Two different
   nonempty IP addresses do send, even if routability is unchanged. Spec, Ready
   conditions, and pool ownership still determine routability through the shared
@@ -235,7 +239,8 @@ status writers.
   sending callback. Missing, unreadable, or invalid configured Secrets fail
   controller startup; no controller-specific security retry loop or readiness
   wait is added. Empty security inputs succeed without Secret reads. The returned
-  `PeerOutbound` remains read-only after publication. The controller
+  `PeerOutbound` keeps its transport and security settings unchanged after
+  publication; its concurrency-safe skip-log limiter advances on use. The controller
   process entrypoint directly calls the shared `MemberlistPeers.Start` before
   `mgr.Start`, on every replica independently of leader election; no separate
   peer runnable or controller-specific lifecycle wrapper is needed. Shared

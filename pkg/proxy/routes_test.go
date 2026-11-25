@@ -236,7 +236,7 @@ func TestListPeers(t *testing.T) {
 	}
 }
 
-// 传输、重试与地址测试在 refresh；这里只验证公共发送入口的委托行为。
+// Transport, retry, and address tests live in refresh; this only verifies delegation by the shared send entry.
 func TestSyncRouteWithPeers_NoDelivery(t *testing.T) {
 	tests := []struct {
 		name    string

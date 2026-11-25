@@ -32,7 +32,9 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/klog/v2"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/pkg/peers"
@@ -60,6 +62,8 @@ var errPeerRedirect = errors.New("peer refresh does not follow redirects")
 type PeerOutbound struct {
 	scheme string
 	client *http.Client
+	// All route producers share the skip log budget of their process's outbound client.
+	skipLogLimiter *rate.Limiter
 }
 
 // InitializePeers loads startup security once, installs the gossip key on the
@@ -97,8 +101,9 @@ func NewPeerOutbound(clientTLS *tls.Config) *PeerOutbound {
 		scheme = "https"
 	}
 	return &PeerOutbound{
-		scheme: scheme,
-		client: newPeerHTTPClient(clientTLS),
+		scheme:         scheme,
+		client:         newPeerHTTPClient(clientTLS),
+		skipLogLimiter: rate.NewLimiter(rate.Every(30*time.Second), 1),
 	}
 }
 
@@ -148,9 +153,9 @@ func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route san
 }
 
 // SyncRouteWithPeerList sends to the caller's snapshot, keeping target counts consistent.
-// An empty snapshot remains a no-op; the caller owns skip logging.
+// No refresh targets remains a no-op; configured outbound clients rate-limit skip logs.
 func SyncRouteWithPeerList(ctx context.Context, peerList []peers.Peer, route sandboxroute.Route, outbound *PeerOutbound) error {
-	// controller 仅发送路由，不提供 /refresh；过滤使用独立快照，不修改调用方列表。
+	// The controller only sends routes and serves no /refresh; filter into a separate snapshot without modifying the caller's list.
 	targets := make([]peers.Peer, 0, len(peerList))
 	for _, peer := range peerList {
 		if !strings.HasPrefix(peer.Name, peers.NodePrefixSandboxController) {
@@ -165,6 +170,10 @@ func SyncRouteWithPeerList(ctx context.Context, peerList []peers.Peer, route san
 	peerCount.Set(float64(len(peerList)))
 
 	if len(peerList) == 0 {
+		if outbound != nil && outbound.skipLogLimiter != nil && outbound.skipLogLimiter.Allow() {
+			klog.FromContext(ctx).Info("route sync skipped: no refresh targets",
+				"route", route.Name, "namespace", route.Namespace, "peerCount", 0)
+		}
 		return nil
 	}
 	if outbound == nil {

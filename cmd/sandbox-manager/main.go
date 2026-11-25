@@ -63,8 +63,8 @@ func validateE2BTimeoutFlags(maxTimeout int) error {
 	return nil
 }
 
-// validateListenerPorts 在监听器启动前检查端口范围和冲突。
-// memberlist 端口的默认值与范围检查统一委托给 peers.NormalizeBindPort。
+// validateListenerPorts checks port ranges and conflicts before listeners start.
+// The memberlist port default and range check are delegated to peers.NormalizeBindPort.
 func validateListenerPorts(metricsPort, controlPort, memberlistBindPort int, disableEnvoyExtProc bool) error {
 	if metricsPort < 0 || metricsPort > 65535 {
 		return fmt.Errorf("--metrics-port must be 0 or a valid TCP port in the range 1-65535, got %d", metricsPort)

@@ -470,8 +470,8 @@ func main() {
 			os.Exit(1)
 		}
 		peerStopDone = make(chan error, 1)
-		// 从同一停止信号开始等待，给 join 和清理完整的 manager shutdown 预算。
-		// 不在 mgr.Start 返回后重新计时，也不让独立的 15 秒限制提前结束等待。
+		// Start waiting from the same stop signal so join and cleanup get the full manager shutdown budget,
+		// instead of restarting the clock after mgr.Start returns or ending early on a separate 15-second limit.
 		context.AfterFunc(ctx, func() {
 			stopCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 			defer cancel()
@@ -480,7 +480,7 @@ func main() {
 	}
 	setupLog.Info("starting manager")
 	err = mgr.Start(ctx)
-	// manager 启动失败也取消 peers；Stop 仍只由上述回调调用一次。
+	// Manager startup failure also cancels peers; Stop is still called only once, by the callback above.
 	cancelRun()
 	if peerStopDone != nil {
 		stopErr := <-peerStopDone

@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	// DefaultMemberlistBindPort 保留既有配置入口，默认值统一由 peers 定义。
+	// DefaultMemberlistBindPort keeps the existing configuration entry; the default is defined by peers.
 	DefaultMemberlistBindPort = peers.DefaultMemberlistBindPort
 	// DefaultTrafficAccessTokenValidity preserves the existing traffic-token
 	// lifetime while clients migrate to automatic refresh.

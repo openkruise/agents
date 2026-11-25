@@ -414,7 +414,7 @@ func (m *MemberlistPeers) Stop(ctx context.Context) error {
 	}
 }
 
-// GetPeers 返回除自身外的所有存活成员；接收能力由发送方决定。
+// GetPeers returns all alive members except self; senders decide which members can receive.
 func (m *MemberlistPeers) GetPeers() []Peer {
 	if !m.started.Load() {
 		return nil

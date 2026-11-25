@@ -190,7 +190,7 @@ func (s *Server) newServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	selector, err := labels.Parse(s.sandboxLabelSelector)
 	if err != nil {
-		// 正常启动已验证配置；独立调用方也不能因无效 selector 扩大接收范围。
+		// Normal startup has already validated the configuration; standalone callers must not widen the receive scope with an invalid selector either.
 		klog.ErrorS(err, "invalid route receiver label selector")
 		mux.HandleFunc(http.MethodPost+" "+refresh.Path, func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "invalid route receiver scope", http.StatusInternalServerError)
@@ -204,7 +204,7 @@ func (s *Server) newServeMux() *http.ServeMux {
 		if selector.Empty() {
 			return true
 		}
-		// legacy payload 未携带标签时无法证明 scope；由本地 informer 补齐观察。
+		// Legacy payloads without labels cannot prove scope; the local informer fills in the observation.
 		return route.Labels != nil && selector.Matches(labels.Set(route.Labels))
 	}
 	mux.Handle(

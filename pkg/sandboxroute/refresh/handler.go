@@ -44,7 +44,7 @@ type RouteMutator interface {
 
 // NewHandler creates the shared peer route refresh handler. After every
 // mutator call, afterMutation receives its result when the callback is non-nil.
-// 可选 acceptRoute 在任何存储修改前执行；范围外的请求被忽略且不触发回调。
+// The optional acceptRoute runs before any store mutation; out-of-scope requests are ignored without triggering the callback.
 func NewHandler(
 	mutator RouteMutator,
 	afterMutation func(sandboxroute.MutationResult),
@@ -80,7 +80,7 @@ func NewHandler(
 		}
 
 		var result sandboxroute.MutationResult
-		// 终态 CR 仍是观察记录；未标记 Terminal 的 dead 和空状态保留 legacy 删除语义。
+		// A terminal CR is still an observation; dead without Terminal and empty states keep the legacy delete semantics.
 		if (route.State == sandboxstate.Dead && !route.Terminal) || route.State == "" {
 			if route.ResourceVersion == "" {
 				http.Error(w, "invalid route refresh payload", http.StatusBadRequest)
