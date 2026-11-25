@@ -17,7 +17,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/memberlist v0.5.4
 	github.com/jellydator/ttlcache/v3 v3.4.0
-	github.com/onsi/ginkgo/v2 v2.32.0
+	github.com/onsi/ginkgo/v2 v2.34.0
 	github.com/onsi/gomega v1.40.0
 	github.com/openkruise/kruise-api v1.9.0
 	github.com/prometheus/client_golang v1.24.0
