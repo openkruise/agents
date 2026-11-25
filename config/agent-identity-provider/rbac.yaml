@@ -20,6 +20,23 @@ rules:
   - apiGroups: ["security.agents.kruise.io"]
     resources: ["agentidentities/status", "agentauthenticationconfigs/status"]
     verbs: ["get", "update", "patch"]
+  # The CredentialProvider controller reads providers and writes only their
+  # status, where it records the derived callback URL.
+  - apiGroups: ["security.agents.kruise.io"]
+    resources: ["credentialproviders"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["security.agents.kruise.io"]
+    resources: ["credentialproviders/status"]
+    verbs: ["get", "update", "patch"]
+  # Reading the Secret a provider names as its client secret, and watching so
+  # that a provider blocked on a missing Secret recovers once it is created.
+  #
+  # Read only, and no value is ever copied out: the controller checks the key
+  # is present and non-empty, because a client secret must not reach status, an
+  # event or a log.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
   # Discovery decides whether the AgentIdentity CRD is installed before the
   # controller registers itself.
   - apiGroups: ["apiextensions.k8s.io"]
