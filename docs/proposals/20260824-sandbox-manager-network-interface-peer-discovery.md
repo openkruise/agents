@@ -118,9 +118,11 @@ old-status CAS, so completion accounting remains best effort under concurrent
 status writers.
 
 - Synchronization is best-effort acceleration. Failed patches, NotFound, and
-  unchanged status do not send. After successful termination control, an observed
-  deleting CR also sends a versioned deletion route within a 200ms budget, even
-  when no Pod remains. NotFound has no version evidence and must not manufacture
+  unchanged status do not send. Before termination control, an observed deleting
+  CR sends a versioned deletion route within a 200ms budget, even when no Pod
+  remains or termination cleanup subsequently fails. Sync failures do not prevent
+  cleanup, and cleanup failures retain their normal reconcile error behavior.
+  NotFound has no version evidence and must not manufacture
   a deletion fence. Repeated deleting observations may repeat the best-effort
   push; receiver RV ordering makes them idempotent. Projection and delivery errors
   are logged without rolling back status/finalizer work or retrying reconcile for

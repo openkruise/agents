@@ -677,13 +677,6 @@ func (r *SandboxReconciler) finalizeResumePhase(ctx context.Context, args core.E
 
 func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.EnsureFuncArgs) (ctrl.Result, error) {
 	pod, box, _ := args.Pod, args.Box, args.NewStatus
-	recordTerminatingEvent := pod != nil && pod.DeletionTimestamp.IsZero()
-	if err := r.getControl(pod).EnsureSandboxTerminated(ctx, args); err != nil {
-		return ctrl.Result{}, err
-	}
-	if recordTerminatingEvent {
-		r.recordSandboxTerminatingEvent(box)
-	}
 	if r.syncRouteWithPeers != nil {
 		// Use the observed deleting object and its RV; NotFound carries no version evidence and must not fabricate a deletion fence.
 		route, err := sandboxroute.RouteFromSandbox(box)
@@ -697,6 +690,13 @@ func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.Ens
 		if err != nil {
 			klog.FromContext(ctx).Error(err, "failed to sync terminating Sandbox route", "sandbox", klog.KObj(box))
 		}
+	}
+	recordTerminatingEvent := pod != nil && pod.DeletionTimestamp.IsZero()
+	if err := r.getControl(pod).EnsureSandboxTerminated(ctx, args); err != nil {
+		return ctrl.Result{}, err
+	}
+	if recordTerminatingEvent {
+		r.recordSandboxTerminatingEvent(box)
 	}
 	return ctrl.Result{}, nil
 }

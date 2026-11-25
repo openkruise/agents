@@ -1319,6 +1319,7 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 		expectFinalizerRemoved bool
 		disabled               bool
 		syncErr                error
+		terminationErr         error
 	}{
 		{
 			name: "records event when active pod is deleted",
@@ -1349,6 +1350,7 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 			expectFinalizerRemoved: true,
 		},
 		{name: "sync failure does not roll back finalizer removal", expectFinalizerRemoved: true, syncErr: fmt.Errorf("peer unavailable")},
+		{name: "deletion is synced even when finalizer removal fails", terminationErr: fmt.Errorf("finalizer patch failed")},
 		{name: "disabled sync still removes finalizer", expectFinalizerRemoved: true, disabled: true},
 	}
 
@@ -1375,6 +1377,14 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithObjects(objects...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if tt.terminationErr != nil {
+							return tt.terminationErr
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				}).
 				Build()
 			recorder := record.NewFakeRecorder(10)
 			reconciler := &SandboxReconciler{
@@ -1391,6 +1401,12 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 			if !tt.disabled {
 				reconciler.syncRouteWithPeers = func(ctx context.Context, route sandboxroute.Route) error {
 					sent++
+					observed := &agentsv1alpha1.Sandbox{}
+					require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(sandbox), observed))
+					assert.Contains(t, observed.Finalizers, core.SandboxFinalizer, "sync must precede finalizer removal")
+					if tt.pod != nil {
+						require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(tt.pod), &corev1.Pod{}), "sync must precede Pod deletion")
+					}
 					assert.Equal(t, sandbox.ResourceVersion, route.ResourceVersion)
 					assert.Equal(t, sandbox.UID, route.UID)
 					assert.NotEmpty(t, route.ResourceVersion)
@@ -1407,7 +1423,11 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 				Box:       sandbox,
 				NewStatus: sandbox.Status.DeepCopy(),
 			})
-			assert.NoError(t, err)
+			if tt.terminationErr != nil {
+				assert.ErrorIs(t, err, tt.terminationErr)
+			} else {
+				assert.NoError(t, err)
+			}
 			if tt.disabled {
 				assert.Zero(t, sent)
 			} else {
