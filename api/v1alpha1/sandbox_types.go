@@ -216,7 +216,7 @@ type SandboxUpgradePolicy struct {
 
 	// PatchVersion is the user-defined installer payload version and must be a
 	// nonempty Kubernetes label value. InstallerUpdate runs only when it differs
-	// from status.completedPatchVersion. Recreate and CheckpointRestore ignore it.
+	// from status.installedPatchVersion. Recreate and CheckpointRestore ignore it.
 	// Required when Type is InstallerUpdate; a new attempt needs a new version.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
@@ -672,12 +672,12 @@ type SandboxStatus struct {
 	// +optional
 	UpgradingPatchVersion string `json:"upgradingPatchVersion,omitempty"`
 
-	// CompletedPatchVersion is the spec.upgradePolicy.patchVersion of the last
-	// InstallerUpdate upgrade that finished successfully. It is what makes the
-	// install idempotent: the controller does not re-run a patch it has already
-	// completed, and a new ops object carries a new token.
+	// InstalledPatchVersion is the spec.upgradePolicy.patchVersion whose installer
+	// last exited successfully, recording the changes applied to the sandbox. It
+	// does not mean the sandbox can start normally at that version; for example,
+	// PostUpgrade may still fail. The controller does not reinstall this version.
 	// +optional
-	CompletedPatchVersion string `json:"completedPatchVersion,omitempty"`
+	InstalledPatchVersion string `json:"installedPatchVersion,omitempty"`
 
 	// RecycledCount records the number of times this sandbox has been recycled.
 	// +optional

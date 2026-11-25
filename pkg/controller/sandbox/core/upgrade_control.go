@@ -197,8 +197,8 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 				logger.Info("Waiting for metadata template patch after resume")
 				return nil
 			}
-			if box.Spec.UpgradePolicy.PatchVersion == box.Status.CompletedPatchVersion {
-				logger.Info("Install already completed, abandoning upgrade after resume")
+			if box.Spec.UpgradePolicy.PatchVersion == box.Status.InstalledPatchVersion {
+				logger.Info("Patch version already installed, abandoning upgrade after resume")
 				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 				newStatus.Phase = agentsv1alpha1.SandboxRunning
 				return nil
@@ -278,9 +278,9 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 
 		logger.Info("Installing step completed, transitioning to PostUpgrade")
 
-		// Record completion so the same patch version is never re-run and the
-		// upgrade trigger does not re-fire before SandboxUpdateOps clears the policy.
-		newStatus.CompletedPatchVersion = box.Spec.UpgradePolicy.PatchVersion
+		// Record the installed version so it is never re-run and the upgrade trigger
+		// does not re-fire before SandboxUpdateOps clears the policy.
+		newStatus.InstalledPatchVersion = box.Spec.UpgradePolicy.PatchVersion
 		upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPostUpgrade
 		upgradeCond.Message = ""
 		utils.SetSandboxCondition(newStatus, *upgradeCond)

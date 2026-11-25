@@ -4766,7 +4766,7 @@ func TestCalculateStatus(t *testing.T) {
 }
 
 func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
-	newInstallerBox := func(patchVersion, completedVersion string) *agentsv1alpha1.Sandbox {
+	newInstallerBox := func(patchVersion, installedVersion string) *agentsv1alpha1.Sandbox {
 		box := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:       "test-sandbox",
@@ -4789,8 +4789,8 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 			},
 			Status: agentsv1alpha1.SandboxStatus{
 				Phase:                 agentsv1alpha1.SandboxRunning,
-				UpgradingPatchVersion: completedVersion,
-				CompletedPatchVersion: completedVersion,
+				UpgradingPatchVersion: installedVersion,
+				InstalledPatchVersion: installedVersion,
 			},
 		}
 		hash, _ := core.HashSandbox(box)
@@ -4875,7 +4875,7 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 			expectedShouldRequeue:    true,
 		},
 		{
-			name:                     "completed patch version stays Running",
+			name:                     "installed patch version stays Running",
 			box:                      newInstallerBox("v1", "v1"),
 			expectedPhase:            agentsv1alpha1.SandboxRunning,
 			expectedUpgradingVersion: "v1",
@@ -4918,7 +4918,7 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 			assert.Equal(t, tt.expectedPhase, newStatus.Phase)
 			assert.Equal(t, tt.expectedShouldRequeue, shouldRequeue)
 			assert.Equal(t, tt.expectedUpgradingVersion, newStatus.UpgradingPatchVersion)
-			assert.Equal(t, tt.box.Status.CompletedPatchVersion, newStatus.CompletedPatchVersion)
+			assert.Equal(t, tt.box.Status.InstalledPatchVersion, newStatus.InstalledPatchVersion)
 			upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 			if tt.expectCondGone {
 				assert.Nil(t, upgradeCond, "Upgrading condition must be removed on a fresh installer trigger")
@@ -4950,7 +4950,7 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 func TestCalculateStatus_InstallerUpdateResetFailedCondition(t *testing.T) {
 	transitionTime := metav1.NewTime(time.Now().Add(-time.Hour))
 
-	newUpgradingBox := func(patchVersion, upgradingVersion, completedVersion, reason string) *agentsv1alpha1.Sandbox {
+	newUpgradingBox := func(patchVersion, upgradingVersion, installedVersion, reason string) *agentsv1alpha1.Sandbox {
 		box := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:       "test-sandbox",
@@ -4974,7 +4974,7 @@ func TestCalculateStatus_InstallerUpdateResetFailedCondition(t *testing.T) {
 			Status: agentsv1alpha1.SandboxStatus{
 				Phase:                 agentsv1alpha1.SandboxUpgrading,
 				UpgradingPatchVersion: upgradingVersion,
-				CompletedPatchVersion: completedVersion,
+				InstalledPatchVersion: installedVersion,
 			},
 		}
 		if reason != "" {
@@ -5078,7 +5078,7 @@ func TestCalculateStatus_InstallerUpdateResetFailedCondition(t *testing.T) {
 			})
 			assert.Equal(t, tt.expectedShouldRequeue, shouldRequeue)
 			assert.Equal(t, tt.expectedUpgradingVersion, newStatus.UpgradingPatchVersion)
-			assert.Equal(t, tt.box.Status.CompletedPatchVersion, newStatus.CompletedPatchVersion)
+			assert.Equal(t, tt.box.Status.InstalledPatchVersion, newStatus.InstalledPatchVersion)
 
 			upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 			if tt.expectedReason == "" {
@@ -6529,7 +6529,7 @@ func TestReconcile_InstallerUpdateDeadline(t *testing.T) {
 				assert.Contains(t, cond.Message, "installer")
 			}
 			if tt.wantReason == agentsv1alpha1.SandboxUpgradingReasonPostUpgrade {
-				assert.Equal(t, "ops-uid-1", updated.Status.CompletedPatchVersion)
+				assert.Equal(t, "ops-uid-1", updated.Status.InstalledPatchVersion)
 			}
 			readyCond := utils.GetSandboxCondition(&updated.Status, string(agentsv1alpha1.SandboxConditionReady))
 			require.NotNil(t, readyCond)

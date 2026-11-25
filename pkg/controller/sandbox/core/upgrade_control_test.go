@@ -2805,12 +2805,12 @@ func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("ResumeSucceed abandons when the install already completed", func(t *testing.T) {
+	t.Run("ResumeSucceed abandons when the patch version is already installed", func(t *testing.T) {
 		box := newInstallerTestSandbox(installer, "ops-uid-1")
-		box.Status.CompletedPatchVersion = "ops-uid-1"
+		box.Status.InstalledPatchVersion = "ops-uid-1"
 		control, _ := newInstallerTestControl(t, nil, newInstallerRunningPod().DeepCopy(), box.DeepCopy())
 		newStatus := newStatusWithReason(agentsv1alpha1.SandboxUpgradingReasonResumeSucceed)
-		newStatus.CompletedPatchVersion = "ops-uid-1"
+		newStatus.InstalledPatchVersion = "ops-uid-1"
 
 		err := control.EnsureSandboxUpgraded(context.Background(), EnsureFuncArgs{
 			Pod: newInstallerRunningPod(), Box: box, NewStatus: newStatus,
@@ -2880,7 +2880,7 @@ func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {
 		require.NotNil(t, cond)
 		assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonPostUpgrade, cond.Reason)
 		assert.Equal(t, "ops-uid-1", newStatus.UpgradingPatchVersion)
-		assert.Equal(t, "ops-uid-1", newStatus.CompletedPatchVersion)
+		assert.Equal(t, "ops-uid-1", newStatus.InstalledPatchVersion)
 		assert.Equal(t, 0, *patchCalls)
 	})
 
@@ -2914,7 +2914,7 @@ func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {
 		box := newInstallerTestSandbox(installer, "ops-uid-1")
 		control, _ := newInstallerTestControl(t, nil, newInstallerRunningPod().DeepCopy(), box.DeepCopy())
 		newStatus := newStatusWithReason(agentsv1alpha1.SandboxUpgradingReasonPostUpgrade)
-		newStatus.CompletedPatchVersion = "ops-uid-1"
+		newStatus.InstalledPatchVersion = "ops-uid-1"
 
 		err := control.EnsureSandboxUpgraded(context.Background(), EnsureFuncArgs{
 			Pod: newInstallerRunningPod(), Box: box, NewStatus: newStatus,
@@ -2926,14 +2926,14 @@ func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {
 		assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonSucceeded, cond.Reason)
 		assert.Equal(t, agentsv1alpha1.SandboxRunning, newStatus.Phase)
 		assert.Equal(t, "ops-uid-1", newStatus.UpgradingPatchVersion)
-		assert.Equal(t, "ops-uid-1", newStatus.CompletedPatchVersion)
+		assert.Equal(t, "ops-uid-1", newStatus.InstalledPatchVersion)
 	})
 
 	t.Run("failed attempts remain terminal", func(t *testing.T) {
 		tests := []struct {
 			name             string
 			reason           string
-			completedVersion string
+			installedVersion string
 			lateExitZero     bool
 		}{
 			{
@@ -2952,7 +2952,7 @@ func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {
 			{
 				name:             "PostUpgradeFailed does not replay hooks",
 				reason:           agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed,
-				completedVersion: "ops-uid-1",
+				installedVersion: "ops-uid-1",
 			},
 		}
 		for _, tt := range tests {
@@ -2982,7 +2982,7 @@ func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {
 				}
 
 				status := newStatusWithReason(tt.reason)
-				status.CompletedPatchVersion = tt.completedVersion
+				status.InstalledPatchVersion = tt.installedVersion
 				status.Conditions[0].Message = "attempt failed"
 				status.Conditions[0].LastTransitionTime = metav1.NewTime(time.Now().Add(-2 * time.Hour))
 				utils.SetSandboxCondition(status, metav1.Condition{

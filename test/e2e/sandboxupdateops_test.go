@@ -1739,7 +1739,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			By("Waiting for Ops to reach Completed")
 			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, 5*time.Minute)
 
-			By("Verifying sandbox returned to Running with a Succeeded upgrade and completedPatchVersion set")
+			By("Verifying sandbox returned to Running with a Succeeded upgrade and installedPatchVersion set")
 			Eventually(func(g Gomega) {
 				updated := &agentsv1alpha1.Sandbox{}
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
@@ -1748,8 +1748,8 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 				g.Expect(cond).NotTo(BeNil(), "should have Upgrading condition")
 				g.Expect(cond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonSucceeded))
 				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-				g.Expect(updated.Status.CompletedPatchVersion).To(Equal(ops.Spec.UpdateStrategy.PatchVersion),
-					"completedPatchVersion should record the user-specified payload version")
+				g.Expect(updated.Status.InstalledPatchVersion).To(Equal(ops.Spec.UpdateStrategy.PatchVersion),
+					"installedPatchVersion should record the user-specified payload version")
 				g.Expect(updated.Spec.UpgradePolicy).To(BeNil(),
 					"upgrade policy should be cleared after the upgrade succeeds")
 				g.Expect(updated.Spec.Template.Spec.Containers[0].Image).To(Equal(initialImage),
@@ -1848,7 +1848,7 @@ exit 1`
 				g.Expect(cond).NotTo(BeNil())
 				g.Expect(cond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonSucceeded))
 				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-				g.Expect(updated.Status.CompletedPatchVersion).To(Equal(ops.Spec.UpdateStrategy.PatchVersion))
+				g.Expect(updated.Status.InstalledPatchVersion).To(Equal(ops.Spec.UpdateStrategy.PatchVersion))
 				g.Expect(updated.Spec.UpgradePolicy).To(BeNil())
 				g.Expect(updated.Spec.Lifecycle).To(BeNil())
 			}, 30*time.Second, time.Second).Should(Succeed())
@@ -2059,7 +2059,7 @@ exit 1`
 			By("Verifying the install itself completed before the hook failed")
 			updated := &agentsv1alpha1.Sandbox{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
-			Expect(updated.Status.CompletedPatchVersion).To(Equal(ops.Spec.UpdateStrategy.PatchVersion),
+			Expect(updated.Status.InstalledPatchVersion).To(Equal(ops.Spec.UpdateStrategy.PatchVersion),
 				"the install finished before postUpgrade failed")
 
 			pod := &corev1.Pod{}

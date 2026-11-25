@@ -512,7 +512,7 @@ SandboxUpdateOps                       Sandbox controller                kubelet
         |    (spec.template is NOT modified)
         v
    Sandbox CR ------------------------------------------------------->
-                                     3. trigger: patchVersion != status.completedPatchVersion
+                                     3. trigger: patchVersion != status.installedPatchVersion
                                         -> phase = Upgrading
                                         -> Upgrading condition removed
                                      4. PreUpgrade hook (envd, inside sandbox)
@@ -531,7 +531,7 @@ SandboxUpdateOps                       Sandbox controller                kubelet
                                                                     |
                                      9. poll pod.status                |
                                         .ephemeralContainerStatuses <----- terminated, exit 0
-                                     10. status.completedPatchVersion = patchVersion
+                                     10. status.installedPatchVersion = patchVersion
                                      11. PostUpgrade hook (envd) — restart harness,
                                          assert new version
                                      12. Upgrading = True/Succeeded, phase = Running
@@ -692,7 +692,7 @@ type SandboxUpgradePolicy struct {
 
 	// PatchVersion is the user-defined installer payload version and must be a
 	// nonempty Kubernetes label value. InstallerUpdate runs only when it differs
-	// from status.completedPatchVersion. Recreate and CheckpointRestore ignore it.
+	// from status.installedPatchVersion. Recreate and CheckpointRestore ignore it.
 	// Required when Type is InstallerUpdate; a new attempt needs a new version.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
@@ -711,14 +711,25 @@ type SandboxUpgradePolicy struct {
 type SandboxStatus struct {
 	// ...existing fields...
 
-	// CompletedPatchVersion is the spec.upgradePolicy.patchVersion of the last
-	// InstallerUpdate upgrade that finished successfully. It is what makes the
-	// install idempotent: the controller does not re-run a patch it has already
-	// completed. A new attempt requires a different user-supplied version.
+	// InstalledPatchVersion is the spec.upgradePolicy.patchVersion whose installer
+	// last exited successfully, recording the changes applied to the sandbox. It
+	// does not mean the sandbox can start normally at that version; for example,
+	// PostUpgrade may still fail. The controller does not reinstall this version.
 	// +optional
-	CompletedPatchVersion string `json:"completedPatchVersion,omitempty"`
+	InstalledPatchVersion string `json:"installedPatchVersion,omitempty"`
 }
 ```
+
+`installedPatchVersion` answers "which payload has been written into this
+sandbox", not "is this sandbox healthy at that payload". The controller records
+it as soon as the installer exits 0 and before `postUpgrade` runs, so it is set
+even when `postUpgrade` then fails — for example because the harness does not
+restart or the version assertion does not hold — and an installed version can
+likewise fail to start later. Whether the upgraded sandbox is usable is reported
+by the `Upgrading` condition reaching `Succeeded` together with the `Ready`
+condition, never by this field alone. The field exists so the controller never
+reinstalls a payload that has already been applied, because a second install
+would meet a filesystem the first one already changed.
 
 `SandboxUpgradePolicy` exists only on `SandboxSpec`
 (`api/v1alpha1/sandbox_types.go:107`); it is not a field of `SandboxSetSpec` or
@@ -741,7 +752,7 @@ payload version. The version must be a nonempty Kubernetes label value (at most
 63 characters), so values such as `1.4.0` can also be used in Sandbox labels.
 No label key or automatic label publication is introduced by this field.
 The strategy version is immutable within an ops object, like its installer.
-Reusing a completed version does not reinstall it; reuse a version only for the
+Reusing an installed version does not reinstall it; reuse a version only for the
 same payload. Recovery from a terminal failure requires a new ops object with a
 different version, even when the corrected installer uses the same image tag.
 
@@ -1026,7 +1037,7 @@ adjustments, all guarded on the strategy being `InstallerUpdate`:
   image change — and typically an empty `spec.patch` — that check is meaningless
   here and would let the ops complete without installing anything. Replace it with
   an install-aware check: the sandbox needs no update when
-  `sbx.Status.CompletedPatchVersion == ops.Spec.UpdateStrategy.PatchVersion`.
+  `sbx.Status.InstalledPatchVersion == ops.Spec.UpdateStrategy.PatchVersion`.
 - Line 467 returns `sandboxResumeSucceed` for a labelled, `Running` sandbox with no
   `Upgrading` condition. That heuristic exists to recover a lost phase-2 template
   patch. `InstallerUpdate` has no phase 2, so this branch must be skipped; such a
@@ -1051,12 +1062,12 @@ condition must split by policy. Today it fires when the computed
 `status.updateRevision` differs from the recorded one *and* the policy requires a
 Pod replacement; under `InstallerUpdate` neither half holds. For installer policy it
 instead fires when `spec.upgradePolicy.patchVersion` is non-empty and differs from
-`status.completedPatchVersion`. Both paths keep the existing effect: set
+`status.installedPatchVersion`. Both paths keep the existing effect: set
 `Phase=Upgrading` and remove the `Upgrading` and `Paused` conditions.
 
 The `SandboxUpgrading` case at line 857, which resets the condition when the
 template changes mid-upgrade, needs the same split: for installer policy compare
-`PatchVersion` against `CompletedPatchVersion` instead of the template revision, so a
+`PatchVersion` against `InstalledPatchVersion` instead of the template revision, so a
 re-issued patch resumes from the right step.
 
 **Gate** — `pkg/controller/sandbox/core/upgrade_control.go:100`. Add a
@@ -1080,7 +1091,7 @@ skipped.
 patch and abandons the upgrade if the resume trigger disappears without a revision
 change. Under installer policy there is no phase-2 patch, so this state must
 transition directly to `PreUpgrade`; the abandonment check keys off
-`PatchVersion != CompletedPatchVersion` instead of `UpdateRevision`.
+`PatchVersion != InstalledPatchVersion` instead of `UpdateRevision`.
 
 **New `Installing` step.** A `performInstallerUpgrade` function replaces
 `Checkpointing` + `UpgradePod` and does seven things:
@@ -1146,8 +1157,10 @@ transition directly to `PreUpgrade`; the abandonment check keys off
      re-running it is not obviously safe.
    - `State.Running` past `installer.timeoutSeconds` → `InstallingFailed`, message
      noting the container cannot be terminated.
-7. **Record completion.** Copy `spec.upgradePolicy.patchVersion` into
-   `status.completedPatchVersion`, then fall through to `PostUpgrade`.
+7. **Record the installed version.** Copy `spec.upgradePolicy.patchVersion` into
+   `status.installedPatchVersion`, then fall through to `PostUpgrade`. This
+   records that the changes are applied, not that the sandbox starts normally at
+   that version; `PostUpgrade` can still fail.
 
 On success the existing tail of `EnsureSandboxUpgraded` (lines 291-305) already
 does the right thing: `Upgrading=True/Succeeded`, `Phase=Running`,
@@ -1510,7 +1523,7 @@ used:
   not by the API server, and does not change.
 - New optional fields only: `updateStrategy.installer`,
   `upgradePolicy.patchVersion`, `upgradePolicy.installer`,
-  `status.completedPatchVersion`. Absent means unused.
+  `status.installedPatchVersion`. Absent means unused.
 - `SandboxInstallerUpdateGate` defaults to `false`, so a controller upgraded
   without configuration change behaves exactly as before, and the webhook rejects
   the new strategy.
@@ -1543,7 +1556,7 @@ existing tables per the repository's test rules):
   label and clears the stale failure label; a `Paused` sandbox gets the resume
   trigger *and* the full policy.
 - `sandboxupdateops_controller_test.go`: classification of a sandbox whose
-  `CompletedPatchVersion` matches (→ `NoNeedUpdate`) and does not match (→
+  `InstalledPatchVersion` matches (→ `NoNeedUpdate`) and does not match (→
   `Candidate`); an empty `spec.patch` still yields candidates; a labelled
   `Running` sandbox with no `Upgrading` condition classifies as `Updating`, not
   `ResumeSucceed`; `InstallingFailed` classifies as `Failed` and consumes budget;
@@ -1561,7 +1574,7 @@ existing tables per the repository's test rules):
   `TargetContainerName`, default `SYS_PTRACE`); operator `securityContext`
   overrides the default; subresource `Conflict` → error without a second
   injection.
-- Status evaluation: exit 0 → `CompletedPatchVersion` set and advance to
+- Status evaluation: exit 0 → `InstalledPatchVersion` set and advance to
   `PostUpgrade`; exit 125 → `InstallingFailed` with the namespace-targeting
   message; exit 126 → `InstallingFailed` with the absolute-path message; exit 1 →
   `InstallingFailed` with truncated stdout/stderr; `ImagePullBackOff` → stays in
@@ -1577,7 +1590,7 @@ existing tables per the repository's test rules):
   without a template patch.
 - `sandbox_controller_test.go`: the upgrade-trigger predicate's truth table; the
   trigger fires on a new `PatchVersion` and does not re-fire once
-  `CompletedPatchVersion` matches; the `SandboxUpgrading` re-entry path resets the
+  `InstalledPatchVersion` matches; the `SandboxUpgrading` re-entry path resets the
   condition for a changed `PatchVersion`.
 
 **Unit — `pkg/webhook/sandboxupdateops/validating/`:** extend the existing
@@ -1595,7 +1608,7 @@ populate `ephemeralContainerStatuses`):
   the Pod is never replaced (`pod.UID` and `resourceVersion` continuity,
   `restartCount` unchanged), `spec.template` container image is unchanged, the Pod
   spec container image is unchanged, `Upgrading=Succeeded`,
-  `status.completedPatchVersion` matches, `spec.upgradePolicy` is cleared, and the
+  `status.installedPatchVersion` matches, `spec.upgradePolicy` is cleared, and the
   ops reaches `Completed` with `updatedReplicas == replicas`.
 - Installer exits non-zero → `InstallingFailed`, the `upgrade-failed` label is
   set, the ops fail-stops at `Failed`, and the second sandbox is never touched.
@@ -1798,6 +1811,13 @@ individually.
       ephemeral container cannot be removed, restarted or replaced — so a second
       attempt only added a permanent entry to `pod.spec` on top of a filesystem
       whose state was already unknown.
+- [ ] 11/24/2026: Made `patchVersion` user-defined through
+      `spec.updateStrategy.patchVersion` (a Kubernetes label value) instead of the
+      ops UID, and renamed `status.completedPatchVersion` →
+      **`status.installedPatchVersion`**. The new name states what the field
+      records — the payload already applied to the sandbox — and avoids implying
+      that the sandbox starts normally at that version, since it is written before
+      `postUpgrade` runs.
 - [ ] Verify the prefix-redirect pattern end-to-end against a real OpenClaw and a
       real Hermes Agent sandbox, including whether lifecycle scripts and native
       builds survive the libc-family match requirement, and whether

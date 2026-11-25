@@ -103,10 +103,10 @@ func isInstallerUpdateOps(ops *agentsv1alpha1.SandboxUpdateOps) bool {
 }
 
 // isSandboxOpsApplied reports whether the ops target and all declared hooks match the sandbox.
-// InstallerUpdate also requires this ops's completed patch version token.
+// InstallerUpdate also requires this ops's patch version to be installed.
 func isSandboxOpsApplied(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
 	if isInstallerUpdateOps(ops) {
-		if sbx.Status.CompletedPatchVersion != ops.Spec.UpdateStrategy.PatchVersion {
+		if sbx.Status.InstalledPatchVersion != ops.Spec.UpdateStrategy.PatchVersion {
 			return false
 		}
 	}

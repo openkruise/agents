@@ -1330,27 +1330,27 @@ func TestIsSandboxOpsApplied_InstallerUpdate(t *testing.T) {
 	ops, sbx := newInstallerOpsAndSandbox()
 	ops.UID = types.UID("another-ops-uid")
 
-	sbx.Status.CompletedPatchVersion = ops.Spec.UpdateStrategy.PatchVersion
-	assert.False(t, isSandboxOpsApplied(sbx, ops), "completed install still needs its metadata patch")
+	sbx.Status.InstalledPatchVersion = ops.Spec.UpdateStrategy.PatchVersion
+	assert.False(t, isSandboxOpsApplied(sbx, ops), "installed patch version still needs its metadata patch")
 	sbx.Spec.Template.Labels["harness-version"] = "v2"
 	sbx.Spec.Template.Annotations["harness-version"] = "v2"
 	assert.True(t, isSandboxOpsApplied(sbx, ops),
 		"sandbox that completed this patch version and metadata must be skipped")
 
-	sbx.Status.CompletedPatchVersion = "ops-uid-other"
+	sbx.Status.InstalledPatchVersion = "ops-uid-other"
 	assert.False(t, isSandboxOpsApplied(sbx, ops),
 		"sandbox that completed a different patch version still needs the install")
 
-	sbx.Status.CompletedPatchVersion = ""
+	sbx.Status.InstalledPatchVersion = ""
 	assert.False(t, isSandboxOpsApplied(sbx, ops),
 		"sandbox that never installed must not be skipped")
 
-	sbx.Status.CompletedPatchVersion = ""
+	sbx.Status.InstalledPatchVersion = ""
 	assert.True(t, isSandboxTemplateMatchPatch(sbx, ops))
 	assert.False(t, isSandboxOpsApplied(sbx, ops), "matching metadata alone must not skip installation")
 
 	// Declared hooks must also be present once the install completed.
-	sbx.Status.CompletedPatchVersion = ops.Spec.UpdateStrategy.PatchVersion
+	sbx.Status.InstalledPatchVersion = ops.Spec.UpdateStrategy.PatchVersion
 	ops.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{
 		PrePause: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}},
 	}

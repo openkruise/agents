@@ -507,7 +507,7 @@ func isUpgradeSucceeded(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.Sandbox
 	return cond != nil &&
 		cond.Reason == agentsv1alpha1.SandboxUpgradingReasonSucceeded &&
 		cond.Status == metav1.ConditionTrue &&
-		(!isInstallerUpdateOps(ops) || sbx.Status.CompletedPatchVersion == ops.Spec.UpdateStrategy.PatchVersion)
+		(!isInstallerUpdateOps(ops) || sbx.Status.InstalledPatchVersion == ops.Spec.UpdateStrategy.PatchVersion)
 }
 
 // syncSandboxUpgradeState aligns the sandbox's upgrade-failed label and

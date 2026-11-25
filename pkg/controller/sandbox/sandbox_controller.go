@@ -940,14 +940,14 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		// upgrading from Paused (which requires a resume-then-upgrade detour).
 		requiresInstall := core.RequiresInstallerUpgrade(box) &&
 			box.Spec.UpgradePolicy.PatchVersion != "" &&
-			box.Spec.UpgradePolicy.PatchVersion != box.Status.CompletedPatchVersion
+			box.Spec.UpgradePolicy.PatchVersion != box.Status.InstalledPatchVersion
 		if requiresInstall ||
 			(newStatus.UpdateRevision != box.Status.UpdateRevision &&
 				core.RequiresPodReplacementUpgrade(box)) {
 			if requiresInstall {
 				logger.Info("Detected installer upgrade trigger",
 					"patchVersion", box.Spec.UpgradePolicy.PatchVersion,
-					"completedPatchVersion", box.Status.CompletedPatchVersion)
+					"installedPatchVersion", box.Status.InstalledPatchVersion)
 			} else {
 				logger.Info("Detected upgrade trigger",
 					"oldRevision", box.Status.UpdateRevision,

@@ -1129,7 +1129,7 @@ spec:
                     description: |-
                       PatchVersion is the user-defined installer payload version and must be a
                       nonempty Kubernetes label value. InstallerUpdate runs only when it differs
-                      from status.completedPatchVersion. Recreate and CheckpointRestore ignore it.
+                      from status.installedPatchVersion. Recreate and CheckpointRestore ignore it.
                       Required when Type is InstallerUpdate; a new attempt needs a new version.
                     maxLength: 63
                     minLength: 1
@@ -1157,13 +1157,6 @@ spec:
           status:
             description: status defines the observed state of Sandbox
             properties:
-              completedPatchVersion:
-                description: |-
-                  CompletedPatchVersion is the spec.upgradePolicy.patchVersion of the last
-                  InstallerUpdate upgrade that finished successfully. It is what makes the
-                  install idempotent: the controller does not re-run a patch it has already
-                  completed, and a new ops object carries a new token.
-                type: string
               conditions:
                 description: |-
                   conditions represent the current state of the Sandbox resource.
@@ -1227,6 +1220,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              installedPatchVersion:
+                description: |-
+                  InstalledPatchVersion is the spec.upgradePolicy.patchVersion whose installer
+                  last exited successfully, recording the changes applied to the sandbox. It
+                  does not mean the sandbox can start normally at that version; for example,
+                  PostUpgrade may still fail. The controller does not reinstall this version.
+                type: string
               message:
                 description: message
                 type: string
