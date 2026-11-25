@@ -93,6 +93,10 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 	if opts.Template == "" {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("template is required")
 	}
+	if opts.InitRuntime != nil && opts.AccessToken != opts.InitRuntime.AccessToken {
+		return infra.ClaimSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest,
+			"claim access token must match runtime initialization access token")
+	}
 	if opts.CSIMount != nil {
 		// for csi mount, init runtime is required
 		if opts.InitRuntime == nil {
@@ -1111,9 +1115,9 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 			return fmt.Errorf("failed to marshal init runtime options: %w", err)
 		}
 		annotations[v1alpha1.AnnotationInitRuntimeRequest] = string(initRuntimeJSON)
-		if opts.InitRuntime.AccessToken != "" {
-			annotations[v1alpha1.AnnotationRuntimeAccessToken] = opts.InitRuntime.AccessToken
-		}
+	}
+	if opts.AccessToken != "" {
+		annotations[v1alpha1.AnnotationRuntimeAccessToken] = opts.AccessToken
 	}
 
 	// record csi mount config into annotation

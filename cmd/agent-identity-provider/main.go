@@ -110,6 +110,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Nothing else derives status.callbackUrl, which is the value an operator
+	// registers with the third party, so without this a CredentialProvider
+	// stays unusable no matter how it is configured.
+	if err := agentidentity.AddCredentialProvider(mgr); err != nil {
+		setupLog.Error(err, "unable to add the CredentialProvider controller")
+		os.Exit(1)
+	}
+
 	// The returned Issuer is what will mint agent tokens once the issuance RPC
 	// exists. For now it only serves discovery and JWKS, so a verifier can
 	// already fetch the keys it will need.

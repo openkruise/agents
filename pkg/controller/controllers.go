@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/openkruise/agents/pkg/controller/commit"
@@ -27,6 +29,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxupdateops"
 	"github.com/openkruise/agents/pkg/controller/securitytokenrefresh"
 	"github.com/openkruise/agents/pkg/controller/sessionservice"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -38,11 +41,13 @@ type Deps struct {
 	// RuntimeTLSBundle is the client TLS bundle for reaching TLS-capable
 	// agent-runtimes. Nil disables runtime TLS for the whole process.
 	RuntimeTLSBundle *runtimeclient.TLSBundle
+	// SyncRouteWithPeers is an optional route publishing callback; nil disables active sync.
+	SyncRouteWithPeers func(context.Context, sandboxroute.Route) error
 }
 
 func SetupWithManager(m manager.Manager, deps Deps) error {
 	sbxMaxPendingTimeout := sandbox.MaxPendingTimeout()
-	if err := sandbox.Add(m, deps.MetricsCleanup, deps.RuntimeTLSBundle); err != nil {
+	if err := sandbox.Add(m, deps.MetricsCleanup, deps.RuntimeTLSBundle, deps.SyncRouteWithPeers); err != nil {
 		return err
 	}
 	if err := sandboxset.Add(m, sbxMaxPendingTimeout); err != nil {

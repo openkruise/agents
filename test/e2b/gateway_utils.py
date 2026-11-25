@@ -5,9 +5,7 @@ import subprocess
 import time
 
 import requests
-
 from utils import resolve_sandbox_cr
-
 
 # The port agent-runtime listens on. agent-runtime authenticates x-access-token
 # on its own, so a rejection observed here cannot be attributed to the gateway.
@@ -119,18 +117,13 @@ def gateway_request_eventually(
     port=RUNTIME_PORT,
     timeout=30,
 ):
-    """Poll the gateway until the route stops reporting itself as unusable.
+    """Wait for a post-claim route before inspecting its final response.
 
-    502 and 503 cover every state in which no usable route is installed yet: a
-    registry miss, a registry that is still starting, and a Sandbox whose
-    projected state is not running. That last case is what makes polling on
-    these two codes sufficient rather than arbitrary: a warm-pool Sandbox is
-    owned by its SandboxSet until it is claimed, which projects to Available (or
-    Creating) instead of Running, and the gateway rejects those with 502 before
-    authentication runs. Claiming clears the owner reference and writes the
-    runtime access token in a single update, so any other status proves the
-    route in effect is the post-claim one, with its access token and traffic-auth
-    flag already populated.
+    A stale warm-pool route has no token and can return 401 before its state is
+    checked. Retry that response as well as registry/state unavailability (502
+    and 503), bounded by the deadline. A permanent UUID failure still fails the
+    wait. JWT rejection (403) remains terminal; tests expecting UUID rejection
+    should use gateway_request directly rather than this readiness helper.
     """
     deadline = time.monotonic() + timeout
     response = None
@@ -138,7 +131,7 @@ def gateway_request_eventually(
         response = gateway_request(
             config, sandbox_id, runtime_access_token, traffic_access_token, port
         )
-        if response.status_code not in (502, 503):
+        if response.status_code not in (401, 502, 503):
             return response
         time.sleep(0.5)
     raise AssertionError(

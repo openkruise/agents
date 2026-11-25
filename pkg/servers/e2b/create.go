@@ -128,7 +128,6 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	}
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
-	var accessToken string
 
 	// storageAuthAnnotation holds the annotation key-value pair built by the
 	// BuildStorageAuthAnnotation hook (populated later, captured by reference).
@@ -140,6 +139,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		User:              user.ID.String(),
 		ClaimTimeout:      resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		MemoryPersistence: request.AutoPauseMemory,
+		AccessToken:       config.NewDefaultAccessToken(),
 		Modifier: func(sbx infra.Sandbox) error {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 			sc.csiMountOptionsConfigRecord(ctx, sbx, request)
@@ -151,10 +151,9 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	}
 
 	if !request.Extensions.SkipInitRuntime {
-		accessToken = config.NewDefaultAccessToken()
 		infraOpts.InitRuntime = &config.InitRuntimeOptions{
 			EnvVars:     request.EnvVars,
-			AccessToken: accessToken,
+			AccessToken: infraOpts.AccessToken,
 		}
 	}
 
@@ -214,7 +213,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
-		Body: sc.convertToE2BSandbox(sbx, accessToken, domain),
+		Body: sc.convertToE2BSandbox(sbx, infraOpts.AccessToken, domain),
 	}, nil
 }
 

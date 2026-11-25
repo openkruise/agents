@@ -74,7 +74,7 @@ jobs:
           version: ${{ env.KIND_VERSION }}
 
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
         with:
           tool-cache: false
           android: true
@@ -339,6 +339,10 @@ jobs:
             export TRAFFIC_ACCESS_TOKEN_JWT_E2E=true
             export JWT_E2E_TOKEN_COMMAND="kubectl exec -n sandbox-system deployment/jwt-e2e-oidc-provider -- /jwt-oidc-provider issue"
           fi
+          extra_test_args=()
+          if [ "${{ matrix.profile }}" = "uuid-auth" ]; then
+            extra_test_args+=(--test-file test/e2b/test_gateway_snapshot_auth.py)
+          fi
           # Temporarily pinned: e2b 2.38.0 removed the http2 kwarg of
           # get_transport() that e2b-code-interpreter 2.9.0 still passes.
           # 2.37.1 + 2.9.0 is the last verified working combination.
@@ -347,5 +351,6 @@ jobs:
             --auth-disabled \
             --e2b-version 2.37.1 --sdk-version 2.9.0 \
             --test-file "${{ matrix.test_file }}" \
+            "${extra_test_args[@]}" \
             -m "${{ matrix.marker }}" \
             --pytest-extra-args "-s -x"

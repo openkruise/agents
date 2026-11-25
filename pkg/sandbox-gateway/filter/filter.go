@@ -221,11 +221,8 @@ func (f *sandboxFilter) authenticate(header api.RequestHeaderMap, route sandboxr
 	if !f.config.EnableAuth {
 		return api.Continue
 	}
-	if route.AccessToken == "" {
-		return api.Continue
-	}
 	requestToken, _ := header.Get(accessTokenHeader)
-	if subtle.ConstantTimeCompare([]byte(requestToken), []byte(route.AccessToken)) == 1 {
+	if route.AccessToken != "" && subtle.ConstantTimeCompare([]byte(requestToken), []byte(route.AccessToken)) == 1 {
 		return api.Continue
 	}
 	logger.Warn("Access token mismatch", zap.String("sandboxID", route.ID))

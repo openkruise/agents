@@ -167,7 +167,7 @@ func (s *Store) membersForParent(ctx context.Context, parent *agents.SessionServ
 	for _, box := range out {
 		sharedSatisfied := expectations.ResourceVersionExpectationSatisfied(box)
 		if write, exists := s.memberWrites[box.UID]; exists {
-			if !expectations.IsResourceVersionNewer(write.version, box.ResourceVersion) {
+			if !expectations.IsResourceVersionNewerOrEqual(write.version, box.ResourceVersion) {
 				if write.firstUnsatisfied.IsZero() {
 					write.firstUnsatisfied = time.Now()
 					s.memberWrites[box.UID] = write
