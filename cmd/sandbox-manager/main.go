@@ -38,7 +38,6 @@ import (
 
 	agentsclient "github.com/openkruise/agents/client"
 	"github.com/openkruise/agents/pkg/configreload"
-	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -63,17 +62,18 @@ func validateE2BTimeoutFlags(maxTimeout int) error {
 	return nil
 }
 
-// validateListenerPorts checks port ranges and conflicts before listeners start.
-// The memberlist port default and range check are delegated to peers.NormalizeBindPort.
+// Memberlist starts after configuration. Detect conflicts with the service
+// listeners before they can make the pod Ready.
 func validateListenerPorts(metricsPort, controlPort, memberlistBindPort int, disableEnvoyExtProc bool) error {
 	if metricsPort < 0 || metricsPort > 65535 {
 		return fmt.Errorf("--metrics-port must be 0 or a valid TCP port in the range 1-65535, got %d", metricsPort)
 	}
-	memberlistBindPort, err := peers.NormalizeBindPort(memberlistBindPort)
-	if err != nil {
-		return fmt.Errorf("invalid --memberlist-bind-port: %w", err)
+	if memberlistBindPort <= 0 {
+		memberlistBindPort = config.DefaultMemberlistBindPort
 	}
 	switch {
+	case memberlistBindPort > 65535:
+		return fmt.Errorf("--memberlist-bind-port exceeds the maximum TCP port 65535: %d", memberlistBindPort)
 	case memberlistBindPort == controlPort:
 		return fmt.Errorf("--port (%d) must differ from --memberlist-bind-port", controlPort)
 	case memberlistBindPort == metricsPort:
@@ -186,7 +186,7 @@ func main() {
 	pflag.BoolVar(&disableEnvoyExtProc, "disable-envoy-ext-proc", false, "Disable the Envoy ext-proc gRPC listener (port 9002). HTTP route refresh still starts.")
 	pflag.Float64Var(&kubeClientQPS, "kube-client-qps", 500, "QPS for Kubernetes client")
 	pflag.IntVar(&kubeClientBurst, "kube-client-burst", 1000, "Burst for Kubernetes client")
-	pflag.IntVar(&memberlistBindPort, "memberlist-bind-port", peers.DefaultMemberlistBindPort, "Port for memberlist gossip; non-positive values use the default")
+	pflag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip (default 7946)")
 	pflag.StringVar(&e2bKeyStorage, "e2b-key-storage", "secret",
 		"Storage backend for E2B API keys. Valid values: 'secret' (K8s Secret, default), 'mysql' (MySQL via GORM). "+
 			"MySQL requires a DSN from "+configreload.DSN+" or --secret-config and uses the effective HMAC pepper; secret mode ignores both.")
@@ -277,8 +277,25 @@ func main() {
 	}
 	// Parse the peer security flags before anything binds: a malformed Secret
 	// reference or an incomplete TLS pair must fail startup.
-	peerSecurity, err := peersecurity.ParseInputs(peerKeySecret, peerTLSServerSecret, peerTLSClientSecret, peerAllowedClientCNs)
+	peerKeyRef, err := utils.ParseSecretRef(peerKeySecret)
 	if err != nil {
+		klog.Fatalf("Invalid --peer-key-secret: %v", err)
+	}
+	peerTLSServerRef, err := utils.ParseSecretRef(peerTLSServerSecret)
+	if err != nil {
+		klog.Fatalf("Invalid --peer-tls-server-secret: %v", err)
+	}
+	peerTLSClientRef, err := utils.ParseSecretRef(peerTLSClientSecret)
+	if err != nil {
+		klog.Fatalf("Invalid --peer-tls-client-secret: %v", err)
+	}
+	peerSecurity := peersecurity.Inputs{
+		PeerKeySecret:    peerKeyRef,
+		TLSServerSecret:  peerTLSServerRef,
+		TLSClientSecret:  peerTLSClientRef,
+		AllowedClientCNs: peerAllowedClientCNs,
+	}
+	if err := peerSecurity.Validate(); err != nil {
 		klog.Fatalf("Invalid peer security flags: %v", err)
 	}
 	bindAddress, err := network.ResolveNetworkInterfaceAddress(networkInterface)

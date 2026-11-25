@@ -34,8 +34,11 @@ import (
 
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/peersecurity"
+	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 // Environment variable names for peer discovery
@@ -68,7 +71,7 @@ type ReadinessCheck func() error
 var (
 	globalPeerRuntimeMu sync.RWMutex
 	globalPeerManager   peers.Peers
-	globalPeerOutbound  *refresh.PeerOutbound
+	globalPeerOutbound  *proxy.PeerOutbound
 
 	// processServer is stored by Start on a Go goroutine and loaded by
 	// StopProcess from Envoy's main thread, so it must stay atomic.
@@ -78,7 +81,7 @@ var (
 	processStop = defaultProcessStop
 )
 
-func setPeerRuntime(pm peers.Peers, outbound *refresh.PeerOutbound) {
+func setPeerRuntime(pm peers.Peers, outbound *proxy.PeerOutbound) {
 	globalPeerRuntimeMu.Lock()
 	defer globalPeerRuntimeMu.Unlock()
 	globalPeerManager = pm
@@ -95,7 +98,7 @@ func GetPeerManager() peers.Peers {
 
 // GetPeerOutbound returns this process's outbound peer client for use by the
 // wake package. Returns nil if the server has not been started yet.
-func GetPeerOutbound() *refresh.PeerOutbound {
+func GetPeerOutbound() *proxy.PeerOutbound {
 	globalPeerRuntimeMu.RLock()
 	defer globalPeerRuntimeMu.RUnlock()
 	return globalPeerOutbound
@@ -158,16 +161,15 @@ func SetProcessStopForTest(fn func(context.Context) error) {
 	processStop = fn
 }
 
-// getMemberlistBindPort reads MEMBERLIST_BIND_PORT, using the default when it is unset,
-// not an integer, or non-positive. The upper bound is not checked here; memberlist
-// rejects out-of-range positive ports at startup.
+// getMemberlistBindPort reads the memberlist bind port from environment variable
+// Returns the default port if not set or invalid
 func getMemberlistBindPort() int {
 	if val := os.Getenv(EnvMemberlistBindPort); val != "" {
 		if port, err := strconv.Atoi(val); err == nil && port > 0 {
 			return port
 		}
 	}
-	return peers.DefaultMemberlistBindPort
+	return config.DefaultMemberlistBindPort
 }
 
 func normalizePort(port int, defaultPort int) int {
@@ -177,17 +179,36 @@ func normalizePort(port int, defaultPort int) int {
 	return port
 }
 
-// peerSecurityFromEnv passes the gateway environment variables to peersecurity.ParseInputs
-// for shared parsing and validation. PEER_TLS_CLIENT_SECRET configures the gateway's own
-// client credentials, not those of sandbox-manager.
+// peerSecurityFromEnv parses the Gateway peer-security environment variables.
+// They mirror the sandbox-manager flags and keep the same defaults and
+// enablement rules: a feature is enabled only by its own Secret reference, data
+// keys are read only while that reference is set, and both TLS references empty
+// keeps plaintext peer HTTP. PEER_ALLOWED_CLIENT_CNS is an optional inbound
+// identity restriction and requires the TLS pair when non-empty. The server
+// Secret supplies inbound credentials and ca.crt for verifying peer clients.
+// The client Secret supplies this process's own runtime client credentials
+// (never the sandbox manager's bundle) and ca.crt for verifying peer servers.
+// Both bundles use the shared TLS loader's fixed data-key precedence.
 func peerSecurityFromEnv() (peersecurity.Inputs, error) {
-	in, err := peersecurity.ParseInputs(
-		os.Getenv(envPeerKeySecret),
-		os.Getenv(envPeerTLSServerSecret),
-		os.Getenv(envPeerTLSClientSecret),
-		os.Getenv(envPeerAllowedClientCNs),
-	)
+	keySecret, err := utils.ParseSecretRef(os.Getenv(envPeerKeySecret))
 	if err != nil {
+		return peersecurity.Inputs{}, fmt.Errorf("invalid %s: %w", envPeerKeySecret, err)
+	}
+	serverSecret, err := utils.ParseSecretRef(os.Getenv(envPeerTLSServerSecret))
+	if err != nil {
+		return peersecurity.Inputs{}, fmt.Errorf("invalid %s: %w", envPeerTLSServerSecret, err)
+	}
+	clientSecret, err := utils.ParseSecretRef(os.Getenv(envPeerTLSClientSecret))
+	if err != nil {
+		return peersecurity.Inputs{}, fmt.Errorf("invalid %s: %w", envPeerTLSClientSecret, err)
+	}
+	in := peersecurity.Inputs{
+		PeerKeySecret:    keySecret,
+		TLSServerSecret:  serverSecret,
+		TLSClientSecret:  clientSecret,
+		AllowedClientCNs: os.Getenv(envPeerAllowedClientCNs),
+	}
+	if err := in.Validate(); err != nil {
 		return peersecurity.Inputs{}, fmt.Errorf("invalid peer security environment variables: %w", err)
 	}
 	return in, nil
@@ -203,7 +224,7 @@ type Server struct {
 	registry           *registry.Registry
 	readinessCheck     ReadinessCheck
 	peerServerTLS      *tls.Config
-	peerOutbound       *refresh.PeerOutbound
+	peerOutbound       *proxy.PeerOutbound
 }
 
 // NewServer creates a new peer server
@@ -245,25 +266,34 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	// Get node name from environment variables
-	nodeName := peers.NewPeerNodeName(false)
+	nodeName := os.Getenv("HOSTNAME")
+	if nodeName == "" {
+		nodeName = os.Getenv("POD_NAME")
+	}
 	if nodeName == "" {
 		return fmt.Errorf("HOSTNAME or POD_NAME environment variable must be set")
 	}
 
-	// Resolve once through the shared helper and pass the same address to memberlist.
-	localIP, err := peers.FindPodIP()
-	if err != nil {
-		return fmt.Errorf("failed to determine local IP: %w", err)
+	// Get local IP
+	localIP := os.Getenv("POD_IP")
+	if localIP == "" {
+		localIP = utils.GetFirstNonLoopbackIP()
+	}
+	if localIP == "" {
+		return fmt.Errorf("failed to determine local IP")
 	}
 
 	inputs, err := peerSecurityFromEnv()
 	if err != nil {
 		return err
 	}
-	peerManager := peers.NewMemberlistPeers(s.client, peers.NodePrefixSandboxGateway+nodeName, os.Getenv(EnvNamespace), os.Getenv(EnvLabelSelector))
-	outbound, serverTLS, err := refresh.InitializePeers(ctx, s.client, peerManager, inputs)
+	// Load owns the enablement decision: inputs without Secret references
+	// return plaintext materials without reading any Secret.
+	loadCtx, cancel := context.WithTimeout(ctx, peersecurity.LoadTimeout)
+	secretKey, serverTLS, clientTLS, err := peersecurity.Load(loadCtx, s.client, inputs)
+	cancel()
 	if err != nil {
-		return err
+		return fmt.Errorf("load peer security: %w", err)
 	}
 	if serverTLS != nil {
 		// Client certificates stay optional at the handshake because this
@@ -274,7 +304,7 @@ func (s *Server) Start(ctx context.Context) error {
 		cfg.ClientAuth = tls.VerifyClientCertIfGiven
 		s.peerServerTLS = cfg
 	}
-	s.peerOutbound = outbound
+	s.peerOutbound = proxy.NewPeerOutbound(clientTLS)
 	s.httpServer.Handler = s.newServeMux(s.peerServerTLS != nil)
 
 	lis, err := net.Listen("tcp", s.httpServer.Addr)
@@ -285,7 +315,12 @@ func (s *Server) Start(ctx context.Context) error {
 		lis = tls.NewListener(lis, s.peerServerTLS)
 	}
 
-	s.peerManager = peerManager
+	// Get namespace and label selector from environment variables
+	namespace := os.Getenv(EnvNamespace)
+	labelSelector := os.Getenv(EnvLabelSelector)
+
+	s.peerManager = peers.NewMemberlistPeers(s.client, peers.NodePrefixSandboxGateway+nodeName, namespace, labelSelector)
+	s.peerManager.SetSecretKey(secretKey)
 	setPeerRuntime(s.peerManager, s.peerOutbound)
 
 	go func() {
@@ -295,7 +330,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	if err := s.peerManager.Start(ctx, localIP, s.memberlistBindPort); err != nil {
+	if err := s.peerManager.Start(ctx, "", s.memberlistBindPort); err != nil {
 		if shutdownErr := s.httpServer.Shutdown(ctx); shutdownErr != nil {
 			klog.ErrorS(shutdownErr, "Failed to shut down peer server after memberlist startup failure")
 		}

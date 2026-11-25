@@ -192,13 +192,14 @@ status writers.
   only selector-matching seed Pods in `sandbox-system`, at most once per retry
   cycle while unjoined, and stops listing after a successful join. Security
   material is retrieved by referenced Secret Get, never by Secret List.
-- Manager, gateway, and controller all call the neutral
+- Controller setup calls the neutral
   `refresh.InitializePeers(ctx, reader, peerManager, inputs)`. It calls
   `peersecurity.Load` once within the shared 30-second startup budget, installs
   the gossip key on the existing memberlist instance, and creates the outbound
-  refresh client. No controller-specific inputs or loader, security retry loop,
-  or change to manager/gateway receive TLS policy is introduced. All three
-  controller flags default to empty strings:
+  refresh client. Manager and gateway retain their existing direct `Load` calls
+  and component assembly, including input parsing, node naming, ports, and
+  receive TLS policy. No separate security loader or retry loop is introduced.
+  All three controller flags default to empty strings:
   `--peer-key-secret`, `--peer-tls-server-secret`, and `--peer-tls-client-secret`.
   Empty references are valid. With all three empty, `Load` reads no Secrets,
   memberlist gossip is unencrypted, and refresh uses plaintext HTTP without
@@ -237,8 +238,8 @@ status writers.
   receivers to accept the existing sandbox-manager client identity. Template
   references do not prove runtime interoperability. The controller gate does
   not trigger KDM key creation.
-- Like manager/gateway, setup calls shared initialization before publishing the
-  sending callback. Missing, unreadable, or invalid configured Secrets fail
+- Controller setup calls shared initialization before publishing the sending
+  callback. Missing, unreadable, or invalid configured Secrets fail
   controller startup; no controller-specific security retry loop or readiness
   wait is added. Empty security inputs succeed without Secret reads. The returned
   `PeerOutbound` keeps its transport and security settings unchanged after
@@ -263,10 +264,13 @@ status writers.
   never transfers cleanup ownership; completion before forced process exit is
   not guaranteed for a join spanning multiple network deadlines.
 
-`SyncRouteWithPeers` and `PeerOutbound` move from `pkg/proxy` into the neutral
-`pkg/sandboxroute/refresh` package. Proxy keeps its instance wrapper;
-manager/gateway and controller share the sending implementation. The controller
-callback only supplies its peer manager and initialized outbound client to
+The `SyncRouteWithPeers` and `PeerOutbound` implementations move from `pkg/proxy`
+into the neutral `pkg/sandboxroute/refresh` package. Proxy preserves its public
+`PeerOutbound` type through an alias, `RequestPeerTimeout`, `NewPeerOutbound`,
+and package-level and instance `SyncRouteWithPeers` entrypoints through thin
+delegation. Existing manager/gateway callers remain unchanged; all three
+components share one HTTP/TLS/retry implementation. The controller callback only
+supplies its peer manager and initialized outbound client to
 `refresh.SyncRouteWithPeers`. This new dependency closure contains neither
 API-layer nor sandbox-manager packages. Existing `sandbox_peers` and
 `sandbox_peer_outbound_tls_errors_total` move with the implementation; no new
@@ -277,24 +281,25 @@ sender and logged by the caller. Deterministic 4xx responses are not retried;
 5xx and transport failures retain bounded retries. Tests cover both TLS and
 non-TLS failures. No additional error collector is introduced.
 
-Shared initialization accepts an existing `peers.Peers` instance rather than
-creating another member owner or starting it. All three owners keep using
-`peers.NewMemberlistPeers` with their existing node identity, namespace, and
-selector. Manager constructs this instance in `Build` and initializes security
-inside `StartTransports`, before `proxy.Run`; gateway constructs it in `Start`
-and publishes it after binding its route listener; controller initializes it
-before injecting the callback. Manager's existing no-reader/plaintext no-op
-and injected peer implementations remain supported; a configured gossip key
-requires `MemberlistPeers`. Neither memberlist nor a route listener starts inside
-`InitializePeers`.
+Controller initialization accepts an existing `peers.Peers` instance rather
+than creating another member owner or starting it. Manager retains construction
+in `Build` and its direct security loading inside `StartTransports`, before
+`proxy.Run`. Gateway retains direct security loading and constructs and publishes
+its member instance after binding its route listener. Controller initializes its
+member instance before injecting the callback. Each component keeps its own
+assembly and lifecycle while reusing the neutral sender and security loader.
+Manager's existing no-reader/plaintext no-op and injected peer implementations
+remain supported; a configured gossip key requires `MemberlistPeers`. Neither
+memberlist nor a route listener starts inside `InitializePeers`.
 
 The returned server TLS config leaves `ClientAuth` to receivers. Manager retains
 `RequireAndVerifyClientCert`; gateway retains `VerifyClientCertIfGiven` plus
 refresh-handler verification, preserving certificate-free probes. Proxy's
-`SetPeerOutbound` accepts the already initialized client, closes idle connections
-on its previous client, and does not reconstruct a transport. Its existing
-plaintext default remains available to standalone callers before initialization.
-Controller does not start a receive listener.
+`SetPeerOutbound(*tls.Config)` retains its existing signature and constructs the
+shared outbound client, closing idle connections on its previous client. A nil
+TLS config retains plaintext HTTP, including for standalone callers. Gateway
+continues using `proxy.NewPeerOutbound(clientTLS)`. Controller does not start a
+receive listener.
 
 Neither `POD_NAME` nor `POD_IP` requires a new configuration entry. Dual-interface
 deployments use `eni1` by default; other interface names need an override. Allow
@@ -358,8 +363,8 @@ cancellation, fail-fast errors without retries, and real encrypted joins with
 matching, mismatched, or absent receiver keys. They retain real mTLS and rejection
 of missing client identity, wrong server names, and untrusted servers. Manager
 tests retain the builder's member instance and startup order; gateway tests
-check receive policy and publication of the same initialized member and outbound;
-proxy tests check that installing the client preserves its identity. Tests
+check receive policy and publication of the same member and outbound instances;
+proxy tests check the existing TLS-config setter and nil-TLS client default. Tests
 coupled to the removed controller wrapper are removed with that layer; they do
 not validate the new entrypoint wiring at runtime. Receiver tests additionally
 cover namespace/label admission and terminal peer-first/informer-first ordering;

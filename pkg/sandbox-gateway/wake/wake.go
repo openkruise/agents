@@ -29,12 +29,12 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/server"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandboxroute"
-	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
@@ -215,7 +215,7 @@ func (w *Waker) Wake(ctx context.Context, namespace, name string) error {
 	sandboxroute.LogMutation(log, "upsert", route, result)
 
 	if pm := server.GetPeerManager(); pm != nil {
-		if err := refresh.SyncRouteWithPeers(ctx, pm, route, server.GetPeerOutbound()); err != nil {
+		if err := proxy.SyncRouteWithPeers(ctx, pm, route, server.GetPeerOutbound()); err != nil {
 			// Log but don't fail the wake — the local registry is updated,
 			// and peers will eventually catch up via their own informers.
 			log.Error(err, "failed to sync route with peers after wake")

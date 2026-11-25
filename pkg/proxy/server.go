@@ -81,7 +81,7 @@ type Server struct {
 	peersManager         peers.Peers
 	bindAddress          string
 	peerServerTLS        *tls.Config
-	peerOutbound         *refresh.PeerOutbound
+	peerOutbound         *PeerOutbound
 	sandboxNamespace     string
 	sandboxLabelSelector string
 	// lifecycle: Run is called once and Stop at most once, after Run.
@@ -95,7 +95,7 @@ func NewServer(opts config.SandboxManagerOptions) *Server {
 		disableEnvoyExtProc:         opts.DisableEnvoyExtProc,
 		store:                       store,
 		bindAddress:                 opts.BindAddress,
-		peerOutbound:                refresh.NewPeerOutbound(nil),
+		peerOutbound:                NewPeerOutbound(nil),
 		sandboxNamespace:            opts.SandboxNamespace,
 		sandboxLabelSelector:        opts.SandboxLabelSelector,
 	}
@@ -116,13 +116,11 @@ func (s *Server) SetPeerServerTLS(cfg *tls.Config) {
 	s.peerServerTLS = cfg
 }
 
-// SetPeerOutbound installs the peer owner's client before Run, without rebuilding
-// its transport or making another security decision.
-func (s *Server) SetPeerOutbound(outbound *refresh.PeerOutbound) {
-	if s.peerOutbound != outbound {
-		s.peerOutbound.CloseIdleConnections()
-	}
-	s.peerOutbound = outbound
+// SetPeerOutbound installs this process's outbound peer client. A nil TLS
+// config keeps plaintext HTTP. Call before Run.
+func (s *Server) SetPeerOutbound(clientTLS *tls.Config) {
+	s.peerOutbound.CloseIdleConnections()
+	s.peerOutbound = NewPeerOutbound(clientTLS)
 }
 
 // Run binds the route-refresh HTTP listener and, unless disabled, the Envoy

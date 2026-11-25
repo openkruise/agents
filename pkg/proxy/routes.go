@@ -18,12 +18,29 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
+
+// RequestPeerTimeout preserves the existing outbound request budget.
+const RequestPeerTimeout = refresh.RequestPeerTimeout
+
+// PeerOutbound preserves the proxy API while sharing the neutral sender.
+type PeerOutbound = refresh.PeerOutbound
+
+// NewPeerOutbound builds this process's peer client; nil TLS keeps plaintext HTTP.
+func NewPeerOutbound(clientTLS *tls.Config) *PeerOutbound {
+	return refresh.NewPeerOutbound(clientTLS)
+}
+
+// SyncRouteWithPeers keeps the existing entrypoint backed by the neutral sender.
+func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route sandboxroute.Route, outbound *PeerOutbound) error {
+	return refresh.SyncRouteWithPeers(ctx, peersManager, route, outbound)
+}
 
 func (s *Server) SetRoute(route sandboxroute.Route) sandboxroute.MutationResult {
 	result := s.store.Upsert(route)
@@ -32,7 +49,7 @@ func (s *Server) SetRoute(route sandboxroute.Route) sandboxroute.MutationResult 
 }
 
 func (s *Server) SyncRouteWithPeers(ctx context.Context, route sandboxroute.Route) error {
-	return refresh.SyncRouteWithPeers(ctx, s.peersManager, route, s.peerOutbound)
+	return SyncRouteWithPeers(ctx, s.peersManager, route, s.peerOutbound)
 }
 
 func (s *Server) LoadRoute(id string) (sandboxroute.Route, bool) {

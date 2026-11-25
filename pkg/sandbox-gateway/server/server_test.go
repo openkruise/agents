@@ -46,6 +46,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"github.com/openkruise/agents/pkg/sandboxstate"
@@ -180,11 +181,11 @@ func TestGetMemberlistBindPort(t *testing.T) {
 		envValue string
 		want     int
 	}{
-		{name: "default when unset", want: peers.DefaultMemberlistBindPort},
+		{name: "default when unset", want: config.DefaultMemberlistBindPort},
 		{name: "valid port", envValue: "8080", want: 8080},
-		{name: "invalid port", envValue: "invalid", want: peers.DefaultMemberlistBindPort},
-		{name: "negative port", envValue: "-1", want: peers.DefaultMemberlistBindPort},
-		{name: "zero port", envValue: "0", want: peers.DefaultMemberlistBindPort},
+		{name: "invalid port", envValue: "invalid", want: config.DefaultMemberlistBindPort},
+		{name: "negative port", envValue: "-1", want: config.DefaultMemberlistBindPort},
+		{name: "zero port", envValue: "0", want: config.DefaultMemberlistBindPort},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -202,9 +203,9 @@ func TestNewServer(t *testing.T) {
 		wantPort     int
 		wantBindPort int
 	}{
-		{name: "custom port", port: 9090, wantPort: 9090, wantBindPort: peers.DefaultMemberlistBindPort},
-		{name: "zero uses default", wantPort: refresh.DefaultPort, wantBindPort: peers.DefaultMemberlistBindPort},
-		{name: "negative uses default", port: -1, wantPort: refresh.DefaultPort, wantBindPort: peers.DefaultMemberlistBindPort},
+		{name: "custom port", port: 9090, wantPort: 9090, wantBindPort: config.DefaultMemberlistBindPort},
+		{name: "zero uses default", wantPort: refresh.DefaultPort, wantBindPort: config.DefaultMemberlistBindPort},
+		{name: "negative uses default", port: -1, wantPort: refresh.DefaultPort, wantBindPort: config.DefaultMemberlistBindPort},
 		{name: "custom memberlist port", port: 8080, envPort: "9000", wantPort: 8080, wantBindPort: 9000},
 	}
 	for _, tt := range tests {
@@ -574,14 +575,14 @@ func TestPeerSecurityFromEnv(t *testing.T) {
 			wantErr: "invalid peer security environment variables: peer TLS requires both server and client",
 		},
 		{
-			name:    "invalid key ref",
+			name:    "invalid ref names the variable",
 			env:     map[string]string{envPeerKeySecret: "not-a-ref"},
-			wantErr: "invalid peer security environment variables: peer key secret: secret reference",
+			wantErr: "invalid " + envPeerKeySecret + ": secret reference",
 		},
 		{
-			name:    "invalid TLS ref",
+			name:    "invalid TLS ref names the variable",
 			env:     map[string]string{envPeerTLSServerSecret: "not-a-ref"},
-			wantErr: "invalid peer security environment variables: peer TLS server secret: secret reference",
+			wantErr: "invalid " + envPeerTLSServerSecret + ": secret reference",
 		},
 	}
 	for _, tt := range tests {

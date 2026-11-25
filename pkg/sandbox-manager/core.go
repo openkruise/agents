@@ -21,9 +21,11 @@ import (
 	"crypto/tls"
 	stderrors "errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"k8s.io/apimachinery/pkg/api/validate/content"
 	"k8s.io/apimachinery/pkg/labels"
@@ -44,7 +46,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandboxid"
-	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -160,7 +161,13 @@ func (b *SandboxManagerBuilder) WithMemberlistPeers() *SandboxManagerBuilder {
 		}
 		b.peerReader = peerClient
 		// build node name of sandbox-manager
-		nodeName := peers.NewPeerNodeName(true)
+		nodeName := os.Getenv("HOSTNAME")
+		if nodeName == "" {
+			nodeName = os.Getenv("POD_NAME")
+		}
+		if nodeName == "" {
+			nodeName = uuid.NewString()[:8]
+		}
 		return peers.NewMemberlistPeers(
 			peerClient,
 			peers.NodePrefixSandboxManager+nodeName,
@@ -502,9 +509,18 @@ func (m *SandboxManager) applyPeerSecurity(ctx context.Context) error {
 		}
 		return nil
 	}
-	outbound, serverTLS, err := refresh.InitializePeers(ctx, m.peerReader, m.peersManager, m.peerSecurity)
+	loadCtx, cancel := context.WithTimeout(ctx, peersecurity.LoadTimeout)
+	defer cancel()
+	secretKey, serverTLS, clientTLS, err := peersecurity.Load(loadCtx, m.peerReader, m.peerSecurity)
 	if err != nil {
-		return err
+		return fmt.Errorf("load peer security: %w", err)
+	}
+	if len(secretKey) > 0 {
+		memberlist, ok := m.peersManager.(*peers.MemberlistPeers)
+		if !ok {
+			return fmt.Errorf("memberlist secret key is configured but the peer manager does not accept it")
+		}
+		memberlist.SetSecretKey(secretKey)
 	}
 	if serverTLS != nil {
 		// The peer listener serves peers only and its probes are bare TCP
@@ -514,7 +530,7 @@ func (m *SandboxManager) applyPeerSecurity(ctx context.Context) error {
 		cfg.ClientAuth = tls.RequireAndVerifyClientCert
 		m.proxy.SetPeerServerTLS(cfg)
 	}
-	m.proxy.SetPeerOutbound(outbound)
+	m.proxy.SetPeerOutbound(clientTLS)
 	return nil
 }
 
