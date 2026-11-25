@@ -16,7 +16,7 @@ namePrefix: sandbox-
 
 resources:
 - ../rbac
-- ../manager
+- ../sandbox-controller
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 - ../webhook

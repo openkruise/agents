@@ -8,7 +8,7 @@
 # To enable tracing in sandbox-manager, uncomment the tracing flags in
 # config/sandbox-manager/deployment.yaml and set --tracing-endpoint=otel-collector:4317.
 # To enable tracing in sandbox-controller, uncomment the flags in
-# config/manager/manager.yaml and set --tracing-mode=otel.
+# config/sandbox-controller/deployment.yaml and set --tracing-mode=otel.
 ---
 apiVersion: v1
 kind: Namespace

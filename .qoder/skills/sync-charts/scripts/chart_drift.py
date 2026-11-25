@@ -14,7 +14,7 @@ from pathlib import Path
 import yaml
 
 
-CONTROLLER_OVERLAY = Path("config/manager")
+CONTROLLER_OVERLAY = Path("config/sandbox-controller")
 MANAGER_OVERLAY = Path("config/sandbox-manager")
 GATEWAY_OVERLAY = Path("config/sandbox-gateway")
 

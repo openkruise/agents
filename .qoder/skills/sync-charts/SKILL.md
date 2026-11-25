@@ -99,7 +99,7 @@ The checker renders each source overlay with kustomize (`./bin/kustomize`, falli
 
 | Component | Source overlay | Kind | Source name | Chart template |
 | --- | --- | --- | --- | --- |
-| controller | `config/manager` | Service | `controller-manager-webhook-service` | controller `templates/service.yaml` |
+| controller | `config/sandbox-controller` | Service | `controller-manager-webhook-service` | controller `templates/service.yaml` |
 | manager | `config/sandbox-manager` | Service | `sandbox-manager` | manager `templates/service.yaml` |
 | manager | `config/sandbox-manager` | Ingress | `sandbox-manager` | manager `templates/ingress.yaml` |
 | manager | `config/sandbox-manager` | Secret | `e2b-key-store` | manager `templates/secret.yaml` |
@@ -141,10 +141,13 @@ change set from a release-to-source comparison rather than from chart memory:
    ```bash
    git diff <stable-tag> <source-revision> --stat -- config/
    git diff <stable-tag> <source-revision> -- \
-     config/manager config/sandbox-manager config/sandbox-gateway
+     config/sandbox-controller config/sandbox-manager config/sandbox-gateway
    ```
 
-   Read the full diff of each changed `deployment.yaml`/`manager.yaml`. A new
+   The controller overlay was renamed from `config/manager/manager.yaml` to
+   `config/sandbox-controller/deployment.yaml`; when the stable tag predates
+   the rename, also pass `config/manager` so the rename and its content changes
+   are visible. Read the full diff of each changed Deployment manifest. A new
    overlay directory with a Deployment (for example
    `config/agent-identity-provider`) is a new component, not a drift.
 3. For every changed field, draft the chart splice following the sync policy:

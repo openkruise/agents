@@ -824,7 +824,8 @@ class ChartDriftTest(unittest.TestCase):
             "The checker does not compare Deployments",
             "previous stable release tag",
             "git diff <stable-tag> <source-revision> --stat -- config/",
-            "config/manager config/sandbox-manager config/sandbox-gateway",
+            "config/sandbox-controller config/sandbox-manager config/sandbox-gateway",
+            "renamed from `config/manager/manager.yaml`",
             "a new component, not a drift",
             "config/agent-identity-provider",
             "obtain explicit confirmation before editing chart templates",
@@ -1026,7 +1027,7 @@ def gateway_source_docs() -> list[dict]:
 
 def default_source_docs() -> dict[str, list[dict]]:
     return {
-        "manager": controller_source_docs(),
+        "sandbox-controller": controller_source_docs(),
         "sandbox-manager": manager_source_docs(),
         "sandbox-gateway": gateway_source_docs(),
     }
@@ -1402,7 +1403,7 @@ class ManifestDriftTest(unittest.TestCase):
             "envoy-config",
             "templates/gateway-envoy-config.yaml",
             "(document 1)",
-            "config/manager",
+            "config/sandbox-controller",
             "config/sandbox-manager",
             "config/sandbox-gateway",
             "read-only manifests checker",
