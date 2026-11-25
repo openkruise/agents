@@ -57,7 +57,7 @@ func (r *realResourceVersionExpectation) Expect(obj metav1.Object) {
 	if expectations == nil {
 		r.objectVersions[obj.GetUID()] = &objectCacheVersions{}
 	}
-	if IsResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
+	if IsResourceVersionNewerOrEqual(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
 		r.objectVersions[obj.GetUID()].version = obj.GetResourceVersion()
 	}
 }
@@ -70,7 +70,7 @@ func (r *realResourceVersionExpectation) Observe(obj metav1.Object) {
 	if expectations == nil {
 		return
 	}
-	if IsResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
+	if IsResourceVersionNewerOrEqual(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
 		delete(r.objectVersions, obj.GetUID())
 	}
 }
@@ -84,7 +84,7 @@ func (r *realResourceVersionExpectation) IsSatisfied(obj metav1.Object) (bool, t
 		return true, 0
 	}
 
-	if IsResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
+	if IsResourceVersionNewerOrEqual(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
 		delete(r.objectVersions, obj.GetUID())
 	}
 	_, existing := r.objectVersions[obj.GetUID()]
@@ -105,7 +105,11 @@ func (r *realResourceVersionExpectation) Delete(obj metav1.Object) {
 	delete(r.objectVersions, obj.GetUID())
 }
 
-func IsResourceVersionNewer(old, new string) bool {
+// IsResourceVersionNewerOrEqual reports whether new >= old numerically.
+// Equality is intentionally accepted: a snapshot at the exact expected resource
+// version already reflects the expected write. An empty or non-numeric old
+// counts as satisfied; a non-numeric new does not.
+func IsResourceVersionNewerOrEqual(old, new string) bool {
 	if len(old) == 0 {
 		return true
 	}
@@ -123,7 +127,11 @@ func IsResourceVersionNewer(old, new string) bool {
 	return newCount >= oldCount
 }
 
-func IsResourceVersionReallyNewer(old, new string) bool {
+// IsResourceVersionStrictlyNewer reports whether new > old numerically.
+// Unlike IsResourceVersionNewerOrEqual, an equal resource version does not
+// qualify. An empty or non-numeric old counts as satisfied; a non-numeric new
+// does not.
+func IsResourceVersionStrictlyNewer(old, new string) bool {
 	if len(old) == 0 {
 		return true
 	}
