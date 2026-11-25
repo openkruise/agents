@@ -24,51 +24,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func TestParseInputs(t *testing.T) {
-	tests := []struct {
-		name             string
-		keySecret        string
-		tlsServerSecret  string
-		tlsClientSecret  string
-		allowedClientCNs string
-		want             Inputs
-		wantErr          string
-	}{
-		{name: "all empty"},
-		{
-			name:             "all set",
-			keySecret:        "ns/key",
-			tlsServerSecret:  "ns/server",
-			tlsClientSecret:  "ns/client",
-			allowedClientCNs: "sandbox-manager",
-			want: Inputs{
-				PeerKeySecret:    types.NamespacedName{Namespace: "ns", Name: "key"},
-				TLSServerSecret:  types.NamespacedName{Namespace: "ns", Name: "server"},
-				TLSClientSecret:  types.NamespacedName{Namespace: "ns", Name: "client"},
-				AllowedClientCNs: "sandbox-manager",
-			},
-		},
-		{name: "invalid key ref", keySecret: "key", wantErr: "peer key secret: secret reference"},
-		{name: "invalid TLS server ref", tlsServerSecret: "a/b/c", tlsClientSecret: "ns/client", wantErr: "peer TLS server secret: secret reference"},
-		{name: "invalid TLS client ref", tlsServerSecret: "ns/server", tlsClientSecret: "/client", wantErr: "peer TLS client secret: secret reference"},
-		{name: "only server TLS", tlsServerSecret: "ns/server", wantErr: "both server and client"},
-		{name: "allowlist without TLS", allowedClientCNs: "sandbox-manager", wantErr: "peer allowed client CNs require peer TLS"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseInputs(tt.keySecret, tt.tlsServerSecret, tt.tlsClientSecret, tt.allowedClientCNs)
-			if tt.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErr)
-				assert.Equal(t, Inputs{}, got)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 func TestValidateTLSPair(t *testing.T) {
 	tests := []struct {
 		name    string

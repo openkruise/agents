@@ -28,6 +28,7 @@ import (
 	"time"
 	_ "time/tzdata" // Embed timezone database for scratch-based container images
 
+	"github.com/google/uuid"
 	"github.com/spf13/pflag"
 	gozap "go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -147,7 +148,7 @@ func main() {
 			"HTTPS capability on newly created sandboxes; empty disables both. Set it only after the sidecar "+
 			"injection template already serves HTTPS, since the capability annotation is write-once.")
 
-	flag.IntVar(&memberlistBindPort, "memberlist-bind-port", peers.DefaultMemberlistBindPort, "Port for memberlist gossip; only used when SandboxRouteSync is enabled; non-positive values use the default.")
+	flag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip; only used when SandboxRouteSync is enabled; non-positive values use the default.")
 	flag.StringVar(&peerSelector, "peer-selector", "agents.kruise.io/sandbox-manager-peer-finder=ack-sandbox-manager", "Label selector of memberlist seed Pods in sandbox-system; only used when SandboxRouteSync is enabled; empty disables sync.")
 	flag.StringVar(&networkInterface, "network-interface", "eni1", "Network interface whose single global-unicast address (IPv4 preferred, IPv6 otherwise) binds and advertises controller memberlist; only used when SandboxRouteSync is enabled; empty uses POD_IP or the first non-loopback IPv4.")
 
@@ -206,11 +207,26 @@ func main() {
 	peerSelector = strings.TrimSpace(peerSelector)
 	var bindAddress string
 	if utilfeature.DefaultFeatureGate.Enabled(features.SandboxRouteSyncGate) && peerSelector != "" {
-		if memberlistBindPort, err = peers.NormalizeBindPort(memberlistBindPort); err != nil {
-			setupLog.Error(err, "invalid --memberlist-bind-port")
+		if memberlistBindPort <= 0 {
+			memberlistBindPort = 7946
+		}
+		if memberlistBindPort > 65535 {
+			setupLog.Error(errors.New("port is outside the range 1-65535"), "invalid --memberlist-bind-port", "port", memberlistBindPort)
 			os.Exit(1)
 		}
-		if peerSecurity, err = peersecurity.ParseInputs(peerKeySecret, peerTLSServerSecret, peerTLSClientSecret, ""); err != nil {
+		if peerSecurity.PeerKeySecret, err = utils.ParseSecretRef(peerKeySecret); err != nil {
+			setupLog.Error(err, "invalid --peer-key-secret")
+			os.Exit(1)
+		}
+		if peerSecurity.TLSServerSecret, err = utils.ParseSecretRef(peerTLSServerSecret); err != nil {
+			setupLog.Error(err, "invalid --peer-tls-server-secret")
+			os.Exit(1)
+		}
+		if peerSecurity.TLSClientSecret, err = utils.ParseSecretRef(peerTLSClientSecret); err != nil {
+			setupLog.Error(err, "invalid --peer-tls-client-secret")
+			os.Exit(1)
+		}
+		if err = peerSecurity.Validate(); err != nil {
 			setupLog.Error(err, "invalid peer security flags")
 			os.Exit(1)
 		}
@@ -412,12 +428,26 @@ func main() {
 			setupLog.Error(err, "unable to create peer client")
 			os.Exit(1)
 		}
-		peerManager = peers.NewMemberlistPeers(peerClient, peers.NodePrefixSandboxController+peers.NewPeerNodeName(true), utils.DefaultSandboxDeployNamespace, peerSelector)
-		peerOutbound, _, err = refresh.InitializePeers(ctx, peerClient, peerManager, peerSecurity)
+		nodeName := os.Getenv("HOSTNAME")
+		if nodeName == "" {
+			nodeName = os.Getenv("POD_NAME")
+		}
+		if nodeName == "" {
+			nodeName = uuid.NewString()[:8]
+		}
+		peerManager = peers.NewMemberlistPeers(peerClient, peers.NodePrefixSandboxController+nodeName, utils.DefaultSandboxDeployNamespace, peerSelector)
+		loadCtx, cancel := context.WithTimeout(ctx, peersecurity.LoadTimeout)
+		secretKey, _, clientTLS, err := peersecurity.Load(loadCtx, peerClient, peerSecurity)
+		if err == nil {
+			err = loadCtx.Err()
+		}
+		cancel()
 		if err != nil {
-			setupLog.Error(err, "unable to initialize controller peers")
+			setupLog.Error(err, "unable to load peer security")
 			os.Exit(1)
 		}
+		peerManager.SetSecretKey(secretKey)
+		peerOutbound = refresh.NewPeerOutbound(clientTLS)
 		deps.SyncRouteWithPeers = func(ctx context.Context, route sandboxroute.Route) error {
 			return refresh.SyncRouteWithPeers(ctx, peerManager, route, peerOutbound)
 		}

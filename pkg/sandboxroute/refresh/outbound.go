@@ -32,13 +32,9 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/klog/v2"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/pkg/peers"
-	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
@@ -62,34 +58,6 @@ var errPeerRedirect = errors.New("peer refresh does not follow redirects")
 type PeerOutbound struct {
 	scheme string
 	client *http.Client
-	// All route producers share the skip log budget of their process's outbound client.
-	skipLogLimiter *rate.Limiter
-}
-
-// InitializePeers loads startup security once, installs the gossip key on the
-// existing peer manager, and constructs the process's outbound refresh client.
-// Call before starting listeners or membership. The returned server TLS snapshot
-// has no ClientAuth policy; each receiver must set its own. Empty inputs read no
-// Secrets and permit non-memberlist peer implementations. Lifecycle and discovery
-// scope remain with the caller, using the shared peers constructor and Start/Stop.
-func InitializePeers(ctx context.Context, reader ctrlclient.Reader, peerManager peers.Peers, inputs peersecurity.Inputs) (*PeerOutbound, *tls.Config, error) {
-	loadCtx, cancel := context.WithTimeout(ctx, peersecurity.LoadTimeout)
-	defer cancel()
-	secretKey, serverTLS, clientTLS, err := peersecurity.Load(loadCtx, reader, inputs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("load peer security: %w", err)
-	}
-	if err := loadCtx.Err(); err != nil {
-		return nil, nil, fmt.Errorf("load peer security: %w", err)
-	}
-	if len(secretKey) > 0 {
-		memberlist, ok := peerManager.(*peers.MemberlistPeers)
-		if !ok || memberlist == nil {
-			return nil, nil, fmt.Errorf("memberlist secret key is configured but the peer manager does not accept it")
-		}
-		memberlist.SetSecretKey(secretKey)
-	}
-	return NewPeerOutbound(clientTLS), serverTLS, nil
 }
 
 // NewPeerOutbound builds the outbound peer client. A nil clientTLS keeps
@@ -101,9 +69,8 @@ func NewPeerOutbound(clientTLS *tls.Config) *PeerOutbound {
 		scheme = "https"
 	}
 	return &PeerOutbound{
-		scheme:         scheme,
-		client:         newPeerHTTPClient(clientTLS),
-		skipLogLimiter: rate.NewLimiter(rate.Every(30*time.Second), 1),
+		scheme: scheme,
+		client: newPeerHTTPClient(clientTLS),
 	}
 }
 
@@ -149,12 +116,6 @@ func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route san
 	if peersManager != nil {
 		peerList = peersManager.GetPeers()
 	}
-	return SyncRouteWithPeerList(ctx, peerList, route, outbound)
-}
-
-// SyncRouteWithPeerList sends to the caller's snapshot, keeping target counts consistent.
-// No refresh targets remains a no-op; configured outbound clients rate-limit skip logs.
-func SyncRouteWithPeerList(ctx context.Context, peerList []peers.Peer, route sandboxroute.Route, outbound *PeerOutbound) error {
 	// The controller only sends routes and serves no /refresh; filter into a separate snapshot without modifying the caller's list.
 	targets := make([]peers.Peer, 0, len(peerList))
 	for _, peer := range peerList {
@@ -170,10 +131,6 @@ func SyncRouteWithPeerList(ctx context.Context, peerList []peers.Peer, route san
 	peerCount.Set(float64(len(peerList)))
 
 	if len(peerList) == 0 {
-		if outbound != nil && outbound.skipLogLimiter != nil && outbound.skipLogLimiter.Allow() {
-			klog.FromContext(ctx).Info("route sync skipped: no refresh targets",
-				"route", route.Name, "namespace", route.Namespace, "peerCount", 0)
-		}
 		return nil
 	}
 	if outbound == nil {

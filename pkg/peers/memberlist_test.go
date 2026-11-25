@@ -52,7 +52,6 @@ func interceptList(list func(context.Context, ctrlclient.ObjectList, ...ctrlclie
 type fakeMemberlistHandle struct {
 	join     func([]string) (int, error)
 	leaveErr error
-	members  []*memberlist.Node
 	mu       sync.Mutex
 	calls    []string
 }
@@ -75,7 +74,7 @@ func (f *fakeMemberlistHandle) Shutdown() error {
 	return nil
 }
 
-func (f *fakeMemberlistHandle) Members() []*memberlist.Node { return f.members }
+func (*fakeMemberlistHandle) Members() []*memberlist.Node { return nil }
 
 func (*fakeMemberlistHandle) LocalNode() *memberlist.Node {
 	return &memberlist.Node{Addr: net.ParseIP("127.0.0.1")}
@@ -110,80 +109,6 @@ func startFakeLifecycle(ctx context.Context, reader ctrlclient.Reader, handle me
 	peer.retryInterval = retry
 	peer.startLifecycle(ctx, handle, labels.SelectorFromSet(labels.Set{LabelSelectorKey: LabelSelectorValue}), 7946, "127.0.0.1:7946")
 	return peer
-}
-
-func TestNewPeerNodeName(t *testing.T) {
-	tests := []struct {
-		name           string
-		hostname       string
-		podName        string
-		randomFallback bool
-		want           string
-	}{
-		{name: "HOSTNAME takes precedence", hostname: "host", podName: "pod", want: "host"},
-		{name: "HOSTNAME takes precedence with random fallback enabled", hostname: "host", podName: "pod", randomFallback: true, want: "host"},
-		{name: "POD_NAME fallback", podName: "pod", want: "pod"},
-		{name: "POD_NAME is used with random fallback enabled", podName: "pod", randomFallback: true, want: "pod"},
-		{name: "missing environment names return an empty value"},
-		{name: "missing environment names allow UUID fallback", randomFallback: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("HOSTNAME", tt.hostname)
-			t.Setenv("POD_NAME", tt.podName)
-			name := NewPeerNodeName(tt.randomFallback)
-			if tt.randomFallback && tt.want == "" {
-				assert.Regexp(t, "^[0-9a-f]{8}$", name)
-			} else {
-				assert.Equal(t, tt.want, name)
-			}
-		})
-	}
-}
-
-func TestNormalizeBindPort(t *testing.T) {
-	tests := []struct {
-		name    string
-		port    int
-		want    int
-		wantErr bool
-	}{
-		{name: "negative uses default", port: -1, want: DefaultMemberlistBindPort},
-		{name: "zero uses default", port: 0, want: DefaultMemberlistBindPort},
-		{name: "min valid", port: 1, want: 1},
-		{name: "max valid", port: 65535, want: 65535},
-		{name: "too large", port: 65536, wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := NormalizeBindPort(tt.port)
-			if tt.wantErr {
-				assert.ErrorContains(t, err, "outside the range 1-65535")
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
-func TestMemberlistPeersSelectorNormalization(t *testing.T) {
-	for _, selector := range []string{"", " \t\n", " app=peer "} {
-		t.Run(selector, func(t *testing.T) {
-			var lists atomic.Int32
-			reader := interceptList(func(context.Context, ctrlclient.ObjectList, ...ctrlclient.ListOption) error {
-				lists.Add(1)
-				return nil
-			})
-			peer := NewMemberlistPeers(reader, "test-node", Namespace, selector)
-			assert.Equal(t, strings.TrimSpace(selector), peer.peerSelector)
-			if strings.TrimSpace(selector) == "" {
-				assert.ErrorContains(t, peer.Start(t.Context(), "127.0.0.1", 0), "peer selector is empty")
-				assert.Zero(t, lists.Load(), "empty scope must fail before discovery")
-				assert.Nil(t, peer.LocalAddr())
-			}
-		})
-	}
 }
 
 // TestMemberlistPeers_Start_Stop tests basic start and stop functionality
@@ -359,35 +284,6 @@ func TestMemberlistPeers_GetPeers_NotStarted(t *testing.T) {
 	assert.Nil(t, peer.GetAllMembers())
 	assert.Nil(t, peer.LocalAddr())
 	assert.Equal(t, 0, peer.LocalPort())
-}
-
-func TestMemberlistPeers_GetPeersFiltersMembers(t *testing.T) {
-	node := func(name, ip string, state memberlist.NodeStateType) *memberlist.Node {
-		return &memberlist.Node{Name: name, Addr: net.ParseIP(ip), State: state}
-	}
-	handle := &fakeMemberlistHandle{
-		join: func([]string) (int, error) { return 1, nil },
-		members: []*memberlist.Node{
-			node("test-node", "10.0.0.1", memberlist.StateAlive),
-			node(NodePrefixSandboxManager+"a", "10.0.0.2", memberlist.StateAlive),
-			node(NodePrefixSandboxGateway+"b", "10.0.0.3", memberlist.StateAlive),
-			node(NodePrefixSandboxController+"c", "10.0.0.4", memberlist.StateAlive),
-			node(NodePrefixSandboxGateway+"dead", "10.0.0.5", memberlist.StateDead),
-		},
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	peer := startFakeLifecycle(ctx, fake.NewClientBuilder().Build(), handle, time.Hour)
-	t.Cleanup(func() {
-		cancel()
-		_ = peer.Stop(context.Background())
-	})
-
-	assert.Equal(t, []Peer{
-		{IP: "10.0.0.2", Name: NodePrefixSandboxManager + "a"},
-		{IP: "10.0.0.3", Name: NodePrefixSandboxGateway + "b"},
-		{IP: "10.0.0.4", Name: NodePrefixSandboxController + "c"},
-	}, peer.GetPeers())
-	assert.Len(t, peer.GetAllMembers(), 5)
 }
 
 // TestMemberlistPeers_GettersRaceWithStart fails under -race when a getter

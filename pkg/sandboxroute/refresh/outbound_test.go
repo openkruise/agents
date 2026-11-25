@@ -17,7 +17,6 @@ limitations under the License.
 package refresh
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -37,28 +36,17 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr/funcr"
 	"github.com/hashicorp/memberlist"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog/v2"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/pkg/peers"
-	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
@@ -88,139 +76,6 @@ func (t errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 	return t.resp, nil
 }
 
-func TestInitializePeers(t *testing.T) {
-	keyRef := types.NamespacedName{Namespace: "ns", Name: "peer-key"}
-	keyInputs := peersecurity.Inputs{PeerKeySecret: keyRef}
-	keySecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: keyRef.Namespace, Name: keyRef.Name},
-		Data:       map[string][]byte{"key": bytes.Repeat([]byte{'k'}, 32)},
-	}
-	forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, keyRef.Name, errors.New("denied"))
-	tests := []struct {
-		name       string
-		inputs     peersecurity.Inputs
-		memberlist bool
-		nilReader  bool
-		canceled   bool
-		readErr    error
-		wantReads  int
-		wantErr    string
-		wantIs     error
-	}{
-		{name: "empty inputs read nothing"},
-		{name: "plaintext needs no Secret reader", nilReader: true},
-		{name: "installs a key on existing memberlist", inputs: keyInputs, memberlist: true, wantReads: 1},
-		{name: "key requires memberlist", inputs: keyInputs, wantReads: 1, wantErr: "does not accept it"},
-		{name: "configured inputs require a reader", inputs: keyInputs, nilReader: true, wantErr: "peer secret reader is not configured"},
-		{name: "missing Secret fails without retry", inputs: peersecurity.Inputs{PeerKeySecret: types.NamespacedName{Namespace: "ns", Name: "missing"}}, wantReads: 1, wantErr: "not found"},
-		{name: "Forbidden fails without retry", inputs: keyInputs, readErr: forbidden, wantReads: 1, wantErr: "forbidden", wantIs: forbidden},
-		{name: "incomplete TLS pair fails before reads", inputs: peersecurity.Inputs{TLSServerSecret: types.NamespacedName{Namespace: "ns", Name: "server"}}, wantErr: "both server and client"},
-		{name: "canceled plaintext publishes no client", canceled: true, wantErr: "context canceled", wantIs: context.Canceled},
-		{name: "canceled security does not read", inputs: keyInputs, canceled: true, wantErr: "context canceled", wantIs: context.Canceled},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			reads := 0
-			reader := interceptor.NewClient(fake.NewClientBuilder().WithObjects(keySecret).Build(), interceptor.Funcs{
-				Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
-					reads++
-					deadline, ok := ctx.Deadline()
-					assert.True(t, ok, "shared initialization must bound Secret reads")
-					assert.LessOrEqual(t, time.Until(deadline), peersecurity.LoadTimeout)
-					if tt.readErr != nil {
-						return tt.readErr
-					}
-					return c.Get(ctx, key, obj, opts...)
-				},
-				List: func(context.Context, ctrlclient.WithWatch, ctrlclient.ObjectList, ...ctrlclient.ListOption) error {
-					t.Error("initialization must not start discovery")
-					return errors.New("unexpected discovery")
-				},
-			})
-			var peerManager peers.Peers = staticPeers{}
-			if tt.memberlist {
-				peerManager = peers.NewMemberlistPeers(reader, "sm-test", "ns", "app=peer")
-			}
-			var secretReader ctrlclient.Reader = reader
-			if tt.nilReader {
-				secretReader = nil
-			}
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			if tt.canceled {
-				cancel()
-			}
-			outbound, serverTLS, err := InitializePeers(ctx, secretReader, peerManager, tt.inputs)
-			assert.Equal(t, tt.wantReads, reads)
-			if tt.wantErr != "" {
-				require.ErrorContains(t, err, tt.wantErr)
-				if tt.wantIs != nil {
-					assert.ErrorIs(t, err, tt.wantIs)
-				}
-				assert.Nil(t, outbound)
-				assert.Nil(t, serverTLS)
-				return
-			}
-			require.NoError(t, err)
-			require.NotNil(t, outbound)
-			defer outbound.CloseIdleConnections()
-			assert.Equal(t, "http", outbound.scheme, "gossip encryption does not imply refresh TLS")
-			assert.Nil(t, serverTLS)
-			assert.Nil(t, peerManager.LocalAddr(), "membership stays unstarted")
-		})
-	}
-}
-
-func TestInitializePeersGossipKey(t *testing.T) {
-	key := bytes.Repeat([]byte{'k'}, 32)
-	tests := []struct {
-		name        string
-		receiverKey []byte
-		wantErr     bool
-	}{
-		{name: "matching encrypted peer joins", receiverKey: key},
-		{name: "different key is rejected", receiverKey: bytes.Repeat([]byte{'x'}, 32), wantErr: true},
-		{name: "plaintext peer is rejected", wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "peer-key"},
-				Data:       map[string][]byte{"key": key},
-			}
-			reader := fake.NewClientBuilder().WithObjects(secret).Build()
-			peerManager, port, err := peers.CreateTestPeer(t.Context(), reader, "sc-test")
-			require.NoError(t, err)
-			outbound, _, err := InitializePeers(t.Context(), reader, peerManager, peersecurity.Inputs{
-				PeerKeySecret: types.NamespacedName{Namespace: "ns", Name: "peer-key"},
-			})
-			require.NoError(t, err)
-			t.Cleanup(outbound.CloseIdleConnections)
-			require.NoError(t, peerManager.Start(t.Context(), "127.0.0.1", port))
-			t.Cleanup(func() { require.NoError(t, peerManager.Stop(context.Background())) })
-
-			// Configure an independent real peer so a missing key installation cannot
-			// pass merely because both sides accidentally use plaintext gossip.
-			cfg := memberlist.DefaultLANConfig()
-			cfg.Name = "sm-receiver"
-			cfg.BindAddr = "127.0.0.1"
-			cfg.BindPort = 0
-			cfg.SecretKey = tt.receiverKey
-			cfg.LogOutput = io.Discard
-			receiver, err := memberlist.Create(cfg)
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, receiver.Shutdown()) })
-			_, err = receiver.Join([]string{net.JoinHostPort(peerManager.LocalAddr().String(), strconv.Itoa(peerManager.LocalPort()))})
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-				assert.Len(t, receiver.Members(), 2)
-			}
-		})
-	}
-}
-
 func TestRequestPeerAddressAndTransport(t *testing.T) {
 	t.Run("invalid IP", func(t *testing.T) {
 		err := NewPeerOutbound(nil).request(t.Context(), http.MethodPost, "not-an-ip", Path, nil)
@@ -245,15 +100,7 @@ func TestRequestPeerAddressAndTransport(t *testing.T) {
 }
 
 func TestSyncRouteWithPeers(t *testing.T) {
-	route := sandboxroute.Route{
-		ID:              "sb-1",
-		IP:              "1.2.3.4",
-		Namespace:       "ns",
-		Name:            "sb-1",
-		UID:             types.UID("uid-sb-1"),
-		ResourceVersion: "1",
-		AccessToken:     "test-token-do-not-log",
-	}
+	route := sandboxroute.Route{ID: "sb-1", Namespace: "ns", Name: "sb-1", IP: "1.2.3.4", UID: "uid-sb-1", ResourceVersion: "1"}
 	threePeers := staticPeers{
 		{IP: "10.0.0.1", Name: "node-1"},
 		{IP: "10.0.0.2", Name: "node-2"},
@@ -263,49 +110,12 @@ func TestSyncRouteWithPeers(t *testing.T) {
 		name            string
 		peers           peers.Peers
 		outbound        *PeerOutbound
-		initialized     bool
-		concurrentCalls int
 		expectErr       string
 		expectPeerCount float64
-		expectSkipLogs  int
 	}{
-		{
-			name:            "nil peers manager is a no-op",
-			expectPeerCount: 0,
-		},
-		{
-			name:            "no peers is a no-op without an outbound client",
-			peers:           staticPeers{},
-			expectPeerCount: 0,
-		},
-		{
-			name:  "sender-only members need no outbound client",
-			peers: staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}},
-		},
-		{
-			name:           "nil membership logs a rate-limited skip",
-			initialized:    true,
-			expectSkipLogs: 1,
-		},
-		{
-			name:           "empty membership logs a rate-limited skip",
-			peers:          staticPeers{},
-			initialized:    true,
-			expectSkipLogs: 1,
-		},
-		{
-			name:           "sender-only membership logs a rate-limited skip",
-			peers:          staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}},
-			initialized:    true,
-			expectSkipLogs: 1,
-		},
-		{
-			name:            "concurrent calls share the sender skip log budget",
-			peers:           staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}},
-			initialized:     true,
-			concurrentCalls: 16,
-			expectSkipLogs:  1,
-		},
+		{name: "nil peers manager is a no-op"},
+		{name: "no peers is a no-op without an outbound client", peers: staticPeers{}},
+		{name: "sender-only members need no outbound client", peers: staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}}},
 		{
 			name:            "mixed membership counts only refresh targets",
 			peers:           staticPeers{{Name: "sc-controller", IP: "127.0.0.1"}, {Name: "sm-manager", IP: "127.0.0.2"}},
@@ -333,61 +143,21 @@ func TestSyncRouteWithPeers(t *testing.T) {
 	// The peerCount gauge is process-global: rows run serially and reset it.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out := tt.outbound
-			if tt.initialized {
-				out = NewPeerOutbound(nil)
+			t.Cleanup(tt.outbound.CloseIdleConnections)
+			var before []peers.Peer
+			if tt.peers != nil {
+				before = append([]peers.Peer(nil), tt.peers.GetPeers()...)
 			}
-			t.Cleanup(out.CloseIdleConnections)
-			var mu sync.Mutex
-			var lines []string
-			logger := funcr.NewJSON(func(line string) {
-				mu.Lock()
-				defer mu.Unlock()
-				lines = append(lines, line)
-			}, funcr.Options{})
-			ctx := klog.NewContext(t.Context(), logger)
-			var wg sync.WaitGroup
-			for i := 0; i < tt.concurrentCalls; i++ {
-				wg.Go(func() {
-					assert.NoError(t, SyncRouteWithPeerList(ctx, tt.peers.GetPeers(), route, out))
-				})
+			peerCount.Set(-1)
+			err := SyncRouteWithPeers(t.Context(), tt.peers, route, tt.outbound)
+			if tt.expectErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.expectErr)
 			}
-			wg.Wait()
-			for _, snapshot := range []bool{false, true} {
-				peerCount.Set(-1)
-				update := route
-				if snapshot {
-					update.ID, update.Name = "sb-2", "sb-2"
-				}
-				var err error
-				if snapshot {
-					var peerList []peers.Peer
-					if tt.peers != nil {
-						peerList = tt.peers.GetPeers()
-					}
-					before := append([]peers.Peer(nil), peerList...)
-					err = SyncRouteWithPeerList(ctx, peerList, update, out)
-					assert.Equal(t, before, append([]peers.Peer(nil), peerList...), "snapshot must not be modified")
-				} else {
-					err = SyncRouteWithPeers(ctx, tt.peers, update, out)
-				}
-				if tt.expectErr == "" {
-					assert.NoError(t, err, "snapshot=%t", snapshot)
-				} else {
-					assert.ErrorContains(t, err, tt.expectErr, "snapshot=%t", snapshot)
-				}
-				assert.Equal(t, tt.expectPeerCount, testutil.ToFloat64(peerCount), "snapshot=%t", snapshot)
-			}
-			require.Len(t, lines, tt.expectSkipLogs, "repeated calls through both entry points must share the log budget")
-			for _, line := range lines {
-				var entry map[string]any
-				require.NoError(t, json.Unmarshal([]byte(line), &entry))
-				assert.Equal(t, "route sync skipped: no refresh targets", entry["msg"])
-				assert.Equal(t, float64(0), entry["level"])
-				assert.Equal(t, float64(0), entry["peerCount"])
-				assert.Equal(t, route.Name, entry["route"])
-				assert.Equal(t, route.Namespace, entry["namespace"])
-				assert.NotContains(t, line, route.AccessToken)
+			assert.Equal(t, tt.expectPeerCount, testutil.ToFloat64(peerCount))
+			if tt.peers != nil {
+				assert.Equal(t, before, append([]peers.Peer(nil), tt.peers.GetPeers()...), "membership must not be modified")
 			}
 		})
 	}
@@ -582,7 +352,7 @@ func TestPeerOutboundMTLS(t *testing.T) {
 			before := received.Load()
 			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 			defer cancel()
-			err := SyncRouteWithPeerList(ctx, []peers.Peer{{Name: "sm-test", IP: "127.0.0.1"}}, route, out)
+			err := SyncRouteWithPeers(ctx, staticPeers{{Name: "sm-test", IP: "127.0.0.1"}}, route, out)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Equal(t, before, received.Load())

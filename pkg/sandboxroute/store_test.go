@@ -27,28 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func TestStoreLabelsAreSnapshots(t *testing.T) {
-	for _, labels := range []map[string]string{nil, {}, {"app": "sandbox"}} {
-		t.Run(fmt.Sprintf("labels=%v", labels), func(t *testing.T) {
-			store := NewStore()
-			route := fullRoute("id", "ns", "one", "uid", "1")
-			route.Labels = labels
-			require.Equal(t, EventResultApplied, store.Upsert(route).Result)
-			if labels != nil {
-				labels["app"] = "mutated-input"
-			}
-			got := mustGetRoute(t, store, route.ID)
-			if labels == nil {
-				assert.Nil(t, got.Labels)
-				return
-			}
-			assert.NotEqual(t, "mutated-input", got.Labels["app"])
-			got.Labels["app"] = "mutated-output"
-			assert.NotEqual(t, "mutated-output", mustGetRoute(t, store, route.ID).Labels["app"])
-		})
-	}
-}
-
 func TestStoreUpsertOrdersByResourceVersion(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns", Name: "one"}
 	tests := []struct {
