@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -87,13 +86,6 @@ type QuotaSandboxEvent struct {
 
 type QuotaSandboxSubscription interface {
 	Remove() error
-}
-
-// CalculateResourceFromContainers sums resource requests and limits from a list
-// of containers. It delegates to the neutral implementation in
-// pkg/lifecycle/claim.
-func CalculateResourceFromContainers(containers []corev1.Container) SandboxResource {
-	return claim.CalculateResourceFromContainers(containers)
 }
 
 type TimeoutUpdateResult struct {
@@ -240,6 +232,8 @@ type Infrastructure interface {
 	// failure keeps its own error so callers can tell "absent" from "unknown".
 	GetSandbox(ctx context.Context, opts GetSandboxOptions) (Sandbox, error)
 	IssueTrafficAccessToken(ctx context.Context, opts IssueTrafficAccessTokenOptions) (TrafficAccessToken, error)
+	ListTemplates(ctx context.Context, namespace string) ([]TemplateInfo, error)
+	GetTemplate(ctx context.Context, namespace, name string) (TemplateInfo, error)
 	SelectSucceededCheckpoints(ctx context.Context, opts SelectSucceededCheckpointsOptions) ([]CheckpointInfo, error)
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)

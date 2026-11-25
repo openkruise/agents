@@ -35,7 +35,6 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
-	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/proxy"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -47,9 +46,8 @@ import (
 )
 
 type listSandboxSetsSpy struct {
-	infracache.Provider
+	*cachetest.Cache
 	result    []*v1alpha1.SandboxSet
-	err       error
 	called    bool
 	namespace string
 }
@@ -57,11 +55,7 @@ type listSandboxSetsSpy struct {
 func (s *listSandboxSetsSpy) ListSandboxSets(_ context.Context, opts infracache.ListSandboxSetsOptions) ([]*v1alpha1.SandboxSet, error) {
 	s.called = true
 	s.namespace = opts.Namespace
-	return s.result, s.err
-}
-
-func (s *listSandboxSetsSpy) GetSandboxController() *controllers.CacheSandboxCustomReconciler {
-	return s.Provider.(*cachetest.Cache).GetSandboxController()
+	return s.result, nil
 }
 
 func TestDeleteTemplate(t *testing.T) {
@@ -516,16 +510,23 @@ func TestListTemplatesUsesCacheProvider(t *testing.T) {
 	baseCache, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 
+	created := metav1.NewTime(time.Date(2026, 1, 1, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60)))
+	template := &v1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{
+		Name:              "spy-template",
+		Namespace:         "team-a",
+		CreationTimestamp: created,
+		DeletionTimestamp: &created,
+	}}
+	limits := corev1.ResourceList{
+		corev1.ResourceCPU:              resource.MustParse("1500m"),
+		corev1.ResourceMemory:           resource.MustParse("512Mi"),
+		corev1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
+	}
+	template.Spec.Template = &corev1.PodTemplateSpec{}
+	template.Spec.Template.Spec.Containers = []corev1.Container{{Resources: corev1.ResourceRequirements{Limits: limits}}}
 	spyCache := &listSandboxSetsSpy{
-		Provider: baseCache,
-		result: []*v1alpha1.SandboxSet{
-			{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "spy-template",
-					Namespace: "team-a",
-				},
-			},
-		},
+		Cache:  baseCache,
+		result: []*v1alpha1.SandboxSet{template},
 	}
 
 	opts := config.InitOptions(config.SandboxManagerOptions{
@@ -564,6 +565,43 @@ func TestListTemplatesUsesCacheProvider(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.Code)
 	require.Len(t, resp.Body, 1)
 	assert.Equal(t, "spy-template", resp.Body[0].TemplateID)
+	assert.Equal(t, 1, resp.Body[0].CPUCount)
+	assert.Equal(t, 512, resp.Body[0].MemoryMB)
+	assert.Equal(t, 2048, resp.Body[0].DiskSizeMB)
+	assert.Equal(t, "deleting", resp.Body[0].BuildStatus)
+	assert.Equal(t, "2026-01-01T09:00:00+08:00", resp.Body[0].CreatedAt.Format(time.RFC3339))
+
+	// The listing fixture is absent from the name index used by the detail endpoint.
+	spyCache.called = false
+	_, apiErr = controller.GetTemplate(NewRequest(t, nil, nil, map[string]string{"templateID": "spy-template"}, user))
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusNotFound, apiErr.Code)
+	assert.False(t, spyCache.called)
+}
+
+func TestTemplatesCacheUnavailable(t *testing.T) {
+	opts := config.InitOptions(config.SandboxManagerOptions{})
+	manager, err := sandboxmanager.NewSandboxManagerBuilder(opts).
+		WithCustomInfra(func() (infra.Builder, error) {
+			return sandboxcr.NewInfraBuilder(opts).WithCache(nil), nil
+		}).
+		Build()
+	require.NoError(t, err)
+	controller := &Controller{manager: manager}
+	user := &models.CreatedTeamAPIKey{Team: models.AdminTeam()}
+
+	t.Run("list", func(t *testing.T) {
+		_, apiErr := controller.ListTemplates(NewRequest(t, nil, nil, nil, user))
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
+		assert.Equal(t, "Cache not available", apiErr.Message)
+	})
+	t.Run("get", func(t *testing.T) {
+		_, apiErr := controller.GetTemplate(NewRequest(t, nil, nil, map[string]string{"templateID": "test-template"}, user))
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
+		assert.Equal(t, "Cache not available", apiErr.Message)
+	})
 }
 
 // TestGetTemplate tests the GetTemplate method
@@ -657,262 +695,6 @@ func TestGetTemplate(t *testing.T) {
 					tt.validateFunc(t, resp.Body)
 				}
 			}
-		})
-	}
-}
-
-// TestBuildResource tests the BuildResource function
-func TestBuildResource(t *testing.T) {
-	cpuQuantity, _ := resource.ParseQuantity("2000m")
-	memoryQuantity, _ := resource.ParseQuantity("2048Mi")
-	requestCPUQuantity, _ := resource.ParseQuantity("3000m")
-	requestMemoryQuantity, _ := resource.ParseQuantity("3072Mi")
-	requestStorageQuantity, _ := resource.ParseQuantity("4Gi")
-	storageQuantity, _ := resource.ParseQuantity("10Gi")
-
-	tests := []struct {
-		name           string
-		sandboxSet     *v1alpha1.SandboxSet
-		expectCPU      int
-		expectMemoryMB int
-		expectDiskMB   int
-	}{
-		{
-			name: "single container with resources",
-			sandboxSet: &v1alpha1.SandboxSet{
-				Spec: v1alpha1.SandboxSetSpec{
-					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name: "main",
-										Resources: corev1.ResourceRequirements{
-											Limits: corev1.ResourceList{
-												corev1.ResourceCPU:    cpuQuantity,
-												corev1.ResourceMemory: memoryQuantity,
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			expectCPU:      2,
-			expectMemoryMB: 2048,
-			expectDiskMB:   0,
-		},
-		{
-			name: "multiple containers with resources",
-			sandboxSet: &v1alpha1.SandboxSet{
-				Spec: v1alpha1.SandboxSetSpec{
-					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name: "main",
-										Resources: corev1.ResourceRequirements{
-											Limits: corev1.ResourceList{
-												corev1.ResourceCPU:    cpuQuantity,
-												corev1.ResourceMemory: memoryQuantity,
-											},
-										},
-									},
-									{
-										Name: "sidecar",
-										Resources: corev1.ResourceRequirements{
-											Limits: corev1.ResourceList{
-												corev1.ResourceCPU:    cpuQuantity,
-												corev1.ResourceMemory: memoryQuantity,
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			expectCPU:      4,
-			expectMemoryMB: 4096,
-			expectDiskMB:   0,
-		},
-		{
-			name: "falls back to request resources",
-			sandboxSet: &v1alpha1.SandboxSet{
-				Spec: v1alpha1.SandboxSetSpec{
-					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name: "main",
-										Resources: corev1.ResourceRequirements{
-											Requests: corev1.ResourceList{
-												corev1.ResourceCPU:              requestCPUQuantity,
-												corev1.ResourceMemory:           requestMemoryQuantity,
-												corev1.ResourceEphemeralStorage: requestStorageQuantity,
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			expectCPU:      3,
-			expectMemoryMB: 3072,
-			expectDiskMB:   4096,
-		},
-		{
-			name: "sandbox set with volume claim templates",
-			sandboxSet: &v1alpha1.SandboxSet{
-				Spec: v1alpha1.SandboxSetSpec{
-					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name: "main",
-										Resources: corev1.ResourceRequirements{
-											Limits: corev1.ResourceList{
-												corev1.ResourceCPU:    cpuQuantity,
-												corev1.ResourceMemory: memoryQuantity,
-											},
-										},
-									},
-								},
-							},
-						},
-						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-							{
-								ObjectMeta: metav1.ObjectMeta{
-									Name: "data",
-								},
-								Spec: corev1.PersistentVolumeClaimSpec{
-									AccessModes: []corev1.PersistentVolumeAccessMode{
-										corev1.ReadWriteOnce,
-									},
-									Resources: corev1.VolumeResourceRequirements{
-										Requests: corev1.ResourceList{
-											corev1.ResourceStorage: storageQuantity,
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			expectCPU:      2,
-			expectMemoryMB: 2048,
-			expectDiskMB:   10240, // 10Gi = 10240Mi
-		},
-		{
-			name: "no resources specified",
-			sandboxSet: &v1alpha1.SandboxSet{
-				Spec: v1alpha1.SandboxSetSpec{
-					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name: "main",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			expectCPU:      0,
-			expectMemoryMB: 0,
-			expectDiskMB:   0,
-		},
-		{
-			name: "nil template",
-			sandboxSet: &v1alpha1.SandboxSet{
-				Spec: v1alpha1.SandboxSetSpec{
-					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						Template: nil,
-					},
-				},
-			},
-			expectCPU:      0,
-			expectMemoryMB: 0,
-			expectDiskMB:   0,
-		},
-		{
-			name: "multiple volume claim templates",
-			sandboxSet: &v1alpha1.SandboxSet{
-				Spec: v1alpha1.SandboxSetSpec{
-					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name: "main",
-										Resources: corev1.ResourceRequirements{
-											Limits: corev1.ResourceList{
-												corev1.ResourceCPU:    cpuQuantity,
-												corev1.ResourceMemory: memoryQuantity,
-											},
-										},
-									},
-								},
-							},
-						},
-						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-							{
-								ObjectMeta: metav1.ObjectMeta{
-									Name: "data",
-								},
-								Spec: corev1.PersistentVolumeClaimSpec{
-									AccessModes: []corev1.PersistentVolumeAccessMode{
-										corev1.ReadWriteOnce,
-									},
-									Resources: corev1.VolumeResourceRequirements{
-										Requests: corev1.ResourceList{
-											corev1.ResourceStorage: storageQuantity,
-										},
-									},
-								},
-							},
-							{
-								ObjectMeta: metav1.ObjectMeta{
-									Name: "logs",
-								},
-								Spec: corev1.PersistentVolumeClaimSpec{
-									AccessModes: []corev1.PersistentVolumeAccessMode{
-										corev1.ReadWriteOnce,
-									},
-									Resources: corev1.VolumeResourceRequirements{
-										Requests: corev1.ResourceList{
-											corev1.ResourceStorage: storageQuantity,
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			expectCPU:      2,
-			expectMemoryMB: 2048,
-			expectDiskMB:   20480, // 2 * 10Gi = 20480Mi
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cpu, memory, disk := BuildResource(tt.sandboxSet)
-			assert.Equal(t, tt.expectCPU, cpu)
-			assert.Equal(t, tt.expectMemoryMB, memory)
-			assert.Equal(t, tt.expectDiskMB, disk)
 		})
 	}
 }

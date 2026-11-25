@@ -23,6 +23,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 )
@@ -144,8 +145,8 @@ func quotaLockStringOf(sbx *v1alpha1.Sandbox) string {
 }
 
 func quotaSandboxResourceOf(sbx *v1alpha1.Sandbox) infra.SandboxResource {
-	if sbx == nil || sbx.Spec.Template == nil {
+	if sbx == nil {
 		return infra.SandboxResource{}
 	}
-	return infra.CalculateResourceFromContainers(sbx.Spec.Template.Spec.Containers)
+	return claim.GetResource(sbx)
 }

@@ -51,6 +51,17 @@ const (
 	LockTypeSpeculate              = claim.LockTypeSpeculate
 )
 
+// TemplateInfo is the neutral template view used by the management API. It
+// carries business values only; backend objects stay inside the implementation.
+type TemplateInfo struct {
+	Name        string
+	CPUMilli    int64
+	MemoryMB    int64
+	DiskSizeMB  int64
+	CreatedAt   time.Time
+	Terminating bool
+}
+
 type SaveTimeoutOptions struct {
 	Timeout          timeout.Options
 	ExtraAnnotations map[string]string

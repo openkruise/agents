@@ -22,8 +22,6 @@ import (
 
 	"k8s.io/klog/v2"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -42,19 +40,12 @@ func (sc *Controller) ListTemplates(r *http.Request) (web.ApiResponse[[]*models.
 	}
 	namespace := sc.getNamespaceOfUser(user)
 	log.Info("will list templates", "user", user.Name, "userID", user.ID, "namespace", namespace)
-	// Get all SandboxSets from cache
-	cache := sc.manager.GetInfra().GetCache()
-	if cache == nil {
-		return web.ApiResponse[[]*models.TemplateInfo]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: "Cache not available",
-		}
-	}
 
-	sandboxSets, err := cache.ListSandboxSets(r.Context(), infracache.ListSandboxSetsOptions{
-		Namespace: namespace,
-	})
+	templates, err := sc.manager.ListTemplates(r.Context(), namespace)
 	if err != nil {
+		if errors.GetErrCode(err) == errors.ErrorUnavailable {
+			return web.ApiResponse[[]*models.TemplateInfo]{}, &web.ApiError{Code: http.StatusInternalServerError, Message: "Cache not available"}
+		}
 		return web.ApiResponse[[]*models.TemplateInfo]{}, &web.ApiError{
 			Code:    http.StatusInternalServerError,
 			Message: fmt.Sprintf("Failed to list templates: %v", err),
@@ -62,10 +53,9 @@ func (sc *Controller) ListTemplates(r *http.Request) (web.ApiResponse[[]*models.
 	}
 
 	// Convert to E2B format
-	e2bTemplates := make([]*models.TemplateInfo, 0, len(sandboxSets))
-	for _, sandboxSet := range sandboxSets {
-		e2bTemplate := sc.convertToTemplateInfo(sandboxSet)
-		e2bTemplates = append(e2bTemplates, e2bTemplate)
+	e2bTemplates := make([]*models.TemplateInfo, 0, len(templates))
+	for _, template := range templates {
+		e2bTemplates = append(e2bTemplates, convertToTemplateInfo(template))
 	}
 	return web.ApiResponse[[]*models.TemplateInfo]{
 		Code: http.StatusOK,
@@ -88,21 +78,11 @@ func (sc *Controller) GetTemplate(r *http.Request) (web.ApiResponse[*models.Temp
 	namespace := sc.getNamespaceOfUser(user)
 	log.Info("will get template", "user", user.Name, "userID", user.ID, "templateID", templateID, "namespace", namespace)
 
-	// Get SandboxSet from cache
-	cache := sc.manager.GetInfra().GetCache()
-	if cache == nil {
-		return web.ApiResponse[*models.Template]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: "Cache not available",
-		}
-	}
-
-	// Get SandboxSet from cache using informer
-	template, err := cache.PickSandboxSet(r.Context(), infracache.PickSandboxSetOptions{
-		Namespace: namespace,
-		Name:      templateID,
-	})
+	template, err := sc.manager.GetTemplate(r.Context(), namespace, templateID)
 	if err != nil {
+		if errors.GetErrCode(err) == errors.ErrorUnavailable {
+			return web.ApiResponse[*models.Template]{}, &web.ApiError{Code: http.StatusInternalServerError, Message: "Cache not available"}
+		}
 		return web.ApiResponse[*models.Template]{}, &web.ApiError{
 			Code:    http.StatusNotFound,
 			Message: fmt.Sprintf("Template not found: %s", templateID),
@@ -110,7 +90,7 @@ func (sc *Controller) GetTemplate(r *http.Request) (web.ApiResponse[*models.Temp
 	}
 
 	// Convert to E2B format
-	e2bTemplate := sc.convertToTemplate(template)
+	e2bTemplate := convertToTemplate(template)
 
 	return web.ApiResponse[*models.Template]{
 		Code: http.StatusOK,
@@ -171,9 +151,9 @@ func (sc *Controller) DeleteTemplate(r *http.Request) (web.ApiResponse[struct{}]
 	}, nil
 }
 
-// convertToTemplateInfo converts SandboxSet to E2B TemplateInfo
-func (sc *Controller) convertToTemplateInfo(tmpl *agentsv1alpha1.SandboxSet) *models.TemplateInfo {
-	cpuCount, memoryMB, diskSizeMB := BuildResource(tmpl)
+// convertToTemplateInfo converts a neutral template view to E2B TemplateInfo.
+func convertToTemplateInfo(tmpl infra.TemplateInfo) *models.TemplateInfo {
+	cpuCount, memoryMB, diskSizeMB := e2bTemplateResource(tmpl)
 	return &models.TemplateInfo{
 		TemplateID:  tmpl.Name,
 		BuildID:     tmpl.Name,
@@ -183,29 +163,29 @@ func (sc *Controller) convertToTemplateInfo(tmpl *agentsv1alpha1.SandboxSet) *mo
 		Public:      true,
 		Aliases:     []string{tmpl.Name},
 		Names:       []string{tmpl.Name},
-		CreatedAt:   tmpl.CreationTimestamp.Time,
-		UpdatedAt:   tmpl.CreationTimestamp.Time,
+		CreatedAt:   tmpl.CreatedAt,
+		UpdatedAt:   tmpl.CreatedAt,
 		CreatedBy:   nil,
 		SpawnCount:  0,
 		BuildCount:  1,
 		EnvdVersion: "0.1.1",
-		BuildStatus: buildStatus(tmpl),
+		BuildStatus: templateBuildStatus(tmpl),
 	}
 }
 
-// convertToTemplate converts SandboxSet to E2B Template
-func (sc *Controller) convertToTemplate(tmpl *agentsv1alpha1.SandboxSet) *models.Template {
-	cpuCount, memoryMB, diskSizeMB := BuildResource(tmpl)
+// convertToTemplate converts a neutral template view to an E2B Template.
+func convertToTemplate(tmpl infra.TemplateInfo) *models.Template {
+	cpuCount, memoryMB, diskSizeMB := e2bTemplateResource(tmpl)
 	// Create builds array
 	builds := []models.Build{
 		{
 			BuildID:     tmpl.Name,
-			Status:      buildStatus(tmpl),
-			CreatedAt:   tmpl.CreationTimestamp.Time,
-			UpdatedAt:   tmpl.CreationTimestamp.Time,
+			Status:      templateBuildStatus(tmpl),
+			CreatedAt:   tmpl.CreatedAt,
+			UpdatedAt:   tmpl.CreatedAt,
 			CPUCount:    cpuCount,
 			MemoryMB:    memoryMB,
-			FinishedAt:  tmpl.CreationTimestamp.Time,
+			FinishedAt:  tmpl.CreatedAt,
 			DiskSizeMB:  diskSizeMB,
 			EnvdVersion: "0.1.1",
 		},
@@ -215,34 +195,21 @@ func (sc *Controller) convertToTemplate(tmpl *agentsv1alpha1.SandboxSet) *models
 		Public:        true,
 		Aliases:       []string{tmpl.Name},
 		Names:         []string{tmpl.Name},
-		CreatedAt:     tmpl.CreationTimestamp.Time,
-		UpdatedAt:     tmpl.CreationTimestamp.Time,
+		CreatedAt:     tmpl.CreatedAt,
+		UpdatedAt:     tmpl.CreatedAt,
 		LastSpawnedAt: nil,
 		SpawnCount:    0,
 		Builds:        builds,
 	}
 }
 
-func BuildResource(tmpl *agentsv1alpha1.SandboxSet) (int, int, int) {
-	cpuCount, memoryMB, diskSizeMB := 0, 0, 0
-	if tmpl.Spec.Template != nil {
-		resource := infra.CalculateResourceFromContainers(tmpl.Spec.Template.Spec.Containers)
-		cpuCount64, memoryMB64, diskSizeMB64 := e2bResource(resource)
-		cpuCount = int(cpuCount64)
-		memoryMB = int(memoryMB64)
-		diskSizeMB = int(diskSizeMB64)
-		// Calculate disk size from volumeClaimTemplates
-		for _, pvc := range tmpl.Spec.VolumeClaimTemplates {
-			if storage := pvc.Spec.Resources.Requests.Storage(); storage != nil && !storage.IsZero() {
-				diskSizeMB += int(storage.Value() / (1024 * 1024))
-			}
-		}
-	}
-	return cpuCount, memoryMB, diskSizeMB
+// e2bTemplateResource renders the neutral template footprint in the E2B units.
+func e2bTemplateResource(tmpl infra.TemplateInfo) (int, int, int) {
+	return int(e2bCPUCount(tmpl.CPUMilli)), int(tmpl.MemoryMB), int(tmpl.DiskSizeMB)
 }
 
-func buildStatus(tmpl *agentsv1alpha1.SandboxSet) string {
-	if !tmpl.DeletionTimestamp.IsZero() {
+func templateBuildStatus(tmpl infra.TemplateInfo) string {
+	if tmpl.Terminating {
 		return "deleting"
 	}
 	return "ready"

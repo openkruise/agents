@@ -47,6 +47,22 @@ type SandboxResource struct {
 	Limits   ResourceList
 }
 
+// Effective returns the per-dimension resource footprint: limits win and
+// requests fill only the dimensions limits leave at zero.
+func (r SandboxResource) Effective() ResourceList {
+	out := r.Limits
+	if out.CPUMilli == 0 {
+		out.CPUMilli = r.Requests.CPUMilli
+	}
+	if out.MemoryMB == 0 {
+		out.MemoryMB = r.Requests.MemoryMB
+	}
+	if out.DiskSizeMB == 0 {
+		out.DiskSizeMB = r.Requests.DiskSizeMB
+	}
+	return out
+}
+
 func memoryBytesToFloorMiB(q resource.Quantity) int64 {
 	return q.Value() / bytesPerMiB
 }
