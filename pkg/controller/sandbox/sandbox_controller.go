@@ -45,6 +45,8 @@ import (
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/pausedretention"
+	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -92,6 +94,9 @@ const (
 	maximumPendingTimeout         = 3590 * time.Second
 	checkpointCreationWaitTimeout = 5 * time.Minute
 	checkpointWaitRequeueInterval = 5 * time.Second
+	// The total sync budget covers sender readiness, parallel requests, and retries,
+	// bounding the additional network waiting in reconcile.
+	controllerRouteSyncTimeout = 200 * time.Millisecond
 	// staleCacheRequeueInterval bounds the retry after the resourceVersion
 	// expectation guard times out, so a pending transition (e.g. a wake) is
 	// retried shortly instead of being deferred to the next informer resync.
@@ -136,7 +141,8 @@ type Enqueuer interface {
 // Add registers the sandbox controller. runtimeTLSBundle is the client TLS
 // bundle for reaching TLS-capable agent-runtimes; nil disables runtime TLS
 // for this controller (all sandboxes are served over the legacy paths).
-func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtimeclient.TLSBundle) error {
+// syncRouteWithPeers is an optional active route sync callback; nil disables sync.
+func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtimeclient.TLSBundle, syncRouteWithPeers func(context.Context, sandboxroute.Route) error) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxGate) || !discovery.DiscoverGVK(sandboxControllerKind) {
 		return nil
 	}
@@ -194,6 +200,8 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 		lifecycleHooks: lifecycleHooks,
 		metricsCleanup: metricsCleanup,
 		recorder:       recorder,
+
+		syncRouteWithPeers: syncRouteWithPeers,
 	}).SetupWithManager(mgr)
 	if err != nil {
 		return err
@@ -213,6 +221,8 @@ type SandboxReconciler struct {
 	metricsCleanup    Enqueuer
 	recorder          record.EventRecorder
 	messageRegexCache compiledMessageRegexCache
+
+	syncRouteWithPeers func(context.Context, sandboxroute.Route) error
 }
 
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -669,6 +679,19 @@ func (r *SandboxReconciler) finalizeResumePhase(ctx context.Context, args core.E
 
 func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.EnsureFuncArgs) (ctrl.Result, error) {
 	pod, box, _ := args.Pod, args.Box, args.NewStatus
+	if r.syncRouteWithPeers != nil {
+		// Use the observed deleting object and its RV; NotFound carries no version evidence and must not fabricate a deletion fence.
+		route, err := sandboxroute.RouteFromSandbox(box)
+		if err == nil {
+			route.State = sandboxstate.Dead
+			syncCtx, cancel := context.WithTimeout(ctx, controllerRouteSyncTimeout)
+			err = r.syncRouteWithPeers(syncCtx, route)
+			cancel()
+		}
+		if err != nil {
+			klog.FromContext(ctx).Error(err, "failed to sync terminating Sandbox route", "sandbox", klog.KObj(box))
+		}
+	}
 	recordTerminatingEvent := pod != nil && pod.DeletionTimestamp.IsZero()
 	if err := r.getControl(pod).EnsureSandboxTerminated(ctx, args); err != nil {
 		return ctrl.Result{}, err
@@ -715,6 +738,11 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 		return nil
 	}
 	oldPhase := box.Status.Phase
+	var oldRoute sandboxroute.Route
+	var oldRouteErr error
+	if r.syncRouteWithPeers != nil {
+		oldRoute, oldRouteErr = sandboxroute.RouteFromSandbox(box)
+	}
 
 	// phase.after records the phase this status patch writes. It has
 	// independent value on the shouldRequeue early-return path, where the
@@ -731,6 +759,10 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus, statusAttrs...)
 
+	type podInfoPatch struct {
+		agentsv1alpha1.PodInfo
+		PodIP string `json:"podIP"`
+	}
 	// The UID precondition keeps a same-name replacement from receiving this
 	// status or reporting its completion. Completion counting is best-effort
 	// under concurrent writers because the cached old status is not CAS-guarded.
@@ -740,7 +772,12 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 			agentsv1alpha1.SandboxStatus
 			// Explicit null removes abandoned conditions despite omitempty on SandboxStatus.
 			Conditions []metav1.Condition `json:"conditions"`
-		}{SandboxStatus: newStatus, Conditions: newStatus.Conditions},
+			PodInfo    podInfoPatch       `json:"podInfo"`
+		}{
+			SandboxStatus: newStatus,
+			Conditions:    newStatus.Conditions,
+			PodInfo:       podInfoPatch{PodInfo: newStatus.PodInfo, PodIP: newStatus.PodInfo.PodIP},
+		},
 	})
 	if err != nil {
 		tracing.EndSpan(ctx, span, err)
@@ -758,6 +795,20 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 		return err
 	}
 	core.ResourceVersionExpectations.Expect(rcvObject)
+	if r.syncRouteWithPeers != nil {
+		newRoute, routeErr := sandboxroute.RouteFromSandbox(rcvObject)
+		if routeErr := cmp.Or(oldRouteErr, routeErr); routeErr != nil {
+			klog.FromContext(ctx).Error(routeErr, "failed to project Sandbox route, skipping peer sync", "sandbox", klog.KObj(box))
+		} else if newRoute.State != sandboxstate.Dead && (oldRoute.CanRouteTraffic() != newRoute.CanRouteTraffic() || oldRoute.IP != newRoute.IP) {
+			// Status is already persisted; peer sync is best-effort acceleration, while informers ensure eventual convergence.
+			syncCtx, cancel := context.WithTimeout(ctx, controllerRouteSyncTimeout)
+			err := r.syncRouteWithPeers(syncCtx, newRoute)
+			cancel()
+			if err != nil {
+				klog.FromContext(ctx).Error(err, "failed to sync Sandbox route with peers", "sandbox", klog.KObj(box))
+			}
+		}
+	}
 	recordSandboxLifecycleCompletions(box, rcvObject.Status, newStatus)
 	klog.FromContext(ctx).Info("update sandbox status success", "sandbox", klog.KObj(box), "status", utils.DumpJson(newStatus))
 	box.ResourceVersion = rcvObject.ResourceVersion

@@ -29,24 +29,8 @@ var (
 			Help: "Current number of routes in the proxy routing table",
 		},
 	)
-
-	// peerCount tracks the current number of connected peer nodes.
-	peerCount = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "sandbox_peers",
-			Help: "Current number of connected peer nodes",
-		},
-	)
-
-	// outboundTLSErrors counts HTTPS peer refreshes that failed during TLS.
-	outboundTLSErrors = prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name: "sandbox_peer_outbound_tls_errors_total",
-			Help: "HTTPS peer refresh requests that failed during TLS",
-		},
-	)
 )
 
 func init() {
-	metrics.Registry.MustRegister(routeCount, peerCount, outboundTLSErrors)
+	metrics.Registry.MustRegister(routeCount)
 }

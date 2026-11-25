@@ -4,7 +4,7 @@ authors:
   - "@AiRanthem"
 reviewers: []
 creation-date: 2026-08-24
-last-updated: 2026-09-09
+last-updated: 2026-11-24
 status: implementable
 ---
 
@@ -101,6 +101,83 @@ flowchart LR
   flag; that pairing is a deployment configuration error.
 - Both listeners bind synchronously during startup. A bind failure of either
   enabled listener fails startup before the process serves requests.
+
+### Controller-initiated route synchronization
+
+After a successful Sandbox status patch, the controller compares the old and
+new `Route.CanRouteTraffic()` values and IP addresses. A change sends the full
+`RouteFromSandbox` projection with the API server's returned UID/resourceVersion,
+before lifecycle metrics, except when the projection is Dead. Non-deletion Dead
+observations remain on the existing informer path so they cannot be mistaken for
+delete markers. PodIP is patched explicitly to persist address removal.
+
+Sending is synchronous, best effort, and bounded by a 200ms total context budget
+for fanout and retries. Errors are logged without rolling back status or adding
+reconcile retries. Failed/NotFound patches and unchanged routability/IP do not
+send. An observed DeletionTimestamp triggers a versioned deletion before
+termination control, even if cleanup fails or the Pod is absent. NotFound alone
+cannot create a deletion fence. Receiving Sandbox informers retain convergence;
+there is no queue or replay. No refresh targets remains a successful no-op. With
+an outbound client configured, the sender logs this skip at default verbosity,
+initially and at most once every 30 seconds per client, without route data or
+credentials. A nil outbound client keeps the no-op silent.
+
+Controller configuration:
+- Alpha `SandboxRouteSync` defaults to false. A disabled gate skips peer validation,
+  client creation and listeners. Empty/whitespace `--peer-selector` disables sync.
+- `--peer-selector` defaults to `component=sandbox-manager` in `sandbox-system`,
+  matching the repository's manager/gateway deployment labels. Other deployments
+  must provide a selector matching their seed Pods.
+- `--network-interface=eni1` reuses the existing address resolver, overriding POD_IP.
+  Invalid interfaces fail enabled startup; an empty flag preserves POD_IP/first
+  non-loopback IPv4 fallback. This selects gossip identity, not outbound routing.
+- `--memberlist-bind-port=7946` also supplies the default seed port. Non-positive
+  values fall back to 7946; values above 65535 fail enabled startup.
+- `--peer-key-secret`, `--peer-tls-server-secret`, and `--peer-tls-client-secret`
+  default to empty. Gossip encryption is independent of TLS; TLS refs must be paired.
+
+The entrypoint builds a separate live controller-runtime client from rest.Config
+for shared peer discovery and Secret Get, unaffected by the Sandbox Pod cache.
+It calls existing `peersecurity.Load` under startup cancellation and a 30-second
+budget, installs the gossip key, and constructs `refresh.NewPeerOutbound` before
+publishing the callback. Empty inputs read no Secrets and use plaintext HTTP;
+invalid configured inputs fail startup. TLS-pair material validation, fixed SNI
+`agentruntime.sandbox.agents.kruise.io`, and TLS >= 1.2 remain unchanged. Keys and
+TLS are startup snapshots, independent of runtime certificate mounts.
+
+Every replica starts memberlist before mgr.Start. Node names use HOSTNAME, then
+POD_NAME, then an eight-character UUID prefix. The `sc-` role participates in
+TCP/UDP gossip but serves no 7789 receiver. GetPeers returns live members except
+self; the refresh sender excludes `sc-` members before counting and fanout.
+Shared memberlist discovery owns seed retries; unavailable seeds do not block
+startup. The same cancellation signal starts the single Stop wait within the
+manager's 30-second shutdown budget, followed by idle-connection cleanup. Forced
+exit may precede an in-flight join's cleanup; enabling deployments need termination
+grace above that budget (for example, 40 seconds).
+
+The existing HTTP/TLS/retry sender and its metrics move from `pkg/proxy` to
+neutral `pkg/sandboxroute/refresh`, keeping the controller's dependency closure
+free of API and sandbox-manager packages. Proxy preserves its public API via
+aliases and thin delegation; manager/gateway assembly and receive TLS policy stay
+unchanged. No new metrics or generic peer-initialization wrapper are added.
+
+The refresh payload, projection, Store and receiver behavior remain unchanged:
+Dead/empty-state payloads are Deletes and other states are Upserts. No labels,
+terminal marker or receiver scope filtering are added.
+
+Upgrade peer senders before enabling the gate so they exclude `sc-` members.
+Allow controller/peer bidirectional TCP/UDP gossip and controller-to-receiver
+TCP 7789. Activation also requires compatible interface, seed topology and
+shutdown grace.
+This release uses empty TLS refs and plaintext receivers. Optional TLS remains,
+but local validation cannot prove group-wide transport/trust/identity agreement;
+there is no protocol probing or plaintext downgrade.
+
+Tests cover controller status/deletion dispatch, returned versions and PodIP
+clearing, with existing sender transport/retry/TLS coverage migrated alongside
+the implementation. Sender tests also cover empty/sender-only membership,
+default-level skip logs, concurrent calls, per-client throttling and credential
+redaction. Store and receiver tests retain their existing contracts.
 
 ### Bounded peer listing
 
@@ -288,10 +365,13 @@ discovery intentionally stops its Kubernetes retry loop.
 
 ### Compatibility and ownership
 
-This proposal adds two optional CLI flags, `--network-interface` and
-`--disable-envoy-ext-proc`. It does not change CRDs, HTTP models, Secrets, or
-the memberlist wire protocol. Both in-cluster configuration and `KUBECONFIG`
-continue to supply the sandbox-cluster Kubernetes client.
+The original Manager address design adds two optional CLI flags,
+`--network-interface` and `--disable-envoy-ext-proc`. The controller extension
+also adds optional peer configuration while reusing the existing refresh
+protocol. CRDs, public control-API models, Secret schemas, and the memberlist
+wire protocol remain unchanged. Both
+in-cluster configuration and `KUBECONFIG` continue to supply the sandbox-cluster
+Kubernetes client.
 
 Process peer discovery and peer lifecycle belong to the Manager layer because
 they coordinate Sandbox Manager processes rather than implement a Sandbox
@@ -308,9 +388,10 @@ Pods across all namespaces. The reference manifest under
 must set them before upgrading, and the release notes for the first release
 containing this change must call this out.
 
-The following are outside this proposal:
+The following are outside the original Manager address design:
 
-- memberlist encryption and peer-route mTLS;
+- changes to memberlist encryption and peer-route mTLS policy; the controller
+  extension above reuses the existing security implementation and materials;
 - changing the address or port of the `9002` ext-proc listener;
 - metrics, pprof, or observability listener isolation;
 - Deployment, RBAC, KDM, or rollout configuration;
