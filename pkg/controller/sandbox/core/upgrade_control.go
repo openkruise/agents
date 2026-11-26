@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -266,8 +267,9 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		}
 		// The installer container performs the file mutation; every non-zero
 		// outcome is terminal for this patch version. Re-evaluation is
-		// idempotent: once injected, the container name is a deterministic
-		// function of the patch version, so no second container is ever added.
+		// idempotent: the injected container's SANDBOX_INSTALLER_PATCH_VERSION
+		// env records the patch version, so no second container is ever added
+		// for the same version.
 		done, err := r.performInstallerUpgrade(ctx, args, upgradeCond)
 		if err != nil {
 			logger.Error(err, "Installing step failed")
@@ -599,13 +601,13 @@ const installerTargetRootEnv = "/proc/1/root"
 const installerPatchVersionEnv = "SANDBOX_INSTALLER_PATCH_VERSION"
 
 // installerContainerName derives the ephemeral container name from the patch
-// version. The name is a deterministic function of the patch version, so a
-// requeue after a partial write finds the newest installer entry already
-// matching and skips injection — that guard is what bounds the install to one
-// container per patch version.
+// version plus a random suffix, so a new injection never collides with an
+// existing entry. Idempotency does not rely on the name: the injected
+// container's SANDBOX_INSTALLER_PATCH_VERSION env records the payload version,
+// and that value is what bounds the install to one container per patch version.
 func installerContainerName(patchVersion string) string {
 	sum := sha256.Sum256([]byte(patchVersion))
-	return fmt.Sprintf("installer-%s", hex.EncodeToString(sum[:4]))
+	return fmt.Sprintf("installer-%s-%s", hex.EncodeToString(sum[:4]), rand.String(5))
 }
 
 // performInstallerUpgrade drives the Installing step of an InstallerUpdate
@@ -700,19 +702,21 @@ func (r *UpgradeControl) performInstallerUpgrade(ctx context.Context, args Ensur
 	timeoutSeconds := ptr.Deref(installer.TimeoutSeconds, int32(defaultInstallerTimeoutSeconds))
 	ecName := installerContainerName(policy.PatchVersion)
 	// Ephemeral containers are append-only, so the newest installer is the last
-	// entry carrying the contract env. Scan backwards for it: a name match means
-	// this patch version is already injected; any other installer name means a
-	// new container must be appended. Entries without the env (e.g. kubectl
-	// debug containers) never participate in this decision.
+	// entry carrying the contract env. Scan backwards for it and compare the
+	// recorded patch version, never the container name (it carries a random
+	// suffix): a matching value means this version is already injected, any
+	// other value means a new container must be appended. Entries without the
+	// env (e.g. kubectl debug containers) never participate in this decision.
 	for i := len(pod.Spec.EphemeralContainers) - 1; i >= 0; i-- {
 		ec := &pod.Spec.EphemeralContainers[i]
-		if !slices.ContainsFunc(ec.Env, func(env corev1.EnvVar) bool {
+		envIdx := slices.IndexFunc(ec.Env, func(env corev1.EnvVar) bool {
 			return env.Name == installerPatchVersionEnv
-		}) {
+		})
+		if envIdx < 0 {
 			continue
 		}
-		if ec.Name == ecName {
-			return r.evaluateInstallerStatus(ctx, box, pod, upgradeCond, newStatus, ecName, timeoutSeconds, deadline), nil
+		if ec.Env[envIdx].Value == policy.PatchVersion {
+			return r.evaluateInstallerStatus(ctx, box, pod, upgradeCond, newStatus, ec.Name, timeoutSeconds, deadline), nil
 		}
 		break
 	}

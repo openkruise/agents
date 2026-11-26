@@ -518,7 +518,7 @@ SandboxUpdateOps                       Sandbox controller                kubelet
                                      4. PreUpgrade hook (envd, inside sandbox)
                                      5. verify target container Running
                                      6. POST pods/<name>/ephemeralcontainers
-                                          name: installer-<hash8>
+                                          name: installer-<hash8>-<random>
                                           image/command/env/securityContext from spec
                                           targetContainerName: <resolved>
                                                                     |
@@ -1115,15 +1115,16 @@ transition directly to `PreUpgrade`; the abandonment check keys off
    since a transient restart should not abort the batch.
 4. **Do not inject twice.** Scan `pod.Spec.EphemeralContainers` backwards for the
    first entry carrying the `SANDBOX_INSTALLER_PATCH_VERSION` env — the newest
-   injected installer. If its name equals `installer-<hash8(patchVersion)>`, skip
-   injection and go straight to step 6; any other installer name means this patch
-   version needs a new container. Entries without the env (for example `kubectl
-   debug` containers) never participate in the decision. The name is a
-   deterministic function of `patchVersion`, so a requeue after a partial write
-   cannot append a second container for the same version — that guard is the
-   whole reason the name is derived rather than generated, and it replaces any
-   need for an attempt counter.
-5. **Inject.** Append one `EphemeralContainer` named `installer-<hash8>`, carrying
+   injected installer. Compare that env's **value** with `patchVersion`, never the
+   container name: a matching value means this patch version is already injected,
+   so skip injection and go straight to step 6; any other value means a new
+   container must be appended. Entries without the env (for example `kubectl
+   debug` containers) never participate in the decision. The env value is what
+   bounds the install to one container per `patchVersion` and replaces any need
+   for an attempt counter; a requeue after a partial write finds the recorded
+   version and evaluates the existing container instead of injecting again.
+5. **Inject.** Append one `EphemeralContainer` named
+   `installer-<hash8(patchVersion)>-<random>`, carrying
    the resolved image, command, env, security context and image pull policy, with
    `TargetContainerName` set. The patch carries the existing ephemeral containers
    unchanged plus the new entry at the end, because the `ephemeralcontainers`
@@ -1277,12 +1278,13 @@ operator's choice.
   that logic anyway.
 - **Ephemeral containers accumulate permanently.** Each install appends an entry
   to `pod.spec.ephemeralContainers` that can never be removed, along with its
-  `ephemeralContainerStatuses` entry. Because the name is a deterministic function
-  of `patchVersion` and the controller injects at most once per `patchVersion`, the
-  growth is exactly one entry per successful or failed operation applied to that
-  Pod — bounded in practice by the one-ops-per-namespace rule, and auditable
-  because the names encode the patch version. There is no attempt counter, so a
-  single operation can never append more than one.
+  `ephemeralContainerStatuses` entry. Because the newest installer's
+  `SANDBOX_INSTALLER_PATCH_VERSION` env records the applied version and the
+  controller injects at most once per `patchVersion`, the growth is exactly one
+  entry per successful or failed operation applied to that Pod — bounded in
+  practice by the one-ops-per-namespace rule, and auditable because the names
+  encode the patch version hash. There is no attempt counter, so a single
+  operation can never append more than one.
 - **`RestartPolicy` must not be set** on the injected container. Ephemeral
   containers are never restarted; requesting otherwise is rejected by the API
   server.
@@ -1292,12 +1294,12 @@ operator's choice.
   controller copies into the condition message.
 - **Container name validity.** The generated name must be a DNS label: lowercase
   alphanumerics and `-`, at most 63 characters, and unique across the Pod's
-  containers, init containers and ephemeral containers. `installer-<8 hex>`
-  satisfies this; hash `patchVersion` rather than embedding it, since the value is
-  opaque and today is a 36-character UID, which would crowd the budget. Deriving
-  the name from `patchVersion` is also what makes it unique per operation: two
-  successive ops objects produce two different names, and one operation can never
-  produce two.
+  containers, init containers and ephemeral containers.
+  `installer-<8 hex>-<random 5>` satisfies this; hash `patchVersion` rather than
+  embedding it, since the value is opaque and may be up to 63 characters, which
+  would crowd the budget. The hash prefix keeps the name auditable per version,
+  while the random suffix guarantees uniqueness across injections — the
+  already-injected guard relies on the env value, not on the name.
 - **No probes, no ports, no lifecycle hooks** on the installer container — all
   rejected by the API server. Readiness is judged solely from
   `ephemeralContainerStatuses`.
@@ -1588,10 +1590,11 @@ existing tables per the repository's test rules):
   `Installing` until the deadline, then `InstallingFailed`; running past
   `timeoutSeconds` → `InstallingFailed`.
 - Single-injection guarantee: reconciling a sandbox whose newest installer entry
-  is `installer-<hash8(patchVersion)>` performs no second injection and evaluates
-  the existing entry instead; a newer installer for a different `patchVersion`
-  triggers an append that preserves the older entries, and ephemeral containers
-  without the contract env are ignored by the decision.
+  records the current `patchVersion` in `SANDBOX_INSTALLER_PATCH_VERSION` performs
+  no second injection and evaluates the existing entry instead, regardless of its
+  container name; a newer installer recording a different version triggers an
+  append that preserves the older entries, and ephemeral containers without the
+  contract env are ignored by the decision.
 - `EnsureSandboxUpgraded` under installer policy: `PreUpgrade` → `Installing` →
   `PostUpgrade` → `Succeeded`, with `Checkpointing` skipped and
   `CleanupCheckpoints` not called; `ResumeSucceed` advances to `PreUpgrade`
@@ -1835,6 +1838,14 @@ individually.
       `installer-<hash8(patchVersion)>`, so unrelated ephemeral containers (for
       example `kubectl debug`) neither block nor satisfy the check, and a newer
       installer for a different version always triggers a fresh append.
+- [ ] 11/26/2026: Moved the already-injected guard from the container name to the
+      `SANDBOX_INSTALLER_PATCH_VERSION` env **value**, and appended a random
+      suffix to the generated name (`installer-<hash8>-<random>`). Detection no
+      longer compares names at all: the newest installer entry whose env value
+      equals `patchVersion` is evaluated as-is, so an existing container is
+      recognized even if its name differs from what the current code would
+      generate, and a new injection can never collide with an existing entry.
+      The hash prefix is kept for auditability only.
 - [ ] Verify the prefix-redirect pattern end-to-end against a real OpenClaw and a
       real Hermes Agent sandbox, including whether lifecycle scripts and native
       builds survive the libc-family match requirement, and whether

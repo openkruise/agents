@@ -2210,12 +2210,14 @@ func TestRequiresInstallerUpgrade(t *testing.T) {
 
 func TestInstallerContainerName(t *testing.T) {
 	name := installerContainerName("ops-uid-1")
-	// Deterministic: same input, same name.
-	assert.Equal(t, name, installerContainerName("ops-uid-1"))
-	// DNS-label shape: installer-<8 hex chars>.
-	assert.Regexp(t, `^installer-[0-9a-f]{8}$`, name)
-	// Distinct patch versions produce distinct names.
-	assert.NotEqual(t, name, installerContainerName("ops-uid-2"))
+	// DNS-label shape: installer-<8 hex chars>-<random suffix>.
+	assert.Regexp(t, `^installer-[0-9a-f]{8}-[a-z0-9]{5}$`, name)
+	// The version hash prefix is stable; the random suffix makes each call unique.
+	other := installerContainerName("ops-uid-1")
+	assert.Equal(t, name[:18], other[:18])
+	assert.NotEqual(t, name, other)
+	// Distinct patch versions produce distinct hash prefixes.
+	assert.NotEqual(t, name[:18], installerContainerName("ops-uid-2")[:18])
 }
 
 func TestBuildInstallerEphemeralContainer(t *testing.T) {
@@ -2273,6 +2275,9 @@ func TestBuildInstallerEphemeralContainer(t *testing.T) {
 
 func TestPerformInstallerUpgrade(t *testing.T) {
 	now := metav1.Now()
+	// Detection keys on the env value, so fixtures share one container name
+	// between the ephemeral container spec and its status.
+	existingECName := installerContainerName("ops-uid-1")
 
 	defaultInstaller := func() *agentsv1alpha1.InstallerSpec {
 		return &agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"}
@@ -2310,7 +2315,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 
 	terminatedStatus := func(exitCode int32, message string) *corev1.ContainerStatus {
 		return &corev1.ContainerStatus{
-			Name: installerContainerName("ops-uid-1"),
+			Name: existingECName,
 			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
 				ExitCode:   exitCode,
 				Message:    message,
@@ -2355,14 +2360,14 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			expectReason:   agentsv1alpha1.SandboxUpgradingReasonInstalling,
 		},
 		{
-			name: "already injected pod is not injected twice",
+			name: "already injected pod is detected by env value, not container name",
 			pod: podWithEphemeral(
 				&corev1.EphemeralContainer{
-					EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")},
+					EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "installer-legacy"},
 					TargetContainerName:      "sandbox",
 				},
 				&corev1.ContainerStatus{
-					Name:  installerContainerName("ops-uid-1"),
+					Name:  "installer-legacy",
 					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
 				}),
 			expectReason: agentsv1alpha1.SandboxUpgradingReasonInstalling,
@@ -2402,7 +2407,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			name: "trailing debug container does not hide the injected installer",
 			pod: func() *corev1.Pod {
 				p := podWithEphemeral(
-					&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}},
+					&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
 					terminatedStatus(0, ""))
 				p.Spec.EphemeralContainers = append(p.Spec.EphemeralContainers, corev1.EphemeralContainer{
 					EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "debugger"},
@@ -2536,7 +2541,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 		{
 			name: "exit 0 completes the install",
 			pod: podWithEphemeral(
-				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}},
+				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
 				terminatedStatus(0, "")),
 			lastTransition: now,
 			expectDone:     true,
@@ -2545,7 +2550,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 		{
 			name: "exit 125 reports namespace targeting unsupported",
 			pod: podWithEphemeral(
-				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}},
+				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
 				terminatedStatus(125, "")),
 			expectDone:       false,
 			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
@@ -2554,7 +2559,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 		{
 			name: "exit 126 reports non-relocatable toolchain",
 			pod: podWithEphemeral(
-				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}},
+				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
 				terminatedStatus(126, "")),
 			expectDone:       false,
 			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
@@ -2563,7 +2568,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 		{
 			name: "generic non-zero exit reports truncated message",
 			pod: podWithEphemeral(
-				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}},
+				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
 				terminatedStatus(1, "cp: no space left on device")),
 			expectDone:       false,
 			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
@@ -2572,9 +2577,9 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 		{
 			name: "image pull backoff keeps waiting within the deadline",
 			pod: podWithEphemeral(
-				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}},
+				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
 				&corev1.ContainerStatus{
-					Name:  installerContainerName("ops-uid-1"),
+					Name:  existingECName,
 					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
 				}),
 			lastTransition: now,
@@ -2584,9 +2589,9 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 		{
 			name: "image pull backoff past the deadline fails",
 			pod: podWithEphemeral(
-				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}},
+				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
 				&corev1.ContainerStatus{
-					Name:  installerContainerName("ops-uid-1"),
+					Name:  existingECName,
 					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
 				}),
 			lastTransition:   metav1.NewTime(time.Now().Add(-2 * time.Hour)),
@@ -2597,9 +2602,9 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 		{
 			name: "running past the deadline fails",
 			pod: podWithEphemeral(
-				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}},
+				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
 				&corev1.ContainerStatus{
-					Name:  installerContainerName("ops-uid-1"),
+					Name:  existingECName,
 					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(time.Now().Add(-2 * time.Hour))}},
 				}),
 			lastTransition:   metav1.NewTime(time.Now().Add(-2 * time.Hour)),
@@ -2614,9 +2619,9 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 				TimeoutSeconds: ptr.To[int32](1),
 			},
 			pod: podWithEphemeral(
-				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}},
+				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
 				&corev1.ContainerStatus{
-					Name:  installerContainerName("ops-uid-1"),
+					Name:  existingECName,
 					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(time.Now().Add(-2 * time.Hour))}},
 				}),
 			lastTransition:   metav1.NewTime(time.Now().Add(-2 * time.Hour)),
@@ -2695,7 +2700,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 				s := terminatedStatus(0, "")
 				s.State.Terminated.FinishedAt = metav1.NewTime(now.Add(-115 * time.Minute))
 				return podWithEphemeral(
-					&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}}, s)
+					&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}}, s)
 			}(),
 			lastTransition: metav1.NewTime(now.Add(-2 * time.Hour)),
 			expectDone:     true,
@@ -2704,7 +2709,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 		{
 			name: "exit zero after the deadline fails",
 			pod: podWithEphemeral(
-				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}},
+				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
 				terminatedStatus(0, "")),
 			lastTransition:   metav1.NewTime(now.Add(-2 * time.Hour)),
 			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
@@ -2714,7 +2719,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			name: "existing installer is evaluated even if the target stopped",
 			pod: func() *corev1.Pod {
 				p := podWithEphemeral(
-					&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}},
+					&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
 					terminatedStatus(0, ""))
 				p.Status.ContainerStatuses[0].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{}}
 				return p
@@ -2770,7 +2775,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 					assert.Equal(t, tt.pod.Spec.EphemeralContainers, updated.Spec.EphemeralContainers[:existing])
 				}
 				ec := updated.Spec.EphemeralContainers[wantEphemerals-1]
-				assert.Equal(t, installerContainerName("ops-uid-1"), ec.Name)
+				assert.Regexp(t, `^installer-[0-9a-f]{8}-[a-z0-9]{5}$`, ec.Name)
 				assert.Equal(t, installer.Image, ec.Image)
 				assert.Equal(t, tt.expectTarget, ec.TargetContainerName)
 				require.NotNil(t, ec.SecurityContext)
