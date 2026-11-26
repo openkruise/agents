@@ -6468,7 +6468,10 @@ func TestReconcile_InstallerUpdateDeadline(t *testing.T) {
 			if tt.installerState != nil {
 				sum := sha256.Sum256([]byte("ops-uid-1"))
 				name := fmt.Sprintf("installer-%x", sum[:4])
-				pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: name}}}
+				pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+					Name: name,
+					Env:  []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: "ops-uid-1"}},
+				}}}
 				state := tt.installerState.DeepCopy()
 				if state.Terminated != nil {
 					state.Terminated.FinishedAt = metav1.NewTime(start)

@@ -2296,6 +2296,10 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 	podWithEphemeral := func(ec *corev1.EphemeralContainer, status *corev1.ContainerStatus) *corev1.Pod {
 		pod := newInstallerRunningPod()
 		if ec != nil {
+			// Injected installers always carry the contract env; detection keys on it.
+			if len(ec.Env) == 0 {
+				ec.Env = []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: "ops-uid-1"}}
+			}
 			pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{*ec}
 		}
 		if status != nil {
@@ -2336,6 +2340,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 		expectDone         bool
 		expectErr          bool
 		expectPatches      int
+		expectEphemerals   int
 		expectReason       string
 		expectMsgContain   string
 	}{
@@ -2360,6 +2365,51 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 					Name:  installerContainerName("ops-uid-1"),
 					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
 				}),
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonInstalling,
+		},
+		{
+			name: "newer installer for another version appends a new container",
+			pod: func() *corev1.Pod {
+				p := newInstallerRunningPod()
+				p.Spec.EphemeralContainers = []corev1.EphemeralContainer{{
+					EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+						Name: installerContainerName("ops-uid-0"),
+						Env:  []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: "ops-uid-0"}},
+					},
+				}}
+				return p
+			}(),
+			expectTarget:     "sandbox",
+			expectPatches:    1,
+			expectEphemerals: 2,
+			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstalling,
+		},
+		{
+			name: "debug-only pod receives the first injection",
+			pod: func() *corev1.Pod {
+				p := newInstallerRunningPod()
+				p.Spec.EphemeralContainers = []corev1.EphemeralContainer{{
+					EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "debugger"},
+				}}
+				return p
+			}(),
+			expectTarget:     "sandbox",
+			expectPatches:    1,
+			expectEphemerals: 2,
+			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstalling,
+		},
+		{
+			name: "trailing debug container does not hide the injected installer",
+			pod: func() *corev1.Pod {
+				p := podWithEphemeral(
+					&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: installerContainerName("ops-uid-1")}},
+					terminatedStatus(0, ""))
+				p.Spec.EphemeralContainers = append(p.Spec.EphemeralContainers, corev1.EphemeralContainer{
+					EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "debugger"},
+				})
+				return p
+			}(),
+			expectDone:   true,
 			expectReason: agentsv1alpha1.SandboxUpgradingReasonInstalling,
 		},
 		{
@@ -2710,8 +2760,16 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			if tt.expectTarget != "" {
 				var updated corev1.Pod
 				require.NoError(t, control.Get(t.Context(), client.ObjectKeyFromObject(tt.pod), &updated))
-				require.Len(t, updated.Spec.EphemeralContainers, 1)
-				ec := updated.Spec.EphemeralContainers[0]
+				wantEphemerals := tt.expectEphemerals
+				if wantEphemerals == 0 {
+					wantEphemerals = 1
+				}
+				require.Len(t, updated.Spec.EphemeralContainers, wantEphemerals)
+				// The append must preserve the existing entries unchanged.
+				if existing := len(tt.pod.Spec.EphemeralContainers); existing > 0 {
+					assert.Equal(t, tt.pod.Spec.EphemeralContainers, updated.Spec.EphemeralContainers[:existing])
+				}
+				ec := updated.Spec.EphemeralContainers[wantEphemerals-1]
 				assert.Equal(t, installerContainerName("ops-uid-1"), ec.Name)
 				assert.Equal(t, installer.Image, ec.Image)
 				assert.Equal(t, tt.expectTarget, ec.TargetContainerName)
@@ -2862,8 +2920,11 @@ func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {
 		ecName := installerContainerName("ops-uid-1")
 		pod := newInstallerRunningPod()
 		pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{
-			EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: ecName},
-			TargetContainerName:      "sandbox",
+			EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+				Name: ecName,
+				Env:  []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: "ops-uid-1"}},
+			},
+			TargetContainerName: "sandbox",
 		}}
 		pod.Status.EphemeralContainerStatuses = []corev1.ContainerStatus{{
 			Name:  ecName,
@@ -2889,8 +2950,11 @@ func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {
 		ecName := installerContainerName("ops-uid-1")
 		pod := newInstallerRunningPod()
 		pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{
-			EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: ecName},
-			TargetContainerName:      "sandbox",
+			EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+				Name: ecName,
+				Env:  []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: "ops-uid-1"}},
+			},
+			TargetContainerName: "sandbox",
 		}}
 		pod.Status.EphemeralContainerStatuses = []corev1.ContainerStatus{{
 			Name:  ecName,
@@ -2966,8 +3030,11 @@ func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {
 				if tt.lateExitZero {
 					ecName := installerContainerName("ops-uid-1")
 					pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{
-						EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: ecName},
-						TargetContainerName:      "sandbox",
+						EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+							Name: ecName,
+							Env:  []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: "ops-uid-1"}},
+						},
+						TargetContainerName: "sandbox",
 					}}
 					pod.Status.EphemeralContainerStatuses = []corev1.ContainerStatus{{
 						Name:  ecName,

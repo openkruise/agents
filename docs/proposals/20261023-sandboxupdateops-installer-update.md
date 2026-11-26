@@ -1113,16 +1113,23 @@ transition directly to `PreUpgrade`; the abandonment check keys off
 3. **Require a live target.** The Pod must be `Running` and the target's
    `ContainerStatus.State.Running` must be non-nil. Otherwise wait — do not fail,
    since a transient restart should not abort the batch.
-4. **Do not inject twice.** Scan `pod.Spec.EphemeralContainers` for the exact name
-   `installer-<hash8(patchVersion)>`. If it is already present, skip injection and
-   go straight to step 6. The name is a deterministic function of `patchVersion`,
-   so a requeue after a partial write cannot append a second container — that
-   guard is the whole reason the name is derived rather than generated, and it
-   replaces any need for an attempt counter.
+4. **Do not inject twice.** Scan `pod.Spec.EphemeralContainers` backwards for the
+   first entry carrying the `SANDBOX_INSTALLER_PATCH_VERSION` env — the newest
+   injected installer. If its name equals `installer-<hash8(patchVersion)>`, skip
+   injection and go straight to step 6; any other installer name means this patch
+   version needs a new container. Entries without the env (for example `kubectl
+   debug` containers) never participate in the decision. The name is a
+   deterministic function of `patchVersion`, so a requeue after a partial write
+   cannot append a second container for the same version — that guard is the
+   whole reason the name is derived rather than generated, and it replaces any
+   need for an attempt counter.
 5. **Inject.** Append one `EphemeralContainer` named `installer-<hash8>`, carrying
    the resolved image, command, env, security context and image pull policy, with
-   `TargetContainerName` set. Write it through the `ephemeralcontainers`
-   subresource — the same pattern already used for `pods/resize` at
+   `TargetContainerName` set. The patch carries the existing ephemeral containers
+   unchanged plus the new entry at the end, because the `ephemeralcontainers`
+   subresource only accepts appends — replacing the list would be rejected. Write
+   it through the `ephemeralcontainers` subresource — the same pattern already
+   used for `pods/resize` at
    `pkg/utils/inplaceupdate/inplace_update.go:524`. A `Conflict` means the Pod
    changed underneath us: requeue and retry the whole step, recomputing from the
    fresh Pod rather than injecting twice. This is one injection per
@@ -1580,10 +1587,11 @@ existing tables per the repository's test rules):
   `InstallingFailed` with truncated stdout/stderr; `ImagePullBackOff` → stays in
   `Installing` until the deadline, then `InstallingFailed`; running past
   `timeoutSeconds` → `InstallingFailed`.
-- Single-injection guarantee: reconciling a sandbox whose Pod already contains
-  `installer-<hash8(patchVersion)>` performs no second injection and evaluates the
-  existing entry instead; two different `patchVersion` values produce two
-  differently named entries.
+- Single-injection guarantee: reconciling a sandbox whose newest installer entry
+  is `installer-<hash8(patchVersion)>` performs no second injection and evaluates
+  the existing entry instead; a newer installer for a different `patchVersion`
+  triggers an append that preserves the older entries, and ephemeral containers
+  without the contract env are ignored by the decision.
 - `EnsureSandboxUpgraded` under installer policy: `PreUpgrade` → `Installing` →
   `PostUpgrade` → `Succeeded`, with `Checkpointing` skipped and
   `CleanupCheckpoints` not called; `ResumeSucceed` advances to `PreUpgrade`
@@ -1818,6 +1826,15 @@ individually.
       records — the payload already applied to the sandbox — and avoids implying
       that the sandbox starts normally at that version, since it is written before
       `postUpgrade` runs.
+- [ ] 11/26/2026: Changed the injection to an explicit append and the
+      already-injected guard to a backwards scan. The patch now carries the
+      existing ephemeral containers unchanged plus the new installer at the end,
+      because the `ephemeralcontainers` subresource only accepts appends. The
+      guard scans from the newest entry for the first container carrying
+      `SANDBOX_INSTALLER_PATCH_VERSION` and compares only that entry's name with
+      `installer-<hash8(patchVersion)>`, so unrelated ephemeral containers (for
+      example `kubectl debug`) neither block nor satisfy the check, and a newer
+      installer for a different version always triggers a fresh append.
 - [ ] Verify the prefix-redirect pattern end-to-end against a real OpenClaw and a
       real Hermes Agent sandbox, including whether lifecycle scripts and native
       builds survive the libc-family match requirement, and whether

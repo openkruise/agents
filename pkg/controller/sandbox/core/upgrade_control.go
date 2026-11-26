@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -593,11 +594,15 @@ func InstallerUpgradeDeadline(box *agentsv1alpha1.Sandbox, status *agentsv1alpha
 // container's filesystem through the PID-1 magic symlink.
 const installerTargetRootEnv = "/proc/1/root"
 
+// installerPatchVersionEnv marks an ephemeral container as an injected
+// installer and records the payload version it carries.
+const installerPatchVersionEnv = "SANDBOX_INSTALLER_PATCH_VERSION"
+
 // installerContainerName derives the ephemeral container name from the patch
 // version. The name is a deterministic function of the patch version, so a
-// requeue after a partial write finds the entry already present and skips
-// injection — that guard is what bounds the install to one container per
-// patch version.
+// requeue after a partial write finds the newest installer entry already
+// matching and skips injection — that guard is what bounds the install to one
+// container per patch version.
 func installerContainerName(patchVersion string) string {
 	sum := sha256.Sum256([]byte(patchVersion))
 	return fmt.Sprintf("installer-%s", hex.EncodeToString(sum[:4]))
@@ -694,10 +699,22 @@ func (r *UpgradeControl) performInstallerUpgrade(ctx context.Context, args Ensur
 
 	timeoutSeconds := ptr.Deref(installer.TimeoutSeconds, int32(defaultInstallerTimeoutSeconds))
 	ecName := installerContainerName(policy.PatchVersion)
-	for i := range pod.Spec.EphemeralContainers {
-		if pod.Spec.EphemeralContainers[i].Name == ecName {
+	// Ephemeral containers are append-only, so the newest installer is the last
+	// entry carrying the contract env. Scan backwards for it: a name match means
+	// this patch version is already injected; any other installer name means a
+	// new container must be appended. Entries without the env (e.g. kubectl
+	// debug containers) never participate in this decision.
+	for i := len(pod.Spec.EphemeralContainers) - 1; i >= 0; i-- {
+		ec := &pod.Spec.EphemeralContainers[i]
+		if !slices.ContainsFunc(ec.Env, func(env corev1.EnvVar) bool {
+			return env.Name == installerPatchVersionEnv
+		}) {
+			continue
+		}
+		if ec.Name == ecName {
 			return r.evaluateInstallerStatus(ctx, box, pod, upgradeCond, newStatus, ecName, timeoutSeconds, deadline), nil
 		}
+		break
 	}
 	if !deadline.IsZero() && !time.Now().Before(deadline) {
 		r.setInstallingFailed(upgradeCond, newStatus, box, fmt.Sprintf(
@@ -725,11 +742,16 @@ func (r *UpgradeControl) performInstallerUpgrade(ctx context.Context, args Ensur
 
 	logger = logger.WithValues("container", ecName)
 	ec := buildInstallerEphemeralContainer(ecName, installer, policy.PatchVersion, target, box)
-	ecJSON, err := json.Marshal(ec)
+	// The subresource only accepts appends, so carry the existing entries
+	// unchanged and add the installer at the end instead of replacing the list.
+	ecs := make([]corev1.EphemeralContainer, 0, len(pod.Spec.EphemeralContainers)+1)
+	ecs = append(ecs, pod.Spec.EphemeralContainers...)
+	ecs = append(ecs, ec)
+	ecsJSON, err := json.Marshal(ecs)
 	if err != nil {
 		return false, err
 	}
-	patchBody := fmt.Sprintf(`{"spec":{"ephemeralContainers":[%s]}}`, ecJSON)
+	patchBody := fmt.Sprintf(`{"spec":{"ephemeralContainers":%s}}`, ecsJSON)
 	if err := r.SubResource("ephemeralcontainers").Patch(ctx, pod,
 		client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
 		logger.Error(err, "Failed to inject installer ephemeral container")
@@ -855,7 +877,7 @@ func buildInstallerEphemeralContainer(
 	env := []corev1.EnvVar{
 		{Name: "SANDBOX_INSTALLER_TARGET_ROOT", Value: installerTargetRootEnv},
 		{Name: "SANDBOX_INSTALLER_TARGET_CONTAINER", Value: target.Name},
-		{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: patchVersion},
+		{Name: installerPatchVersionEnv, Value: patchVersion},
 		{Name: "SANDBOX_NAME", Value: box.Name},
 		{Name: "SANDBOX_NAMESPACE", Value: box.Namespace},
 		{Name: "SANDBOX_UID", Value: string(box.UID)},
