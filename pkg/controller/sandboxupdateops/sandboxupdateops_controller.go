@@ -318,22 +318,22 @@ func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv
 			continue
 		}
 
-		sandboxLogger := logger.WithValues("sandbox", klog.KObj(sbx))
 		// Check ResourceVersionExpectations: skip sandbox if cache is stale
 		ResourceVersionExpectations.Observe(sbx)
 		if isSatisfied, unsatisfiedDuration := ResourceVersionExpectations.IsSatisfied(sbx); !isSatisfied {
 			if unsatisfiedDuration < expectations.ExpectationTimeout {
-				sandboxLogger.Info("Not satisfied resourceVersion for Sandbox in SandboxUpdateOps, wait for cache event")
+				logger.Info("Not satisfied resourceVersion for Sandbox in SandboxUpdateOps, wait for cache event",
+					"sandbox", klog.KObj(sbx))
 				requeueResult = &ctrl.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}
 				return
 			}
-			sandboxLogger.Info("ResourceVersionExpectations unsatisfied overtime for Sandbox in SandboxUpdateOps, wait for cache event timeout",
-				"timeout", unsatisfiedDuration)
+			logger.Info("ResourceVersionExpectations unsatisfied overtime for Sandbox in SandboxUpdateOps, wait for cache event timeout",
+				"sandbox", klog.KObj(sbx), "timeout", unsatisfiedDuration)
 			ResourceVersionExpectations.Delete(sbx)
 		}
 
 		category := r.classifySandbox(ctx, sbx, ops)
-		sandboxLogger.Info("Classified sandbox", "category", category)
+		logger.Info("Classified sandbox", "sandbox", klog.KObj(sbx), "category", category)
 
 		switch category {
 		case sandboxUpdated:
@@ -617,7 +617,6 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 		if !pauseResumeOnly && isUpgradeSucceeded(sbx, ops) && sbx.Spec.UpgradePolicy != nil {
 			payload["spec"] = map[string]any{"upgradePolicy": nil}
 		}
-		sandboxLogger := logger.WithValues("sandbox", klog.KObj(sbx))
 		data, err := json.Marshal(payload)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to encode cleanup patch for sandbox %s/%s: %w", sbx.Namespace, sbx.Name, err)
@@ -626,10 +625,10 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 			ObjectMeta: metav1.ObjectMeta{Namespace: sbx.Namespace, Name: sbx.Name},
 		}
 		if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, data)); err != nil {
-			sandboxLogger.Error(err, "Failed to remove ops label and annotation from sandbox")
+			logger.Error(err, "Failed to remove ops label and annotation from sandbox", "sandbox", klog.KObj(sbx))
 			return ctrl.Result{}, err
 		}
-		sandboxLogger.Info("Removed ops label and annotation from sandbox")
+		logger.Info("Removed ops label and annotation from sandbox", "sandbox", klog.KObj(sbx))
 	}
 
 	// Remove finalizer
