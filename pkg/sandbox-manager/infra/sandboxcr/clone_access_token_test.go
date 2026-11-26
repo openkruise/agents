@@ -17,6 +17,7 @@ limitations under the License.
 package sandboxcr
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -27,6 +28,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/runtime/config"
 )
 
 func TestPrepareSandboxFromCheckpoint_AccessToken(t *testing.T) {
@@ -74,17 +76,19 @@ func TestPrepareSandboxFromCheckpoint_AccessToken(t *testing.T) {
 				_, err = uuid.Parse(token)
 				require.NoError(t, err)
 
-				// Then only skipped-init clones get independent gateway credentials.
+				// Then every clone gets an independent credential: a fork never
+				// reuses the source token recorded in the checkpoint.
+				require.True(t, token != sourceToken, "clone must not reuse the source credential")
+				require.True(t, token != previousToken, "clones must have distinct credentials")
 				if tt.initRequest == "" {
 					require.Nil(t, initRequest)
 					require.NotContains(t, clone.Annotations, v1alpha1.AnnotationInitRuntimeRequest)
-					require.True(t, token != sourceToken, "clone must not reuse the source credential")
-					require.True(t, token != previousToken, "clones must have distinct credentials")
 				} else {
 					require.NotNil(t, initRequest)
-					require.Equal(t, sourceToken, token)
 					require.Equal(t, token, initRequest.AccessToken)
-					require.Equal(t, tt.initRequest, clone.Annotations[v1alpha1.AnnotationInitRuntimeRequest])
+					var persisted config.InitRuntimeOptions
+					require.NoError(t, json.Unmarshal([]byte(clone.Annotations[v1alpha1.AnnotationInitRuntimeRequest]), &persisted))
+					require.Equal(t, token, persisted.AccessToken)
 				}
 				previousToken = token
 			}

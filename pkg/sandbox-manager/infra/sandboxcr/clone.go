@@ -18,8 +18,10 @@ package sandboxcr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -216,9 +218,6 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 
 	// Step 5: re-init runtime
 	if metrics, err = cloneReInitRuntime(ctx, sbx, opts, initRuntimeOpts, metrics, rtOpts...); err != nil {
-		if !wait.Interrupted(err) {
-			err = claim.RetriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
-		}
 		return
 	}
 
@@ -400,8 +399,16 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 		return nil, nil, fmt.Errorf("failed to modify cloned sandbox: %w", err)
 	}
 	if initRuntimeOpts != nil {
+		// A fork is a new delivery: mint a fresh envd access token instead of
+		// reusing the source token recorded in the checkpoint, and persist the
+		// rotated token so later resume/recreate re-init cycles reuse it.
+		initRuntimeOpts.AccessToken = config.NewDefaultAccessToken()
+		initRuntimeRequest, marshalErr := json.Marshal(initRuntimeOpts) // #nosec G117 -- the init annotation is the designated persistence for the envd token, same as claim
+		if marshalErr != nil {
+			return nil, nil, fmt.Errorf("failed to marshal init runtime request: %w", marshalErr)
+		}
 		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
-		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
+		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = string(initRuntimeRequest)
 	} else {
 		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = config.NewDefaultAccessToken()
 	}
@@ -466,14 +473,23 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 	if initRuntimeOpts == nil {
 		return metrics, nil
 	}
-	initRuntimeOpts.ReInit = true
 	log.Info("re-init runtime")
 	var err error
 	metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *initRuntimeOpts, sbx.refreshFunc(), rtOpts...)
 	metrics.Total += metrics.InitRuntime
 	if err != nil {
 		log.Error(err, "failed to init runtime")
-		return metrics, err
+		if wait.Interrupted(err) {
+			return metrics, err
+		}
+		var apiErr *runtime.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
+			// A 401 against the rotated token is deterministic: envd still
+			// holds the source token. Keep it terminal so retries do not
+			// amplify orphaned clones.
+			return metrics, fmt.Errorf("failed to init runtime: %w", err)
+		}
+		return metrics, claim.RetriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
 	}
 	return metrics, nil
 }

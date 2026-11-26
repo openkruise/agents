@@ -40,6 +40,9 @@ type TestRuntimeServerOptions struct {
 	RunCommandImmediately bool
 	RunCommandError       *string
 	InitErrCode           int
+	// InitBlockUntilCanceled makes /init hold the request until the caller's
+	// context is done, so tests can observe cancellation propagation.
+	InitBlockUntilCanceled bool
 }
 
 func NewTestRuntimeServer(opts TestRuntimeServerOptions) *httptest.Server {
@@ -109,6 +112,14 @@ func NewTestRuntimeServer(opts TestRuntimeServerOptions) *httptest.Server {
 	grpcPath, handler := processconnect.NewProcessHandler(service)
 	mux.Handle(grpcPath, handler)
 	web.RegisterRoute(mux, http.MethodPost, "/init", func(r *http.Request) (response web.ApiResponse[struct{}], err *web.ApiError) {
+		if opts.InitBlockUntilCanceled {
+			// Drain the body first: net/http only starts watching for client
+			// disconnects once the body is consumed, so blocking before this
+			// would never observe the caller's cancellation.
+			_, _ = io.Copy(io.Discard, r.Body)
+			<-r.Context().Done()
+			return web.ApiResponse[struct{}]{}, nil
+		}
 		if opts.InitErrCode > 300 {
 			return web.ApiResponse[struct{}]{}, &web.ApiError{
 				Code: opts.InitErrCode,

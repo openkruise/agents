@@ -105,7 +105,6 @@ func GetInitRuntimeRequest(s metav1.Object) (*config.InitRuntimeOptions, error) 
 		if err := json.Unmarshal([]byte(initRuntimeRequest), &opts); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal init runtime request: %w", err)
 		}
-		opts.ReInit = true
 		initRuntimeOpts = &opts
 	}
 	return initRuntimeOpts, nil

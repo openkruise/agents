@@ -485,8 +485,8 @@ func TestInitialize_InitTransportDispatch(t *testing.T) {
 			initStatus: http.StatusNoContent,
 		},
 		{
-			// GetInitRuntimeRequest always sets ReInit=true, so a 401 from the
-			// dispatched endpoint is classified as "already initialized".
+			// reinitRuntime sets ReInit=true, so a 401 from the dispatched
+			// endpoint is classified as "already initialized".
 			name:       "init 401 treated as success on re-init",
 			initStatus: http.StatusUnauthorized,
 		},
