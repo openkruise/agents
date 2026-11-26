@@ -55,6 +55,222 @@ func newExecProbe(name string, command ...string) v1alpha1.Probe {
 	}
 }
 
+func TestDeferredTemplateRefAdmission(t *testing.T) {
+	require.NoError(t, v1alpha1.AddToScheme(scheme.Scheme))
+	for _, tt := range []struct {
+		name                                string
+		missingTemplate, noMount, noRuntime bool
+		operation                           admissionv1.Operation
+		changeOld, change                   func(*v1alpha1.SandboxSet)
+		getError, skipLookup, cacheMiss     bool
+		cacheError, liveError               error
+		mutateTemplate                      func(*v1alpha1.SandboxTemplate)
+		inlineTemplate                      bool
+		templateFields                      []string
+		wantErr                             string
+	}{
+		{name: "valid command-less template"},
+		{name: "cache hit never uses unavailable live reader", liveError: apierrors.NewServiceUnavailable("live reader unavailable")},
+		{name: "cache miss resolves fresh template", cacheMiss: true},
+		{name: "cache miss rejects fresh unsafe template", cacheMiss: true, noMount: true, wantErr: "envd mount"},
+		{name: "cache miss with unavailable live reader", cacheMiss: true, liveError: apierrors.NewServiceUnavailable("live reader unavailable"), wantErr: "live reader unavailable"},
+		{name: "cache miss with forbidden live reader", cacheMiss: true, liveError: apierrors.NewForbidden(schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxtemplates"}, "template", nil), wantErr: "forbidden"},
+		{name: "forbidden cache read never falls back", cacheError: apierrors.NewForbidden(schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxtemplates"}, "template", nil), wantErr: "forbidden"},
+		{name: "unavailable cache read never falls back", getError: true, wantErr: "cache unavailable"},
+		{name: "unsupported cached kind never falls back", cacheError: &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: v1alpha1.GroupVersion.Group, Kind: "SandboxTemplate"}}, wantErr: "no matches"},
+		{name: "fresh Ready static Version", cacheMiss: true, mutateTemplate: func(v *v1alpha1.SandboxTemplate) {
+			v.Labels = map[string]string{v1alpha1.LabelTemplateName: "python-agent"}
+			v.Generation = 1
+			v.Status = v1alpha1.SandboxTemplateStatus{Phase: v1alpha1.SandboxTemplatePhaseReady, ObservedGeneration: 1}
+		}},
+		{name: "fresh Building Version still rejects binding", cacheMiss: true, wantErr: "only Ready static Versions", mutateTemplate: func(v *v1alpha1.SandboxTemplate) {
+			v.Labels = map[string]string{v1alpha1.LabelTemplateName: "python-agent"}
+			v.Status.Phase = v1alpha1.SandboxTemplatePhaseBuilding
+		}},
+		{name: "fresh deleting unmanaged template still rejects binding", cacheMiss: true, wantErr: "being deleted", mutateTemplate: func(v *v1alpha1.SandboxTemplate) {
+			v.DeletionTimestamp = ptr.To(metav1.Now())
+			v.Finalizers = []string{"test/retain"}
+		}},
+		{name: "missing template", missingTemplate: true, wantErr: "not found"},
+		{name: "missing mount", noMount: true, wantErr: "envd mount"},
+		{name: "missing runtime", noRuntime: true, wantErr: "requires agent-runtime"},
+		{name: "missing mount and pool runtime", noMount: true, noRuntime: true, wantErr: "requires agent-runtime"},
+		{name: "missing referenced pod template", templateFields: []string{"spec.template.spec.containers"}, wantErr: "requires a main container", mutateTemplate: func(v *v1alpha1.SandboxTemplate) {
+			v.Spec.Template = nil
+		}},
+		{name: "non-root referenced main", templateFields: []string{"spec.template.spec.containers[0].securityContext"}, wantErr: "requires a root main container", mutateTemplate: func(v *v1alpha1.SandboxTemplate) {
+			v.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{RunAsUser: ptr.To[int64](1000)}
+		}},
+		{name: "reserved referenced init name", templateFields: []string{"spec.template.spec.initContainers"}, wantErr: "reserved for startup staging", mutateTemplate: func(v *v1alpha1.SandboxTemplate) {
+			v.Spec.Template.Spec.InitContainers = []corev1.Container{{Name: "envd-scripts", Image: "runtime:test"}}
+		}},
+		{name: "referenced app probe", templateFields: []string{"spec.template.spec.containers[0].readinessProbe"}, wantErr: "probe on the runtime port", mutateTemplate: func(v *v1alpha1.SandboxTemplate) {
+			v.Spec.Template.Spec.Containers[0].ReadinessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(8080)}}}
+		}},
+		{name: "inline missing mount keeps field", inlineTemplate: true, skipLookup: true, noMount: true, wantErr: "envd mount"},
+		{name: "inline missing main keeps field", inlineTemplate: true, skipLookup: true, templateFields: []string{"spec.template.spec.containers"}, wantErr: "requires a main container", mutateTemplate: func(v *v1alpha1.SandboxTemplate) {
+			v.Spec.Template.Spec.Containers = nil
+		}},
+		{name: "inline missing runtime keeps field", inlineTemplate: true, skipLookup: true, noRuntime: true, wantErr: "requires agent-runtime"},
+		{name: "metadata update with deleted reference", operation: admissionv1.Update, missingTemplate: true, skipLookup: true, change: func(p *v1alpha1.SandboxSet) {
+			p.Labels = map[string]string{"app": "test"}
+		}},
+		{name: "replicas update with deleted reference", operation: admissionv1.Update, missingTemplate: true, skipLookup: true, change: func(p *v1alpha1.SandboxSet) { p.Spec.Replicas = 3 }},
+		{name: "metadata update with unavailable reference", operation: admissionv1.Update, getError: true, skipLookup: true, change: func(p *v1alpha1.SandboxSet) {
+			p.Annotations = map[string]string{"test": "updated"}
+		}},
+		{name: "replicas update with unavailable reference", operation: admissionv1.Update, getError: true, skipLookup: true, change: func(p *v1alpha1.SandboxSet) { p.Spec.Replicas = 3 }},
+		{name: "startup mode change with deleted reference", operation: admissionv1.Update, missingTemplate: true, wantErr: "not found", changeOld: func(p *v1alpha1.SandboxSet) { p.Spec.StartupMode = v1alpha1.StartupModeImmediate }},
+		{name: "runtimes change with unavailable reference", operation: admissionv1.Update, getError: true, wantErr: "cache unavailable", changeOld: func(p *v1alpha1.SandboxSet) {
+			p.Spec.Runtimes = append(p.Spec.Runtimes, v1alpha1.RuntimeConfig{Name: "extra-runtime"})
+		}},
+		{name: "templateRef change with deleted reference", operation: admissionv1.Update, missingTemplate: true, wantErr: "not found", changeOld: func(p *v1alpha1.SandboxSet) { p.Spec.TemplateRef.Name = "old-template" }},
+		{name: "startup mode change revalidates unsafe template", operation: admissionv1.Update, noMount: true, wantErr: "envd mount", changeOld: func(p *v1alpha1.SandboxSet) { p.Spec.StartupMode = v1alpha1.StartupModeImmediate }},
+		{name: "runtimes change revalidates unsafe template", operation: admissionv1.Update, noMount: true, wantErr: "envd mount", changeOld: func(p *v1alpha1.SandboxSet) {
+			p.Spec.Runtimes = append(p.Spec.Runtimes, v1alpha1.RuntimeConfig{Name: "extra-runtime"})
+		}},
+		{name: "templateRef change revalidates unsafe template", operation: admissionv1.Update, noMount: true, wantErr: "envd mount", changeOld: func(p *v1alpha1.SandboxSet) { p.Spec.TemplateRef.Name = "old-template" }},
+		{name: "runtime removal rejected on update", operation: admissionv1.Update, noRuntime: true, wantErr: "requires agent-runtime"},
+		{name: "safe startup mode change", operation: admissionv1.Update, changeOld: func(p *v1alpha1.SandboxSet) { p.Spec.StartupMode = v1alpha1.StartupModeImmediate }},
+		{name: "metadata update during cache lag does not read", operation: admissionv1.Update, cacheMiss: true, skipLookup: true, change: func(p *v1alpha1.SandboxSet) {
+			p.Labels = map[string]string{"app": "test"}
+		}},
+		{name: "replicas update during cache lag does not read", operation: admissionv1.Update, cacheMiss: true, skipLookup: true, change: func(p *v1alpha1.SandboxSet) { p.Spec.Replicas = 3 }},
+		{name: "startup mode change resolves fresh template", operation: admissionv1.Update, cacheMiss: true, changeOld: func(p *v1alpha1.SandboxSet) { p.Spec.StartupMode = v1alpha1.StartupModeImmediate }},
+		{name: "runtimes change resolves fresh template", operation: admissionv1.Update, cacheMiss: true, changeOld: func(p *v1alpha1.SandboxSet) {
+			p.Spec.Runtimes = append(p.Spec.Runtimes, v1alpha1.RuntimeConfig{Name: "extra-runtime"})
+		}},
+		{name: "templateRef change resolves fresh template", operation: admissionv1.Update, cacheMiss: true, changeOld: func(p *v1alpha1.SandboxSet) { p.Spec.TemplateRef.Name = "old-template" }},
+		{name: "startup mode change rejects fresh unsafe template", operation: admissionv1.Update, cacheMiss: true, noMount: true, wantErr: "envd mount", changeOld: func(p *v1alpha1.SandboxSet) { p.Spec.StartupMode = v1alpha1.StartupModeImmediate }},
+		{name: "runtimes change rejects fresh unsafe template", operation: admissionv1.Update, cacheMiss: true, noMount: true, wantErr: "envd mount", changeOld: func(p *v1alpha1.SandboxSet) {
+			p.Spec.Runtimes = append(p.Spec.Runtimes, v1alpha1.RuntimeConfig{Name: "extra-runtime"})
+		}},
+		{name: "templateRef change rejects fresh unsafe template", operation: admissionv1.Update, cacheMiss: true, noMount: true, wantErr: "envd mount", changeOld: func(p *v1alpha1.SandboxSet) { p.Spec.TemplateRef.Name = "old-template" }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			template := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "template", Namespace: "default"}, Spec: v1alpha1.SandboxTemplateSpec{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "app:test", VolumeMounts: []corev1.VolumeMount{{Name: "envd-volume", MountPath: "/mnt/envd"}}}}}}}}
+			if tt.noMount {
+				template.Spec.Template.Spec.Containers[0].VolumeMounts = nil
+			}
+			if tt.mutateTemplate != nil {
+				tt.mutateTemplate(template)
+			}
+			builder := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+				WithIndex(&v1alpha1.SandboxTemplate{}, fieldindex.IndexNameForTemplateName, fieldindex.TemplateNameIndexFunc)
+			liveBuilder := fake.NewClientBuilder().WithScheme(scheme.Scheme)
+			if !tt.missingTemplate {
+				liveBuilder.WithObjects(template.DeepCopy())
+				if !tt.cacheMiss {
+					builder.WithObjects(template.DeepCopy())
+				}
+			}
+			lookups, liveLookups := 0, 0
+			var cachedObject client.Object
+			builder.WithInterceptorFuncs(interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+				lookups++
+				require.Equal(t, client.ObjectKeyFromObject(template), key)
+				require.IsType(t, &v1alpha1.SandboxTemplate{}, object)
+				cachedObject = object
+				if tt.getError {
+					return apierrors.NewServiceUnavailable("cache unavailable")
+				}
+				if tt.cacheError != nil {
+					return tt.cacheError
+				}
+				return c.Get(ctx, key, object, opts...)
+			}})
+			liveBuilder.WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+					liveLookups++
+					require.Equal(t, client.ObjectKeyFromObject(template), key)
+					require.IsType(t, &v1alpha1.SandboxTemplate{}, object)
+					require.Same(t, cachedObject, object, "fallback must reuse the same template object")
+					if tt.liveError != nil {
+						return tt.liveError
+					}
+					return c.Get(ctx, key, object, opts...)
+				},
+				List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+					t.Fatal("template admission must never use APIReader.List")
+					return nil
+				},
+			})
+			handler := &SandboxSetValidatingHandler{Client: builder.Build(), APIReader: liveBuilder.Build(), Decoder: admission.NewDecoder(scheme.Scheme)}
+			pool := &v1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}, Spec: v1alpha1.SandboxSetSpec{StartupMode: v1alpha1.StartupModeDeferred, Runtimes: []v1alpha1.RuntimeConfig{{Name: "agent-runtime"}}, EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "template"}}}}
+			if tt.inlineTemplate {
+				pool.Spec.TemplateRef = nil
+				pool.Spec.Template = template.Spec.Template.DeepCopy()
+				podSpec := &pool.Spec.Template.Spec
+				podSpec.RestartPolicy = corev1.RestartPolicyAlways
+				podSpec.DNSPolicy = corev1.DNSClusterFirst
+				podSpec.TerminationGracePeriodSeconds = ptr.To[int64](30)
+				podSpec.Volumes = []corev1.Volume{{Name: "envd-volume", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
+				for i := range podSpec.Containers {
+					podSpec.Containers[i].ImagePullPolicy = corev1.PullIfNotPresent
+					podSpec.Containers[i].TerminationMessagePolicy = corev1.TerminationMessageReadFile
+				}
+			}
+			old := pool.DeepCopy()
+			if tt.changeOld != nil {
+				tt.changeOld(old)
+			}
+			if tt.noRuntime {
+				pool.Spec.Runtimes = nil
+			}
+			if tt.change != nil {
+				tt.change(pool)
+			}
+			raw, err := json.Marshal(pool)
+			require.NoError(t, err)
+			oldRaw, err := json.Marshal(old)
+			require.NoError(t, err)
+			operation := tt.operation
+			if operation == "" {
+				operation = admissionv1.Create
+			}
+			response := handler.Handle(t.Context(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: operation, Object: runtime.RawExtension{Raw: raw}, OldObject: runtime.RawExtension{Raw: oldRaw}}})
+			if tt.wantErr == "" {
+				require.True(t, response.Allowed, "%v", response.Result)
+			} else {
+				require.False(t, response.Allowed)
+				require.EqualValues(t, 422, response.Result.Code)
+				require.Contains(t, response.Result.Message, tt.wantErr)
+				templateFields := tt.templateFields
+				if tt.noMount {
+					templateFields = append(templateFields, "spec.template.spec.containers[0].volumeMounts")
+				}
+				for _, originalField := range templateFields {
+					if tt.inlineTemplate {
+						require.Contains(t, response.Result.Message, originalField+": ")
+						require.NotContains(t, response.Result.Message, "referenced SandboxTemplate")
+					} else {
+						require.Contains(t, response.Result.Message, "spec.templateRef: ")
+						require.Contains(t, response.Result.Message, "referenced SandboxTemplate default/template, field "+originalField+": ")
+						require.NotContains(t, response.Result.Message, originalField+": Invalid value:")
+						require.NotContains(t, response.Result.Message, originalField+": Required value:")
+					}
+				}
+				if tt.noRuntime {
+					require.Contains(t, response.Result.Message, "spec.runtimes: Required value: Deferred startup requires agent-runtime")
+					if len(templateFields) == 0 {
+						require.NotContains(t, response.Result.Message, "spec.templateRef: ")
+					}
+				}
+			}
+			if tt.skipLookup {
+				require.Zero(t, lookups, "unrelated updates must not read the template")
+			} else {
+				require.Equal(t, 1, lookups, "resolve once and reuse for the binding guard")
+			}
+			if !tt.skipLookup && !tt.getError && tt.cacheError == nil && (tt.cacheMiss || tt.missingTemplate) {
+				require.Equal(t, 1, liveLookups, "cache NotFound permits exactly one named live Get")
+			} else {
+				require.Zero(t, liveLookups, "only cache NotFound permits a live Get")
+			}
+		})
+	}
+}
+
 func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 	// Add v1alpha1 to scheme
 	err := v1alpha1.AddToScheme(scheme.Scheme)
@@ -925,8 +1141,9 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 
 			// Create handler
 			handler := &SandboxSetValidatingHandler{
-				Client:  fakeClient,
-				Decoder: decoder,
+				Client:    fakeClient,
+				APIReader: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+				Decoder:   decoder,
 			}
 
 			// Construct admission request
@@ -972,6 +1189,8 @@ func TestSandboxSetManagedTemplateAdmission(t *testing.T) {
 		name         string
 		mutate       func(*v1alpha1.SandboxTemplate)
 		missingBuild bool
+		cacheMiss    bool
+		liveError    error
 		getError     bool
 		malformed    bool
 		malformedOld bool
@@ -982,6 +1201,23 @@ func TestSandboxSetManagedTemplateAdmission(t *testing.T) {
 		message      string
 	}{
 		{name: "Ready static Version"},
+		{name: "fresh Ready static Version", cacheMiss: true},
+		{name: "fresh Draft rejects Immediate binding", cacheMiss: true, code: 422, message: "only Ready static Versions", mutate: func(v *v1alpha1.SandboxTemplate) { v.Status.Phase = v1alpha1.SandboxTemplatePhasePending }},
+		{name: "fresh stale Ready rejects Immediate binding", cacheMiss: true, code: 422, message: "only Ready static Versions", mutate: func(v *v1alpha1.SandboxTemplate) { v.Status.ObservedGeneration = 0 }},
+		{name: "fresh captured Version rejects Immediate binding", cacheMiss: true, code: 422, message: "only Ready static Versions", mutate: func(v *v1alpha1.SandboxTemplate) {
+			v.Status.Artifacts = []v1alpha1.SandboxTemplateArtifact{{Type: "checkpoint", Name: "capture", Value: "backend-id"}}
+		}},
+		{name: "fresh deleting Version rejects Immediate binding", cacheMiss: true, code: 422, message: "only Ready static Versions", mutate: func(v *v1alpha1.SandboxTemplate) {
+			v.DeletionTimestamp = ptr.To(metav1.Now())
+			v.Finalizers = []string{"test/retain"}
+		}},
+		{name: "fresh unmanaged reference retains Immediate behavior", cacheMiss: true, mutate: func(v *v1alpha1.SandboxTemplate) {
+			v.Labels = nil
+			v.Status = v1alpha1.SandboxTemplateStatus{}
+		}},
+		{name: "live reference Forbidden remains unavailable", cacheMiss: true, liveError: apierrors.NewForbidden(schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxtemplates"}, "st-abcdefghijklmnopqrst", nil), code: 503, message: "forbidden"},
+		{name: "templateRef switch to fresh Draft is rejected", operation: admissionv1.Update, cacheMiss: true,
+			oldRef: &v1alpha1.SandboxTemplateRef{Name: "st-older"}, code: 422, message: "only Ready static Versions", mutate: func(v *v1alpha1.SandboxTemplate) { v.Status.Phase = v1alpha1.SandboxTemplatePhasePending }},
 		{name: "malformed request", malformed: true, code: 400, message: "unexpected"},
 		{name: "name occupied by template group", code: 409, message: "occupied", mutate: func(v *v1alpha1.SandboxTemplate) { v.Labels[v1alpha1.LabelTemplateName] = "pool" }},
 		{name: "name lookup unavailable", listError: apierrors.NewServiceUnavailable("cache unavailable"), code: 503, message: "check pool name"},
@@ -1043,9 +1279,27 @@ func TestSandboxSetManagedTemplateAdmission(t *testing.T) {
 			}
 			builder := fake.NewClientBuilder().WithScheme(s).
 				WithIndex(&v1alpha1.SandboxTemplate{}, fieldindex.IndexNameForTemplateName, fieldindex.TemplateNameIndexFunc)
+			liveBuilder := fake.NewClientBuilder().WithScheme(s)
 			if !tt.missingBuild {
-				builder = builder.WithObjects(version)
+				liveBuilder.WithObjects(version.DeepCopy())
+				if !tt.cacheMiss {
+					builder.WithObjects(version.DeepCopy())
+				}
 			}
+			liveBuilder.WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+					require.Equal(t, client.ObjectKeyFromObject(version), key)
+					require.IsType(t, &v1alpha1.SandboxTemplate{}, object)
+					if tt.liveError != nil {
+						return tt.liveError
+					}
+					return c.Get(ctx, key, object, opts...)
+				},
+				List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+					t.Fatal("template admission must never use APIReader.List")
+					return nil
+				},
+			})
 			builder = builder.WithInterceptorFuncs(interceptor.Funcs{
 				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 					if tt.listError != nil {
@@ -1080,7 +1334,7 @@ func TestSandboxSetManagedTemplateAdmission(t *testing.T) {
 			if operation == "" {
 				operation = admissionv1.Create
 			}
-			handler := &SandboxSetValidatingHandler{Client: builder.Build(), Decoder: admission.NewDecoder(s)}
+			handler := &SandboxSetValidatingHandler{Client: builder.Build(), APIReader: liveBuilder.Build(), Decoder: admission.NewDecoder(s)}
 			response := handler.Handle(t.Context(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: operation, Object: runtime.RawExtension{Raw: raw}, OldObject: runtime.RawExtension{Raw: oldRaw}}})
 			if tt.code == 0 {
 				require.True(t, response.Allowed, "%v", response.Result)

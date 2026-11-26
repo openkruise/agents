@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -48,7 +50,101 @@ import (
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
+	testutils "github.com/openkruise/agents/test/utils"
 )
+
+func TestEnsureClaimResumesInterruptedStartup(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		fail, notReady bool
+	}{
+		{name: "successful recovery"}, {name: "delivery failure", fail: true}, {name: "temporary NotReady", notReady: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			processServer := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
+				RunCommandImmediately: true,
+				RunCommandResult: runtimeclient.RunCommandResult{Exited: true,
+					Stdout: []string{"/mnt/envd/claim/.startup-TEST000000\n"}},
+			})
+			defer processServer.Close()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/files" {
+					processServer.Config.Handler.ServeHTTP(w, r)
+					return
+				}
+				if tt.fail {
+					http.Error(w, "failed", http.StatusForbidden)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			claim := &agentsv1alpha1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default", UID: "claim-uid"}, Spec: agentsv1alpha1.SandboxClaimSpec{SkipInitRuntime: true, WaitReadyTimeout: &metav1.Duration{Duration: 50 * time.Millisecond}}}
+			pool := &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool"}, Spec: agentsv1alpha1.SandboxSetSpec{StartupMode: agentsv1alpha1.StartupModeDeferred}}
+			box := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "owned", Namespace: "default", UID: "box-uid", Labels: map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True}, Annotations: map[string]string{
+				agentsv1alpha1.AnnotationOwner: string(claim.UID), agentsv1alpha1.AnnotationRuntimeURL: server.URL,
+				agentsv1alpha1.AnnotationRuntimeAccessToken: runtimeclient.AccessToken,
+				agentsv1alpha1.AnnotationInitRuntimeRequest: `{"skipInit":true}`,
+			}}, Spec: agentsv1alpha1.SandboxSpec{StartupMode: agentsv1alpha1.StartupModeDeferred}, Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, PodInfo: agentsv1alpha1.PodInfo{PodUID: "pod-uid", PodIP: "127.0.0.1"}, Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}}}}
+			if tt.notReady {
+				box.Status.Conditions[0].Status = metav1.ConditionFalse
+			}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: box.Name, Namespace: box.Namespace, UID: box.Status.PodInfo.PodUID,
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(box, agentsv1alpha1.GroupVersion.WithKind("Sandbox"))},
+			}, Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "127.0.0.1", Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
+			if tt.notReady {
+				pod.Status.Conditions[0].Status = corev1.ConditionFalse
+			}
+			cache, cli, err := cachetest.NewTestCache(t, box, pod)
+			require.NoError(t, err)
+			control := NewCommonControl(cli, record.NewFakeRecorder(20), cache, nil).(*commonControl)
+			status := &agentsv1alpha1.SandboxClaimStatus{}
+			strategy, err := control.EnsureClaimClaiming(t.Context(), ClaimArgs{Claim: claim, SandboxSet: pool, NewStatus: status})
+			if tt.fail || tt.notReady {
+				require.Error(t, err)
+				assert.Zero(t, status.ClaimedReplicas)
+				assert.False(t, strategy.Immediate)
+			} else {
+				require.NoError(t, err)
+				assert.EqualValues(t, 1, status.ClaimedReplicas)
+				assert.True(t, strategy.Immediate)
+			}
+		})
+	}
+}
+
+func TestBuildDeferredClaimOptions(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		mode    agentsv1alpha1.StartupMode
+		command []string
+		key     string
+		wantErr bool
+	}{
+		{name: "command-less succeeds", mode: agentsv1alpha1.StartupModeDeferred},
+		{name: "command override", mode: agentsv1alpha1.StartupModeDeferred, command: []string{"printf", "claim"}},
+		{name: "immediate rejects command", command: []string{"printf"}, wantErr: true},
+		{name: "reserved env rejected", mode: agentsv1alpha1.StartupModeDeferred, key: "_rwe_cmd_script", wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			claim := &agentsv1alpha1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{UID: "claim-uid"}, Spec: agentsv1alpha1.SandboxClaimSpec{SkipInitRuntime: true, Command: tt.command}}
+			if tt.key != "" {
+				claim.Spec.EnvVars = map[string]string{tt.key: "value"}
+			}
+			pool := &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool"}, Spec: agentsv1alpha1.SandboxSetSpec{StartupMode: tt.mode}}
+			opts, err := (&commonControl{}).buildClaimOptions(t.Context(), claim, pool)
+			if tt.wantErr {
+				require.ErrorIs(t, err, ErrInvalidClaimSpec)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, opts.InitRuntime)
+			assert.True(t, opts.InitRuntime.SkipInit)
+			assert.Equal(t, tt.command, opts.InitRuntime.Command)
+		})
+	}
+}
 
 func TestNewCommonControl(t *testing.T) {
 	scheme := runtime.NewScheme()

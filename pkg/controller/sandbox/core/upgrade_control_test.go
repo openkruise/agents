@@ -19,10 +19,13 @@ package core
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,6 +40,69 @@ import (
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
+
+func TestUpgradeControlDeferredStartupPending(t *testing.T) {
+	for _, stage := range []string{agentsv1alpha1.SandboxUpgradingReasonResuming, agentsv1alpha1.SandboxUpgradingReasonUpgradePod} {
+		t.Run(stage, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, clientgoscheme.AddToScheme(scheme))
+			require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+			box := newUpgradeTestSandbox(&agentsv1alpha1.SandboxLifecycle{
+				PreUpgrade:  &agentsv1alpha1.UpgradeAction{Exec: &corev1.ExecAction{Command: []string{"pre"}}},
+				PostUpgrade: &agentsv1alpha1.UpgradeAction{Exec: &corev1.ExecAction{Command: []string{"post"}}},
+			}, nil)
+			box.UID = "sandbox-uid"
+			box.Spec.StartupMode = agentsv1alpha1.StartupModeDeferred
+			box.Labels = map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True}
+			box.Annotations[agentsv1alpha1.AnnotationInitRuntimeRequest] = `{"skipInit":true}`
+			server := httptest.NewServer(http.NotFoundHandler())
+			defer server.Close()
+			box.Annotations[agentsv1alpha1.AnnotationRuntimeURL] = server.URL
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: box.Name, Namespace: box.Namespace, UID: "current-pod",
+				Labels: map[string]string{agentsv1alpha1.PodLabelTemplateHash: "new-rev"}},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2",
+					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
+			fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+			recorder := record.NewFakeRecorder(20)
+			calls := 0
+			control := NewUpgradeControl(fc, nil, nil, recorder,
+				func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.UpgradeAction) (int32, string, string, error) {
+					calls++
+					return 0, "", "", nil
+				}, &defaultSandboxInitializer{client: fc, apiReader: fc, recorder: recorder}, defaultCommonSyncStatusFromPod,
+				func(context.Context, EnsureFuncArgs) error { return nil })
+			status := &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxUpgrading, UpdateRevision: "new-rev",
+				PodInfo: agentsv1alpha1.PodInfo{PodUID: "old-pod", PodIP: "10.0.0.1"},
+				Conditions: []metav1.Condition{
+					{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionFalse, Reason: stage},
+					{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue},
+					{Type: string(agentsv1alpha1.SandboxConditionResumed), Status: metav1.ConditionTrue},
+				}}
+			args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status}
+			require.NoError(t, control.EnsureSandboxUpgraded(t.Context(), args))
+			assert.Zero(t, calls)
+			assert.Equal(t, stage, hookCondition(t, status, agentsv1alpha1.SandboxConditionUpgrading).Reason)
+			assert.Equal(t, "StartupDeliveryPending", hookCondition(t, status, agentsv1alpha1.RuntimeInitialized).Reason)
+			assert.Equal(t, metav1.ConditionFalse, hookCondition(t, status, agentsv1alpha1.RuntimeInitialized).Status)
+			assert.Equal(t, "StartupDeliveryPending", hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Reason)
+			assert.Equal(t, metav1.ConditionFalse, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+			assert.Equal(t, pod.UID, status.PodInfo.PodUID)
+			assert.Equal(t, pod.Status.PodIP, status.PodInfo.PodIP)
+			box.Annotations[agentsv1alpha1.AnnotationInitRuntimeRequest] = `{"skipInit":true,"startupDelivered":true,"startupPodUID":"current-pod"}`
+			require.NoError(t, control.EnsureSandboxUpgraded(t.Context(), args))
+			assert.Equal(t, metav1.ConditionTrue, hookCondition(t, status, agentsv1alpha1.RuntimeInitialized).Status)
+			if stage == agentsv1alpha1.SandboxUpgradingReasonResuming {
+				assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonResumeSucceed, hookCondition(t, status, agentsv1alpha1.SandboxConditionUpgrading).Reason)
+				assert.Nil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPaused)))
+				assert.Zero(t, calls)
+			} else {
+				assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonSucceeded, hookCondition(t, status, agentsv1alpha1.SandboxConditionUpgrading).Reason)
+				assert.Equal(t, metav1.ConditionTrue, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+				assert.Equal(t, 1, calls)
+			}
+		})
+	}
+}
 
 // SandboxUpgradePolicyInplaceUpdate is a test-only constant for InplaceUpdate upgrade policy type.
 const SandboxUpgradePolicyInplaceUpdate agentsv1alpha1.SandboxUpgradePolicyType = "InplaceUpdate"

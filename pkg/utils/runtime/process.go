@@ -200,7 +200,11 @@ func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommand
 	}
 	defer func() {
 		if err := stream.Close(); err != nil {
-			log.Error(err, "failed to close stream")
+			if req.OutputOptions.SuppressResultLog {
+				log.Info("failed to close stream")
+			} else {
+				log.Error(err, "failed to close stream")
+			}
 		} else {
 			log.Info("stream closed")
 		}

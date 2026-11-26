@@ -365,6 +365,9 @@ func (r *UpgradeControl) handleResuming(ctx context.Context, args EnsureFuncArgs
 		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
 			return err
 		}
+		if runtimeInitializationPending(newStatus) {
+			return nil
+		}
 	}
 	// Resume succeeded. Transition to ResumeSucceed and wait for
 	// SandboxUpdateOps to patch the template before proceeding.
@@ -488,6 +491,9 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 	// Step 4: Perform post-recreate-upgrade initialization (re-init runtime, re-mount CSI).
 	if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
 		return false, err
+	}
+	if runtimeInitializationPending(newStatus) {
+		return false, nil
 	}
 
 	return true, nil

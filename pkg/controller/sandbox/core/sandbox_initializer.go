@@ -18,6 +18,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -35,6 +36,8 @@ import (
 	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
 )
 
+const startupPublicationUncertainReason = "StartupPublicationUncertain"
+
 // defaultSandboxInitializer wraps the package-level Initialize function to implement SandboxInitializer.
 type defaultSandboxInitializer struct {
 	client          client.Client
@@ -50,6 +53,21 @@ type defaultSandboxInitializer struct {
 
 func (d *defaultSandboxInitializer) Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) error {
 	err := d.doInitialize(ctx, box, newStatus)
+	if errors.Is(err, utilruntime.ErrStartupDeliveryPending) || errors.Is(err, utilruntime.ErrStartupPublicationUncertain) {
+		reason, message := "StartupDeliveryPending", utilruntime.ErrStartupDeliveryPending.Error()
+		if errors.Is(err, utilruntime.ErrStartupPublicationUncertain) {
+			reason, message = startupPublicationUncertainReason, utilruntime.ErrStartupPublicationUncertain.Error()
+		}
+		var apiErr *utilruntime.APIError
+		if errors.As(err, &apiErr) {
+			message = fmt.Sprintf("%s (HTTP %d)", message, apiErr.StatusCode)
+		}
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type: string(agentsv1alpha1.RuntimeInitialized), Status: metav1.ConditionFalse,
+			Reason: reason, Message: message, LastTransitionTime: metav1.Now(),
+		})
+		return nil
+	}
 	if err != nil {
 		klog.FromContext(ctx).Error(err, "post-resume/upgrade initialization failed", "sandbox", klog.KObj(box))
 		d.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.RuntimeInitialized),
@@ -112,10 +130,45 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 	}
 	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 
-	// build a lightweight sandbox object with the latest status for runtime operations
-	sbxForInit := &agentsv1alpha1.Sandbox{
-		ObjectMeta: box.ObjectMeta,
-		Status:     *newStatus,
+	sbxForInit := box.DeepCopy()
+	sbxForInit.Status = *newStatus.DeepCopy()
+
+	var startupRequest *runtimeconfig.InitRuntimeOptions
+	if box.Spec.StartupMode == agentsv1alpha1.StartupModeDeferred && box.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == agentsv1alpha1.True {
+		var err error
+		startupRequest, err = utilruntime.GetInitRuntimeRequest(box)
+		if err != nil {
+			return err
+		}
+		if startupRequest == nil {
+			return fmt.Errorf("claimed Deferred sandbox has no recorded startup data")
+		}
+		if startupRequest.StartupDelivered && startupRequest.StartupPodUID == string(sbxForInit.Status.PodInfo.PodUID) {
+			return nil
+		}
+		initCondition := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized))
+		publicationUncertain := initCondition != nil && initCondition.Reason == startupPublicationUncertainReason
+		deliveryPending := !startupRequest.StartupDelivered || publicationUncertain
+		published, err := utilruntime.StartupDataPublished(ctx, sbxForInit, rtOpts...)
+		if err != nil {
+			err = fmt.Errorf("failed to verify startup publication: %w", err)
+			if publicationUncertain {
+				err = errors.Join(utilruntime.ErrStartupPublicationUncertain, err)
+			} else if deliveryPending {
+				err = errors.Join(utilruntime.ErrStartupDeliveryPending, err)
+			}
+			return err
+		}
+		if published {
+			return utilruntime.RecordStartupDelivered(ctx, sbxForInit, client)
+		}
+		// An unfinished claim or an unconfirmed replay can still have remote post-processes in flight.
+		if publicationUncertain {
+			return utilruntime.ErrStartupPublicationUncertain
+		}
+		if deliveryPending {
+			return utilruntime.ErrStartupDeliveryPending
+		}
 	}
 
 	// Re-init runtime
@@ -164,6 +217,10 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 			return fmt.Errorf("failed to perform ReCSIMount after resume: %w", mountErr)
 		}
 		logger.Info("ReCSIMount completed after resume or upgrade", "costTime", duration)
+	}
+	if startupRequest != nil {
+		_, err := utilruntime.DeliverStartupData(ctx, sbxForInit, client, rtOpts...)
+		return err
 	}
 	return nil
 }

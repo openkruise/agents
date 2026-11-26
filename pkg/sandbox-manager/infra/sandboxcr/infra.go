@@ -154,7 +154,9 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	defer cancel()
 
 	// Start claiming sandbox
-	log.V(logs.DebugLogLevel).Info("claim sandbox options", "options", opts)
+	log.V(logs.DebugLogLevel).Info("claim sandbox options", "namespace", opts.Namespace, "template", opts.Template,
+		"claimTimeout", opts.ClaimTimeout, "waitReadyTimeout", opts.WaitReadyTimeout, "candidateCounts", opts.CandidateCounts,
+		"initRequested", opts.InitRuntime != nil, "skipInit", opts.InitRuntime != nil && opts.InitRuntime.SkipInit)
 	metrics.Retries = -1 // starts from 0
 	var claimedSandbox infra.Sandbox
 	// The create retry budget is intentionally bounded (CreateMaxRetrySteps) to

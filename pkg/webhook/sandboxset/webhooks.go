@@ -35,8 +35,9 @@ func GetHandlerGetters() []types.HandlerGetter {
 		},
 		func(mgr manager.Manager) types.Handler {
 			return &validating.SandboxSetValidatingHandler{
-				Client:  mgr.GetClient(),
-				Decoder: admission.NewDecoder(mgr.GetScheme()),
+				Client:    mgr.GetClient(),
+				APIReader: mgr.GetAPIReader(),
+				Decoder:   admission.NewDecoder(mgr.GetScheme()),
 			}
 		},
 	}

@@ -18,13 +18,16 @@ package sandboxcr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/stretchr/testify/assert"
@@ -34,6 +37,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -41,13 +45,16 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	"github.com/openkruise/agents/pkg/utils/logs"
 	"github.com/openkruise/agents/pkg/utils/runtime"
+	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	testutils "github.com/openkruise/agents/test/utils"
 )
@@ -99,6 +106,140 @@ func NewTestInfra(t *testing.T, opts ...config.SandboxManagerOptions) (*Infra, c
 		t.Fatalf("failed to run test infra: %v", err)
 	}
 	return infraInstance.(*Infra), fc
+}
+
+func TestInfraClaimSandbox_LogsExcludeStartupSecrets(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		skipInit bool
+		fault    string
+	}{
+		{name: "init succeeds"},
+		{name: "init skipped", skipInit: true},
+		{name: "completion fails after init", fault: "record-denied"},
+		{name: "completion fails with init skipped", skipInit: true, fault: "record-denied"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			const token = "SECRET_STARTUP_ACCESS_TOKEN"
+			const metadataKey = "SECRET_METADATA_KEY"
+			const metadataValue = "SECRET_METADATA_VALUE"
+			const claimSecret = "SECRET_CLAIM_CREDENTIAL"
+			data := runtimeconfig.StartupData{
+				EnvVars: map[string]string{"SECRET_ENV_NAME": "SECRET_ENV_VALUE"},
+				Command: []string{"SECRET_COMMAND_EXEC", "SECRET_COMMAND_ARG1", "SECRET_COMMAND_ARG2"},
+			}
+			rt := newStartupPublicationRuntime(t, tt.fault, "pod-uid", data)
+			box := &v1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+				Name: "claimed", Namespace: "default", UID: types.UID(uuid.NewString()), CreationTimestamp: metav1.Now(),
+				Labels: map[string]string{v1alpha1.LabelSandboxTemplate: "test-template"}, OwnerReferences: GetSbsOwnerReference(),
+				Annotations: map[string]string{v1alpha1.AnnotationRuntimeURL: rt.server.URL},
+			}, Spec: v1alpha1.SandboxSpec{StartupMode: v1alpha1.StartupModeDeferred,
+				EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "app:test"}}}}}},
+				Status: v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxRunning,
+					PodInfo:    v1alpha1.PodInfo{PodUID: "pod-uid", PodIP: "127.0.0.1"},
+					Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}}}}
+			cache, cli, err := cachetest.NewTestCache(t, box, startupPublicationPod(box))
+			require.NoError(t, err)
+			i := &Infra{Cache: rt.withCompletionChecks(cache, cli), claimLockChannel: make(chan struct{}, 1)}
+			opts := infra.ClaimSandboxOptions{
+				User: "owner", Namespace: "default", Template: "test-template", CandidateCounts: 3,
+				ClaimTimeout: time.Second, WaitReadyTimeout: time.Second, AccessToken: token,
+				InitRuntime: &runtimeconfig.InitRuntimeOptions{SkipInit: tt.skipInit, SkipRefresh: true,
+					ReInit: tt.fault != "", AccessToken: token, EnvVars: data.EnvVars, Command: data.Command},
+				UserMetadataKeys: &v1alpha1.UpdatedMetadataInClaim{Annotations: []string{metadataKey}},
+				Claim: &v1alpha1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					metadataKey: metadataValue, "credential": claimSecret,
+				}}},
+				Modifier: func(s claim.Handle) error {
+					annotations := s.GetAnnotations()
+					annotations[metadataKey] = metadataValue
+					s.SetAnnotations(annotations)
+					return nil
+				},
+			}
+			originalRequest, err := json.Marshal(opts.InitRuntime)
+			require.NoError(t, err)
+			originalClaim := opts.Claim.DeepCopy()
+			var output strings.Builder
+			// Only the call's logger is captured; fixture/server logs cannot contaminate it.
+			ctx := klog.NewContext(t.Context(), funcr.NewJSON(func(line string) {
+				output.WriteString(line + "\n")
+			}, funcr.Options{Verbosity: logs.DebugLogLevel}))
+			claimed, metrics, err := i.ClaimSandbox(ctx, opts)
+			if tt.fault != "" {
+				require.ErrorContains(t, err, "test completion denied")
+				assert.Nil(t, claimed)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, claimed)
+			}
+			assert.Equal(t, 0, metrics.Retries)
+			for _, secret := range []string{token, metadataKey, metadataValue, claimSecret,
+				"SECRET_ENV_NAME", "SECRET_ENV_VALUE", "SECRET_COMMAND_EXEC", "SECRET_COMMAND_ARG1", "SECRET_COMMAND_ARG2"} {
+				assert.NotContains(t, output.String(), secret)
+			}
+			initLogs, claimLogs := 0, 0
+			for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+				entry := map[string]any{}
+				require.NoError(t, json.Unmarshal([]byte(line), &entry))
+				switch entry["msg"] {
+				case "starting to init runtime":
+					initLogs++
+					assert.Equal(t, float64(0), entry["level"])
+					assert.Equal(t, opts.InitRuntime.ReInit, entry["reInit"])
+					assert.Equal(t, true, entry["skipRefresh"])
+					assert.Equal(t, float64(1), entry["envCount"])
+					assert.Equal(t, float64(3), entry["commandArgCount"])
+					assert.NotContains(t, entry, "opts")
+				case "claim sandbox options":
+					claimLogs++
+					assert.Equal(t, float64(logs.DebugLogLevel), entry["level"])
+					for key, value := range map[string]any{
+						"namespace": opts.Namespace, "template": opts.Template, "candidateCounts": float64(3),
+						"claimTimeout": opts.ClaimTimeout.String(), "waitReadyTimeout": opts.WaitReadyTimeout.String(),
+						"initRequested": true, "skipInit": tt.skipInit,
+					} {
+						assert.Equal(t, value, entry[key], key)
+					}
+					assert.NotContains(t, entry, "options")
+				}
+			}
+			assert.Equal(t, 1, claimLogs, "the actual V5 claim log must execute")
+			if tt.skipInit {
+				assert.Zero(t, initLogs)
+			} else {
+				assert.Equal(t, 1, initLogs, "the actual normal init log must execute")
+			}
+
+			// Logging must not redact persisted replay data, caller input, or runtime payloads.
+			stored := &v1alpha1.Sandbox{}
+			require.NoError(t, cli.Get(t.Context(), client.ObjectKeyFromObject(box), stored))
+			request, err := runtime.GetInitRuntimeRequest(stored)
+			require.NoError(t, err)
+			require.NotNil(t, request)
+			assert.Equal(t, data.EnvVars, request.EnvVars)
+			assert.Equal(t, data.Command, request.Command)
+			assert.Equal(t, token, request.AccessToken)
+			assert.Equal(t, tt.skipInit, request.SkipInit)
+			assert.Equal(t, token, stored.Annotations[v1alpha1.AnnotationRuntimeAccessToken])
+			assert.Equal(t, metadataValue, stored.Annotations[metadataKey])
+			assert.Contains(t, stored.Annotations[v1alpha1.AnnotationUpdatedMetadataInClaim], metadataKey)
+			unchangedRequest, err := json.Marshal(opts.InitRuntime)
+			require.NoError(t, err)
+			assert.Equal(t, originalRequest, unchangedRequest)
+			assert.Equal(t, originalClaim, opts.Claim)
+			assert.Equal(t, token, opts.AccessToken)
+			rt.mu.Lock()
+			defer rt.mu.Unlock()
+			assert.Equal(t, "export SECRET_ENV_NAME='SECRET_ENV_VALUE'\n", rt.files[startupPublicationStage+"/env.sh"])
+			assert.Equal(t, "exec -- 'SECRET_COMMAND_EXEC' 'SECRET_COMMAND_ARG1' 'SECRET_COMMAND_ARG2'\n", rt.files[startupPublicationStage+"/cmd.sh"])
+			if tt.skipInit {
+				assert.Empty(t, rt.initToken)
+			} else {
+				assert.Equal(t, token, rt.initToken)
+			}
+		})
+	}
 }
 
 func TestInfra_SelectSandboxes(t *testing.T) {

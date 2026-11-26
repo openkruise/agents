@@ -16,13 +16,18 @@ package core
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -39,7 +44,9 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
+	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
+	testutils "github.com/openkruise/agents/test/utils"
 )
 
 func defaultCommonSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool) {
@@ -3638,6 +3645,12 @@ type mockSandboxInitializer struct {
 func (m *mockSandboxInitializer) Initialize(_ context.Context, _ *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) error {
 	m.called++
 	m.initializedStatus = newStatus.DeepCopy()
+	if m.err == nil {
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type: string(agentsv1alpha1.RuntimeInitialized), Status: metav1.ConditionTrue,
+			Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+		})
+	}
 	return m.err
 }
 
@@ -3743,6 +3756,248 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 			if done != tt.expectDone {
 				t.Errorf("expected done=%v, got done=%v", tt.expectDone, done)
 			}
+		})
+	}
+}
+
+func TestCommonControlEnsureSandboxUpdatedDeferredStartupReadiness(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		mode        agentsv1alpha1.StartupMode
+		claimed     bool
+		cold        bool
+		signal      string
+		record      string
+		missing     bool
+		initDone    bool
+		readFailure bool
+		expectError string
+		stopResume  bool
+		replay      bool
+	}{
+		{name: "cold Immediate", cold: true},
+		{name: "unclaimed Deferred warm stock", mode: agentsv1alpha1.StartupModeDeferred},
+		{name: "claimed Deferred recovery", mode: agentsv1alpha1.StartupModeDeferred, claimed: true},
+		{name: "initial claim without publication", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true},
+		{name: "initial clone without publication", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true},
+		{name: "initial claim already published", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true, signal: "current-pod"},
+		{name: "initial clone already published", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true, signal: "current-pod"},
+		{name: "initial claim stale publication", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true, signal: "old-pod"},
+		{name: "completed current pod with stale status", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true, record: `{"startupDelivered":true,"startupPodUID":"current-pod"}`},
+		{name: "completed old pod replays without init condition", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true, replay: true,
+			record: `{"accessToken":"test-token","startupDelivered":true,"startupPodUID":"old-pod"}`},
+		{name: "true init condition cannot bypass replacement delivery", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true, initDone: true, replay: true,
+			record: `{"accessToken":"test-token","startupDelivered":true,"startupPodUID":"old-pod"}`},
+		{name: "true init condition cannot bypass unfinished delivery", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true, initDone: true},
+		{name: "missing record fails closed", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true, missing: true, expectError: "no recorded startup data"},
+		{name: "invalid record fails closed", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true, record: "invalid", expectError: "failed to unmarshal"},
+		{name: "publication read failure preserves pending and blocks Ready", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true, readFailure: true},
+		{name: "failed original completion recovers before Stop and resume", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, cold: true, signal: "current-pod", stopResume: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			const stage = utils.SandboxEnvClaimDir + "/.startup-TEST000000"
+			runtimeServer := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
+				RunCommandImmediately: true,
+				RunCommandResult:      utilruntime.RunCommandResult{Exited: true, Stdout: []string{stage + "\n"}},
+			})
+			defer runtimeServer.Close()
+			var mu sync.Mutex
+			var paths []string
+			files := map[string]string{}
+			signal := tt.signal
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				paths = append(paths, r.URL.Path)
+				if r.URL.Path != "/files" {
+					runtimeServer.Config.Handler.ServeHTTP(w, r)
+					return
+				}
+				if r.Method == http.MethodGet {
+					assert.Equal(t, utils.SandboxEnvClaimDir+"/.env_ready", r.URL.Query().Get("path"))
+					if tt.readFailure {
+						http.Error(w, "publication unavailable", http.StatusForbidden)
+						return
+					}
+					if signal == "" {
+						http.NotFound(w, r)
+						return
+					}
+					_, err := io.WriteString(w, signal)
+					assert.NoError(t, err)
+					return
+				}
+				file, _, err := r.FormFile("file")
+				if !assert.NoError(t, err) {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				defer file.Close()
+				data, err := io.ReadAll(file)
+				assert.NoError(t, err)
+				files[r.URL.Query().Get("path")] = string(data)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			raw := tt.record
+			if raw == "" {
+				raw = `{"skipInit":true}`
+				if tt.claimed {
+					raw = `{"accessToken":"test-token","envVars":{"VALUE":"claim"},"command":["echo","claim"]}`
+				}
+			}
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default", UID: "sandbox-uid", Generation: 2,
+					Annotations: map[string]string{agentsv1alpha1.AnnotationInitRuntimeRequest: raw, agentsv1alpha1.AnnotationRuntimeURL: server.URL,
+						agentsv1alpha1.AnnotationRuntimeAccessToken: "test-token"}},
+				Spec: agentsv1alpha1.SandboxSpec{StartupMode: tt.mode,
+					UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate},
+					Lifecycle:     &agentsv1alpha1.SandboxLifecycle{PostResume: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"restore"}}}}},
+				Status: agentsv1alpha1.SandboxStatus{PodInfo: agentsv1alpha1.PodInfo{PodUID: "old-pod", PodIP: "10.0.0.1"}},
+			}
+			if tt.missing {
+				delete(box.Annotations, agentsv1alpha1.AnnotationInitRuntimeRequest)
+			}
+			if tt.claimed {
+				box.Labels = map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True}
+			}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: box.Name, Namespace: box.Namespace, UID: "current-pod",
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(box, agentsv1alpha1.GroupVersion.WithKind("Sandbox"))}},
+				Spec: corev1.PodSpec{NodeName: "node"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2",
+					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
+			failCompletion := tt.stopResume
+			fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(realNode("node"), box, pod).
+				WithInterceptorFuncs(interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if failCompletion {
+						return apierrors.NewForbidden(agentsv1alpha1.GroupVersion.WithResource("sandboxes").GroupResource(), obj.GetName(), fmt.Errorf("completion patch failed"))
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				}}).Build()
+			if tt.stopResume {
+				originalDelivery := box.DeepCopy()
+				originalDelivery.Status.PodInfo.PodUID = pod.UID
+				require.ErrorContains(t, utilruntime.RecordStartupDelivered(t.Context(), originalDelivery, fc), "completion patch failed")
+				failCompletion = false
+			}
+			recorder := record.NewFakeRecorder(30)
+			calls := 0
+			status := box.Status.DeepCopy()
+			status.Phase = agentsv1alpha1.SandboxRunning
+			utils.SetSandboxCondition(status, metav1.Condition{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxReadyReasonPodReady})
+			if !tt.cold {
+				markResumeSucceeded(box, status)
+			} else {
+				require.Nil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.RuntimeInitialized)))
+			}
+			if tt.initDone {
+				utils.SetSandboxCondition(status, metav1.Condition{Type: string(agentsv1alpha1.RuntimeInitialized), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded})
+			}
+			control := &commonControl{Client: fc, recorder: recorder,
+				initializer:  &defaultSandboxInitializer{client: fc, apiReader: fc, recorder: recorder},
+				probeManager: NewPodProbeManager(fc, recorder), syncStatusFromPod: defaultCommonSyncStatusFromPod,
+				lifecycleHooks: NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+					calls++
+					return 0, "", "", nil
+				}, recorder),
+			}
+			args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status}
+			requeue, err := control.EnsureSandboxUpdated(t.Context(), args)
+			assert.Equal(t, pod.UID, status.PodInfo.PodUID)
+			assert.Equal(t, pod.Status.PodIP, status.PodInfo.PodIP)
+			mu.Lock()
+			if tt.replay {
+				assert.Contains(t, paths, "/init")
+				assert.Equal(t, string(pod.UID), files[stage+"/.env_ready"])
+			} else {
+				assert.NotContains(t, paths, "/init", "initial post-processing must never be repeated")
+				assert.Empty(t, files)
+			}
+			mu.Unlock()
+			if tt.expectError != "" {
+				require.ErrorContains(t, err, tt.expectError)
+				assert.Zero(t, calls)
+				init := hookCondition(t, status, agentsv1alpha1.RuntimeInitialized)
+				assert.Equal(t, metav1.ConditionFalse, init.Status)
+				assert.Equal(t, agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed, init.Reason)
+				ready := hookCondition(t, status, agentsv1alpha1.SandboxConditionReady)
+				assert.Equal(t, metav1.ConditionFalse, ready.Status)
+				assert.Equal(t, init.Message, ready.Message)
+				return
+			}
+			require.NoError(t, err)
+			if tt.claimed && tt.signal != "current-pod" && tt.record == "" {
+				assert.Equal(t, time.Second, requeue)
+				assert.Zero(t, calls)
+				init := hookCondition(t, status, agentsv1alpha1.RuntimeInitialized)
+				assert.Equal(t, metav1.ConditionFalse, init.Status)
+				assert.Equal(t, "StartupDeliveryPending", init.Reason)
+				if tt.readFailure {
+					assert.Contains(t, init.Message, utilruntime.ErrStartupDeliveryPending.Error())
+					assert.Contains(t, init.Message, "403")
+				}
+				ready := hookCondition(t, status, agentsv1alpha1.SandboxConditionReady)
+				assert.Equal(t, metav1.ConditionFalse, ready.Status)
+				assert.Equal(t, init.Reason, ready.Reason)
+				assert.Equal(t, init.Message, ready.Message)
+				if !tt.cold {
+					assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonPending, hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook).Reason)
+				}
+				assert.Empty(t, recorder.Events, "waiting must not emit warning events")
+				// Model the manager completing its original post-processing.
+				box.Annotations[agentsv1alpha1.AnnotationInitRuntimeRequest] = `{"startupDelivered":true,"startupPodUID":"current-pod"}`
+				requeue, err = control.EnsureSandboxUpdated(t.Context(), args)
+				require.NoError(t, err)
+				assert.Zero(t, requeue)
+				assert.Equal(t, metav1.ConditionTrue, hookCondition(t, status, agentsv1alpha1.RuntimeInitialized).Status)
+			}
+			assert.Equal(t, metav1.ConditionTrue, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+			if tt.cold {
+				assert.Zero(t, calls, "initial delivery must not run postResume")
+			} else {
+				assert.Equal(t, 1, calls)
+			}
+			if tt.signal == "current-pod" || tt.replay {
+				require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(box), box))
+				request, err := utilruntime.GetInitRuntimeRequest(box)
+				require.NoError(t, err)
+				require.NotNil(t, request)
+				assert.True(t, request.StartupDelivered)
+				assert.Equal(t, string(pod.UID), request.StartupPodUID)
+			}
+			if !tt.stopResume {
+				return
+			}
+			// Stop removes the only native signal; the persisted completion must
+			// permit re-init and replay on the next Pod, rather than stranding it.
+			require.NoError(t, control.EnsureSandboxPaused(t.Context(), args))
+			mu.Lock()
+			signal = ""
+			paths = nil
+			mu.Unlock()
+			pod = pod.DeepCopy()
+			pod.UID = "resumed-pod"
+			pod.ResourceVersion = ""
+			require.NoError(t, fc.Create(t.Context(), pod))
+			args.Pod = pod
+			require.NoError(t, control.EnsureSandboxResumed(t.Context(), args))
+			requeue, err = control.EnsureSandboxUpdated(t.Context(), args)
+			require.NoError(t, err)
+			assert.Zero(t, requeue)
+			assert.Equal(t, 1, calls)
+			assert.Equal(t, metav1.ConditionTrue, hookCondition(t, status, agentsv1alpha1.RuntimeInitialized).Status)
+			assert.Equal(t, metav1.ConditionTrue, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+			mu.Lock()
+			assert.Contains(t, paths, "/init")
+			assert.Equal(t, "resumed-pod", files[stage+"/.env_ready"])
+			assert.Contains(t, files[stage+"/env.sh"], "export VALUE='claim'")
+			assert.Contains(t, files[stage+"/cmd.sh"], "exec -- 'echo' 'claim'")
+			mu.Unlock()
+			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(box), box))
+			request, err := utilruntime.GetInitRuntimeRequest(box)
+			require.NoError(t, err)
+			require.NotNil(t, request)
+			assert.True(t, request.StartupDelivered)
+			assert.Equal(t, "resumed-pod", request.StartupPodUID)
 		})
 	}
 }

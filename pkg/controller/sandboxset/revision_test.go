@@ -72,6 +72,30 @@ func sampleAutoPausePolicy(probe, messageRegex string) *v1alpha1.AutoPausePolicy
 	}
 }
 
+func TestStartupModeRevision(t *testing.T) {
+	for _, useRef := range []bool{false, true} {
+		template := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "template", Namespace: "default"}, Spec: v1alpha1.SandboxTemplateSpec{Template: samplePodTemplate("app:test", nil)}}
+		pool := &v1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}}
+		if useRef {
+			pool.Spec.TemplateRef = &v1alpha1.SandboxTemplateRef{Name: template.Name}
+		} else {
+			pool.Spec.Template = template.Spec.Template
+		}
+		r := newRevisionTestReconciler(template)
+		before, err := r.buildSandboxTemplateSpec(t.Context(), pool)
+		require.NoError(t, err)
+		oldHash, err := computeRevisionHash(before)
+		require.NoError(t, err)
+		pool.Spec.StartupMode = v1alpha1.StartupModeDeferred
+		after, err := r.buildSandboxTemplateSpec(t.Context(), pool)
+		require.NoError(t, err)
+		assert.Equal(t, v1alpha1.StartupModeDeferred, after.StartupMode)
+		newHash, err := computeRevisionHash(after)
+		require.NoError(t, err)
+		assert.NotEqual(t, oldHash, newHash)
+	}
+}
+
 func TestReconciler_buildSandboxTemplateSpec(t *testing.T) {
 	tests := []struct {
 		name        string
