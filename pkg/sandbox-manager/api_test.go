@@ -206,8 +206,23 @@ func simulateInplaceUpdateControllerForApiTest(ctx context.Context, c ctrlclient
 	}()
 }
 
+// erroringTemplateLookupCache makes PickSandboxSet fail so table rows can
+// exercise an inconclusive template lookup instead of a definitive miss.
+type erroringTemplateLookupCache struct {
+	infracache.Provider
+	err error
+}
+
+func (c *erroringTemplateLookupCache) PickSandboxSet(context.Context, infracache.PickSandboxSetOptions) (*agentsv1alpha1.SandboxSet, error) {
+	return nil, c.err
+}
+
 func TestSandboxManager_ClaimSandbox(t *testing.T) {
 	testutils.InitLogOutput()
+	// The deprecated request-result metric only increments while its gate is on.
+	// Keep it enabled here so this table continues to protect that wiring.
+	deprecatedEnabled := deprecatedResponseMetricsEnabled.Swap(true)
+	t.Cleanup(func() { deprecatedResponseMetricsEnabled.Store(deprecatedEnabled) })
 	now := time.Now()
 	username := "test-user"
 	tests := []struct {
@@ -217,6 +232,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		templateSetup     map[string]int
 		prepareSandbox    func(*agentsv1alpha1.Sandbox)
 		generatorError    error
+		templateLookupErr error
 		expectError       string
 		expectedErrorCode errors.ErrorCode
 		postCheck         func(t *testing.T, manager *SandboxManager, client ctrlclient.Client, sbx infra.Sandbox)
@@ -235,6 +251,17 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			},
 			expectError:       "non-existent-template not found",
 			expectedErrorCode: errors.ErrorNotFound,
+		},
+		{
+			name: "Template lookup failure should return internal error without claiming",
+			opts: infra.ClaimSandboxOptions{
+				User:      username,
+				Namespace: "team-a",
+				Template:  "lookup-error-template",
+			},
+			templateLookupErr: apierrors.NewServiceUnavailable("injected template cache failure"),
+			expectError:       "failed to check template",
+			expectedErrorCode: errors.ErrorInternal,
 		},
 		{
 			name: "No user",
@@ -566,6 +593,13 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			} else {
 				tt.opts.ClaimTimeout = 100 * time.Millisecond
 			}
+			if tt.templateLookupErr != nil {
+				infraInstance, ok := manager.GetInfra().(*sandboxcr.Infra)
+				require.True(t, ok)
+				original := infraInstance.Cache
+				infraInstance.Cache = &erroringTemplateLookupCache{Provider: original, err: tt.templateLookupErr}
+				t.Cleanup(func() { infraInstance.Cache = original })
+			}
 			var claimed infra.Sandbox
 			var claimErr error
 			namespace := tt.opts.Namespace
@@ -587,6 +621,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 					claimType = agentsv1alpha1.ClaimMethodColdStart
 				}
 				histogramBefore := managerHistogram(t, sandboxClaimDuration, namespace, "success", claimType).GetSampleCount()
+				wantRequestCounts := resultCounterSums(t, sandboxClaimCreationResponses)
 				got, err := manager.ClaimSandbox(t.Context(), ClaimSandboxOptions{Infra: tt.opts})
 				wantSuccess, wantFailure, wantCreation := successBefore, failureBefore, creationBefore
 				if err == nil {
@@ -598,6 +633,13 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				assert.Equal(t, wantSuccess, resultCounterSum(t, sandboxClaimTotal, namespace, "success"))
 				assert.Equal(t, wantFailure, resultCounterSum(t, sandboxClaimTotal, namespace, "failure"), "every error in this table happens before an instance is bound")
 				assert.Equal(t, wantCreation, resultCounterSum(t, sandboxCreateTotal, namespace, "success"))
+				// Successful calls use the Sandbox namespace; failed calls use the request namespace.
+				if err != nil {
+					wantRequestCounts[resultCounterLabels{namespace: tt.opts.Namespace, result: "failure"}]++
+				} else {
+					wantRequestCounts[resultCounterLabels{namespace: namespace, result: "success"}]++
+				}
+				assert.Equal(t, wantRequestCounts, resultCounterSums(t, sandboxClaimCreationResponses), "each call increments only its expected request counter")
 				wantHistogram := histogramBefore
 				if err == nil {
 					wantHistogram++
@@ -619,6 +661,9 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				require.Error(t, err)
 				assert.Equal(t, tt.expectedErrorCode, errors.GetErrCode(err))
 				assert.Contains(t, err.Error(), tt.expectError)
+				if tt.templateLookupErr != nil {
+					assert.ErrorIs(t, err, tt.templateLookupErr)
+				}
 				if tt.errorCheck != nil {
 					tt.errorCheck(t, client)
 				}
@@ -2119,9 +2164,11 @@ func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
 
 				// Wait for informer sync
 				require.Eventually(t, func() bool {
-					return manager.GetInfra().HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
+					ok, err := manager.HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
 						CheckpointID: tt.checkpointID,
 					})
+					assert.NoError(t, err)
+					return ok
 				}, time.Second, 10*time.Millisecond)
 
 				// Cleanup

@@ -1672,6 +1672,34 @@ func TestInfra_DeleteCheckpoint_LookupErrorClassification(t *testing.T) {
 	})
 }
 
+func TestInfra_HasCheckpointLookupErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		cacheErr error
+		wantErr  bool
+	}{
+		{name: "missing checkpoint"},
+		{name: "cache unavailable", cacheErr: apierrors.NewServiceUnavailable("injected cache list failure"), wantErr: true},
+		{
+			name:     "missing API resource is a cache read failure",
+			cacheErr: apierrors.NewNotFound(schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "checkpoints"}, ""),
+			wantErr:  true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			instance, _ := NewTestInfra(t)
+			instance.Cache = &getCheckpointMisses{Provider: instance.Cache, err: tt.cacheErr}
+			found, err := instance.HasCheckpoint(t.Context(), infra.HasCheckpointOptions{Namespace: "default", CheckpointID: "test-checkpoint"})
+			assert.False(t, found)
+			if tt.wantErr {
+				require.ErrorIs(t, err, tt.cacheErr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestBuildClaimError_PreservesTerminalError(t *testing.T) {
 	tests := []struct {
 		name            string

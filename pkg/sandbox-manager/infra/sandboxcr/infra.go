@@ -369,14 +369,20 @@ func (i *Infra) GetCache() cache.Provider {
 	return i.Cache
 }
 
-func (i *Infra) HasTemplate(ctx context.Context, opts infra.HasTemplateOptions) bool {
+func (i *Infra) HasTemplate(ctx context.Context, opts infra.HasTemplateOptions) (bool, error) {
 	_, err := i.Cache.PickSandboxSet(ctx, cache.PickSandboxSetOptions{Namespace: opts.Namespace, Name: opts.Name})
-	return err == nil
+	if errors.Is(err, cache.ErrSandboxSetNotFound) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
-func (i *Infra) HasCheckpoint(ctx context.Context, opts infra.HasCheckpointOptions) bool {
+func (i *Infra) HasCheckpoint(ctx context.Context, opts infra.HasCheckpointOptions) (bool, error) {
 	_, err := i.Cache.GetCheckpoint(ctx, cache.GetCheckpointOptions{Namespace: opts.Namespace, CheckpointID: opts.CheckpointID})
-	return err == nil
+	if errors.Is(err, cache.ErrCheckpointNotFound) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (i *Infra) SelectSandboxes(ctx context.Context, opts infra.SelectSandboxesOptions) ([]infra.Sandbox, error) {

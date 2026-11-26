@@ -229,8 +229,10 @@ var ErrSandboxIDAmbiguous = errors.New("sandbox ID is ambiguous")
 type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
 	Stop(ctx context.Context)      // Stops the infrastructure
-	HasTemplate(ctx context.Context, opts HasTemplateOptions) bool
-	HasCheckpoint(ctx context.Context, opts HasCheckpointOptions) bool
+	// HasTemplate returns (false, nil) for a definitive miss and reports lookup failures.
+	HasTemplate(ctx context.Context, opts HasTemplateOptions) (bool, error)
+	// HasCheckpoint returns (false, nil) for a definitive miss and reports lookup failures.
+	HasCheckpoint(ctx context.Context, opts HasCheckpointOptions) (bool, error)
 	GetCache() cache.Provider // Get the CacheProvider for the infra
 	GetSandboxRouteSource() SandboxRouteSource
 	SelectSandboxes(ctx context.Context, opts SelectSandboxesOptions) ([]Sandbox, error)

@@ -100,16 +100,33 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}
 	namespace := sc.getNamespaceOfUser(user)
 	log.Info("create sandbox request received", "request", request)
-	if sc.manager.GetInfra().HasTemplate(ctx, infra.HasTemplateOptions{
+	hasTemplate, err := sc.manager.HasTemplate(ctx, infra.HasTemplateOptions{
 		Namespace: namespace,
 		Name:      request.TemplateID,
-	}) {
+	})
+	if err != nil {
+		log.Error(err, "failed to check template existence", "templateID", request.TemplateID)
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to check template",
+		}
+	}
+	if hasTemplate {
 		log.Info("infra has template, will create sandbox with claim", "templateID", request.TemplateID)
 		return sc.createSandboxWithClaim(ctx, request, user, domain)
-	} else if sc.manager.GetInfra().HasCheckpoint(ctx, infra.HasCheckpointOptions{
+	}
+	hasCheckpoint, err := sc.manager.HasCheckpoint(ctx, infra.HasCheckpointOptions{
 		Namespace:    namespace,
 		CheckpointID: request.TemplateID,
-	}) {
+	})
+	if err != nil {
+		log.Error(err, "failed to check checkpoint existence", "templateID", request.TemplateID)
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to check checkpoint",
+		}
+	}
+	if hasCheckpoint {
 		log.Info("infra has checkpoint, will create sandbox with clone", "templateID", request.TemplateID)
 		return sc.createSandboxWithClone(ctx, request, user, domain)
 	}

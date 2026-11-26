@@ -1327,29 +1327,83 @@ func TestCreateSandboxMemoryPersistence(t *testing.T) {
 	}
 }
 
-func TestCreateSandbox_TopLevelMissingTemplateOrCheckpointReturns400(t *testing.T) {
-	fakeQuota := &fakeQuotaManager{}
-	controller, _, teardown := SetupWithQuota(t, fakeQuota)
-	defer teardown()
+type templateLookupTestCache struct {
+	cache.Provider
+	templateErr       error
+	checkpointErr     error
+	checkpointLookups int
+}
 
-	user := quotaLimitedUser([]quotaspec.QuotaLimit{{
-		Dimension: quotaspec.DimLimitsCPU,
-		Scope:     quotaspec.ScopeRunning,
-		Limit:     4000,
-	}})
+func (c *templateLookupTestCache) PickSandboxSet(ctx context.Context, opts cache.PickSandboxSetOptions) (*v1alpha1.SandboxSet, error) {
+	if c.templateErr != nil {
+		return nil, c.templateErr
+	}
+	return c.Provider.PickSandboxSet(ctx, opts)
+}
 
-	resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
-		TemplateID: "missing-template",
-		Metadata: map[string]string{
-			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+func (c *templateLookupTestCache) GetCheckpoint(ctx context.Context, opts cache.GetCheckpointOptions) (*v1alpha1.Checkpoint, error) {
+	c.checkpointLookups++
+	if c.checkpointErr != nil {
+		return nil, c.checkpointErr
+	}
+	return c.Provider.GetCheckpoint(ctx, opts)
+}
+
+func TestCreateSandbox_TopLevelLookupErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		templateErr       error
+		checkpointErr     error
+		checkpointLookups int
+		status            int
+		message           string
+	}{
+		{
+			name: "both absent", checkpointLookups: 1,
+			status: http.StatusBadRequest, message: "Template or Checkpoint not found",
 		},
-	}, nil, user))
+		{
+			name: "template lookup failure", templateErr: fmt.Errorf("template cache unavailable"),
+			status: http.StatusInternalServerError, message: "Failed to check template",
+		},
+		{
+			name: "checkpoint lookup failure", checkpointErr: fmt.Errorf("checkpoint cache unavailable"), checkpointLookups: 1,
+			status: http.StatusInternalServerError, message: "Failed to check checkpoint",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeQuota := &fakeQuotaManager{}
+			controller, client, teardown := SetupWithQuota(t, fakeQuota)
+			defer teardown()
+			instance := controller.manager.GetInfra().(*sandboxcr.Infra)
+			lookupCache := &templateLookupTestCache{
+				Provider: instance.Cache, templateErr: tt.templateErr, checkpointErr: tt.checkpointErr,
+			}
+			instance.Cache = lookupCache
+			user := quotaLimitedUser([]quotaspec.QuotaLimit{{
+				Dimension: quotaspec.DimLimitsCPU,
+				Scope:     quotaspec.ScopeRunning,
+				Limit:     4000,
+			}})
 
-	require.NotNil(t, apiErr)
-	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-	assert.Contains(t, apiErr.Message, "Template or Checkpoint not found")
-	assert.Zero(t, resp.Code)
-	assert.Equal(t, int64(0), fakeQuota.acquireCalls.Load())
+			resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: "missing-template",
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+				},
+			}, nil, user))
+
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tt.status, apiErr.Code)
+			assert.Equal(t, tt.message, apiErr.Message)
+			assert.Zero(t, resp.Code)
+			assert.Equal(t, tt.checkpointLookups, lookupCache.checkpointLookups)
+			assert.Zero(t, fakeQuota.acquireCalls.Load())
+			sandboxes := &v1alpha1.SandboxList{}
+			require.NoError(t, client.List(t.Context(), sandboxes))
+			assert.Empty(t, sandboxes.Items)
+		})
+	}
 }
 
 func TestCreateSandbox_MemoryOverridePropagatedToClaimedSandbox(t *testing.T) {

@@ -50,7 +50,7 @@ func (c *Cache) PickSandboxSet(ctx context.Context, opts cache.PickSandboxSetOpt
 		return nil, fmt.Errorf("failed to get sandboxset %s from cache: %w", opts.Name, err)
 	}
 	if len(list.Items) == 0 {
-		return nil, fmt.Errorf("sandboxset %s not found in cache", opts.Name)
+		return nil, fmt.Errorf("%w: %s", cache.ErrSandboxSetNotFound, opts.Name)
 	}
 	return &list.Items[0], nil
 }
