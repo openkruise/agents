@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -48,6 +49,8 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -106,7 +109,7 @@ func TestAdd_FeatureGateDisabled(t *testing.T) {
 		_ = utilfeature.DefaultMutableFeatureGate.Set("Sandbox=true")
 	}()
 
-	err := Add(nil, nil, nil) // manager and enqueuer are nil, but should never be accessed
+	err := Add(nil, nil, nil, nil) // manager and enqueuer are nil, but should never be accessed
 	if err != nil {
 		t.Errorf("Add() error = %v, expected nil when feature gate is disabled", err)
 	}
@@ -121,7 +124,7 @@ func TestAdd_GVKNotDiscovered(t *testing.T) {
 	}()
 
 	// client.GetGenericClient() returns nil in test, so DiscoverGVK returns false
-	err := Add(nil, nil, nil) // manager and enqueuer are nil, but should never be accessed
+	err := Add(nil, nil, nil, nil) // manager and enqueuer are nil, but should never be accessed
 	if err != nil {
 		t.Errorf("Add() error = %v, expected nil when GVK is not discovered", err)
 	}
@@ -848,48 +851,172 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 
 func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = agentsv1alpha1.AddToScheme(scheme)
-
-	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).Build()
-	reconciler := &SandboxReconciler{
-		Client: client,
-		Scheme: scheme,
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	status := func(phase agentsv1alpha1.SandboxPhase, ip string, ready bool) agentsv1alpha1.SandboxStatus {
+		result := agentsv1alpha1.SandboxStatus{Phase: phase, PodInfo: agentsv1alpha1.PodInfo{PodIP: ip}}
+		if ready {
+			result.Conditions = []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}}
+		}
+		return result
 	}
-
-	originalSandbox := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-		},
-		Status: agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxPending,
-		},
+	running := status(agentsv1alpha1.SandboxRunning, "10.0.0.1", true)
+	pending := status(agentsv1alpha1.SandboxPending, "10.0.0.1", false)
+	messageChanged := *running.DeepCopy()
+	messageChanged.Message = "still running"
+	withPodMetadata := *running.DeepCopy()
+	withPodMetadata.PodInfo.NodeName = "worker-1"
+	withPodMetadata.PodInfo.PodUID = "pod-uid"
+	withPodMetadata.PodInfo.Labels = map[string]string{"app": "sandbox"}
+	withPodMetadata.PodInfo.Annotations = map[string]string{"example.com/key": "value"}
+	clearedIPWithMetadata := *withPodMetadata.DeepCopy()
+	clearedIPWithMetadata.PodInfo.PodIP = ""
+	pauseTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	pauseStarted := *running.DeepCopy()
+	pauseStarted.Conditions = append(pauseStarted.Conditions, metav1.Condition{
+		Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionFalse,
+		LastTransitionTime: metav1.NewTime(pauseTime),
+	})
+	pauseCompleted := status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true)
+	pauseCompleted.Conditions = append(pauseCompleted.Conditions, metav1.Condition{
+		Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(pauseTime.Add(time.Second)),
+	})
+	tests := []struct {
+		name             string
+		oldStatus        agentsv1alpha1.SandboxStatus
+		newStatus        agentsv1alpha1.SandboxStatus
+		wantSync         bool
+		disabled         bool
+		paused           bool
+		pool             bool
+		invalidUID       bool
+		patchErr         error
+		syncErr          error
+		waitForDeadline  bool
+		verifyCompletion bool
+	}{
+		{name: "addressless status update", oldStatus: status(agentsv1alpha1.SandboxPending, "", false), newStatus: status(agentsv1alpha1.SandboxRunning, "", false)},
+		{name: "routable after startup", oldStatus: pending, newStatus: running, wantSync: true},
+		{name: "Ready becomes true", oldStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.1", false), newStatus: running, wantSync: true},
+		{name: "Ready becomes false", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.1", false), wantSync: true},
+		{name: "first traffic address", oldStatus: status(agentsv1alpha1.SandboxRunning, "", true), newStatus: running, wantSync: true},
+		{name: "traffic address removed", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "", true), wantSync: true},
+		{name: "clearing address preserves Pod metadata", oldStatus: withPodMetadata, newStatus: clearedIPWithMetadata, wantSync: true},
+		{name: "clearing address with sync disabled", oldStatus: withPodMetadata, newStatus: clearedIPWithMetadata, disabled: true},
+		{name: "nonempty address changes", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxRunning, "10.0.0.2", true), wantSync: true},
+		{name: "address changes while unroutable", oldStatus: pending, newStatus: status(agentsv1alpha1.SandboxPending, "10.0.0.2", false), wantSync: true},
+		{name: "entering pause", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true), wantSync: true},
+		{name: "resume completes", oldStatus: status(agentsv1alpha1.SandboxResuming, "10.0.0.1", true), newStatus: running, wantSync: true},
+		{name: "upgrade starts", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxUpgrading, "10.0.0.1", true), wantSync: true},
+		{name: "failed CR is not sent as a deletion", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxFailed, "10.0.0.1", false)},
+		{name: "succeeded CR is not sent as a deletion", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxSucceeded, "10.0.0.1", false)},
+		{name: "unroutable transitions do not sync", oldStatus: pending, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", false)},
+		{name: "message-only change does not sync", oldStatus: running, newStatus: messageChanged},
+		{name: "identical status does not patch", oldStatus: running, newStatus: running},
+		{name: "already paused spec does not sync", oldStatus: running, newStatus: status(agentsv1alpha1.SandboxPaused, "10.0.0.1", true), paused: true},
+		{name: "undelivered pool instance does not sync", oldStatus: pending, newStatus: running, pool: true},
+		{name: "active sync disabled", oldStatus: pending, newStatus: running, disabled: true},
+		{name: "invalid projection preserves status write", oldStatus: pending, newStatus: running, invalidUID: true},
+		{name: "send failure preserves status write", oldStatus: pending, newStatus: running, wantSync: true, syncErr: fmt.Errorf("peer unavailable")},
+		{name: "send deadline preserves status write", oldStatus: pending, newStatus: running, wantSync: true, waitForDeadline: true},
+		{name: "sync precedes completion accounting", oldStatus: pauseStarted, newStatus: pauseCompleted, wantSync: true, verifyCompletion: true},
+		{name: "Patch NotFound does not send", oldStatus: pending, newStatus: running, patchErr: apierrors.NewNotFound(agentsv1alpha1.Resource("sandboxes"), "test-sandbox")},
+		{name: "Patch failure does not send", oldStatus: pending, newStatus: running, patchErr: apierrors.NewForbidden(agentsv1alpha1.Resource("sandboxes"), "test-sandbox", fmt.Errorf("denied"))},
 	}
-
-	// Add the sandbox to the client
-	err := client.Create(context.TODO(), originalSandbox)
-	if err != nil {
-		t.Fatalf("Failed to create sandbox: %v", err)
-	}
-
-	newStatus := agentsv1alpha1.SandboxStatus{
-		Phase: agentsv1alpha1.SandboxRunning,
-	}
-
-	err = reconciler.updateSandboxStatus(context.Background(), newStatus, originalSandbox)
-	if err != nil {
-		t.Errorf("updateSandboxStatus() error = %v", err)
-		return
-	}
-
-	// Verify the status was updated
-	updatedSandbox := &agentsv1alpha1.Sandbox{}
-	err = client.Get(context.TODO(), types.NamespacedName{Name: originalSandbox.Name, Namespace: originalSandbox.Namespace}, updatedSandbox)
-	if err != nil {
-		t.Errorf("Failed to get updated sandbox: %v", err)
-	} else if updatedSandbox.Status.Phase != agentsv1alpha1.SandboxRunning {
-		t.Errorf("Expected sandbox phase %v, got %v", agentsv1alpha1.SandboxRunning, updatedSandbox.Status.Phase)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-sandbox", Namespace: "default", UID: "uid-sandbox", ResourceVersion: "10",
+					Labels:      map[string]string{agentsv1alpha1.LabelSandboxID: "opaque-sandbox-id"},
+					Annotations: map[string]string{agentsv1alpha1.AnnotationRuntimeAccessToken: "test-token"},
+				},
+				Status: tt.oldStatus,
+			}
+			box.Spec.Paused = tt.paused
+			if tt.verifyCompletion {
+				box.Namespace = "route-sync-completion"
+				t.Cleanup(func() {
+					forgetSandboxCreationResult(box.Namespace, box.Name)
+					DeleteSandboxMetrics(box.Namespace, box.Name)
+					sandboxPauseTotal.DeleteLabelValues(box.Namespace, metricResultSuccess)
+					sandboxPauseDuration.DeleteLabelValues(box.Namespace)
+				})
+			}
+			if tt.pool {
+				box.OwnerReferences = []metav1.OwnerReference{{APIVersion: agentsv1alpha1.GroupVersion.String(), Kind: "SandboxSet", Name: "pool", UID: "pool-uid", Controller: ptr.To(true)}}
+			}
+			if tt.invalidUID {
+				box.UID = ""
+			}
+			core.ResourceVersionExpectations.Delete(box)
+			t.Cleanup(func() { core.ResourceVersionExpectations.Delete(box) })
+			patches := 0
+			fc := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(box).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+						patches++
+						if tt.patchErr != nil {
+							return tt.patchErr
+						}
+						return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+					},
+				}).Build()
+			r := &SandboxReconciler{Client: fc, Scheme: scheme}
+			var sent []sandboxroute.Route
+			if !tt.disabled {
+				r.syncRouteWithPeers = func(ctx context.Context, route sandboxroute.Route) error {
+					persisted := &agentsv1alpha1.Sandbox{}
+					require.NoError(t, fc.Get(ctx, client.ObjectKeyFromObject(box), persisted))
+					expected, err := sandboxroute.RouteFromSandbox(persisted)
+					require.NoError(t, err)
+					assert.Equal(t, expected, route, "must send the full route persisted by the API server")
+					assert.NotEqual(t, "10", route.ResourceVersion)
+					if tt.verifyCompletion {
+						assert.Zero(t, counterValue(t, sandboxPauseTotal, box.Namespace, metricResultSuccess), "completion must be counted after route sync")
+					}
+					deadline, ok := ctx.Deadline()
+					assert.True(t, ok, "active sync must have a deadline")
+					assert.LessOrEqual(t, time.Until(deadline), controllerRouteSyncTimeout)
+					sent = append(sent, route)
+					if tt.waitForDeadline {
+						<-ctx.Done()
+						assert.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+						return ctx.Err()
+					}
+					return tt.syncErr
+				}
+			}
+			err := r.updateSandboxStatus(t.Context(), tt.newStatus, box)
+			if tt.patchErr != nil && !apierrors.IsNotFound(tt.patchErr) {
+				require.ErrorIs(t, err, tt.patchErr)
+			} else {
+				require.NoError(t, err)
+			}
+			wantCount := 0
+			if tt.wantSync {
+				wantCount = 1
+			}
+			assert.Len(t, sent, wantCount)
+			if tt.verifyCompletion {
+				assert.Equal(t, float64(1), counterValue(t, sandboxPauseTotal, box.Namespace, metricResultSuccess), "old status must remain available for completion accounting")
+			}
+			if tt.oldStatus.Phase == tt.newStatus.Phase && tt.name == "identical status does not patch" {
+				assert.Zero(t, patches)
+			} else {
+				assert.Equal(t, 1, patches)
+			}
+			persisted := &agentsv1alpha1.Sandbox{}
+			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(box), persisted))
+			if tt.patchErr != nil {
+				assert.Equal(t, tt.oldStatus, box.Status)
+				assert.Equal(t, "10", box.ResourceVersion)
+				assert.True(t, apiequality.Semantic.DeepEqual(tt.oldStatus, persisted.Status), "persisted status differs: want=%#v got=%#v", tt.oldStatus, persisted.Status)
+			} else {
+				assert.True(t, apiequality.Semantic.DeepEqual(tt.newStatus, persisted.Status), "persisted status differs: want=%#v got=%#v", tt.newStatus, persisted.Status)
+			}
+		})
 	}
 }
 
@@ -1179,6 +1306,9 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 		pod                    *corev1.Pod
 		expectEvent            bool
 		expectFinalizerRemoved bool
+		disabled               bool
+		syncErr                error
+		terminationErr         error
 	}{
 		{
 			name: "records event when active pod is deleted",
@@ -1208,6 +1338,9 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 			expectEvent:            false,
 			expectFinalizerRemoved: true,
 		},
+		{name: "sync failure does not roll back finalizer removal", expectFinalizerRemoved: true, syncErr: fmt.Errorf("peer unavailable")},
+		{name: "deletion is synced even when finalizer removal fails", terminationErr: fmt.Errorf("finalizer patch failed")},
+		{name: "disabled sync still removes finalizer", expectFinalizerRemoved: true, disabled: true},
 	}
 
 	for _, tt := range tests {
@@ -1218,7 +1351,8 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 					Name:              "test-sandbox",
 					Namespace:         "default",
 					DeletionTimestamp: &deletionTime,
-					Finalizers:        []string{core.SandboxFinalizer},
+					UID:               "sandbox-uid", ResourceVersion: "10",
+					Finalizers: []string{core.SandboxFinalizer},
 				},
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase: agentsv1alpha1.SandboxRunning,
@@ -1232,6 +1366,14 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithObjects(objects...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if tt.terminationErr != nil {
+							return tt.terminationErr
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				}).
 				Build()
 			recorder := record.NewFakeRecorder(10)
 			reconciler := &SandboxReconciler{
@@ -1244,12 +1386,41 @@ func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *t
 				}),
 			}
 
-			_, err := reconciler.handleTerminating(context.Background(), core.EnsureFuncArgs{
+			sent := 0
+			if !tt.disabled {
+				reconciler.syncRouteWithPeers = func(ctx context.Context, route sandboxroute.Route) error {
+					sent++
+					observed := &agentsv1alpha1.Sandbox{}
+					require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(sandbox), observed))
+					assert.Contains(t, observed.Finalizers, core.SandboxFinalizer, "sync must precede finalizer removal")
+					if tt.pod != nil {
+						require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(tt.pod), &corev1.Pod{}), "sync must precede Pod deletion")
+					}
+					assert.Equal(t, sandbox.ResourceVersion, route.ResourceVersion)
+					assert.Equal(t, sandbox.UID, route.UID)
+					assert.NotEmpty(t, route.ResourceVersion)
+					assert.Equal(t, sandboxstate.Dead, route.State)
+					deadline, ok := ctx.Deadline()
+					assert.True(t, ok)
+					assert.LessOrEqual(t, time.Until(deadline), controllerRouteSyncTimeout)
+					return tt.syncErr
+				}
+			}
+			_, err := reconciler.handleTerminating(t.Context(), core.EnsureFuncArgs{
 				Pod:       tt.pod,
 				Box:       sandbox,
 				NewStatus: sandbox.Status.DeepCopy(),
 			})
-			assert.NoError(t, err)
+			if tt.terminationErr != nil {
+				assert.ErrorIs(t, err, tt.terminationErr)
+			} else {
+				assert.NoError(t, err)
+			}
+			if tt.disabled {
+				assert.Zero(t, sent)
+			} else {
+				assert.Equal(t, 1, sent)
+			}
 
 			if tt.expectEvent {
 				assertSandboxRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+eventReasonSandboxTerminating, "Sandbox deletion is in progress from phase Running")
@@ -7167,10 +7338,7 @@ func TestRejectCleanup(t *testing.T) {
 
 func TestDetermineUpgradeResumeReason(t *testing.T) {
 	// Enable the feature gate so the switch statement is exercised.
-	_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxUpgradeResumeFromFailedStepGate=true")
-	defer func() {
-		_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxUpgradeResumeFromFailedStepGate=false")
-	}()
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxUpgradeResumeFromFailedStepGate, true)
 
 	newStatus := &agentsv1alpha1.SandboxStatus{UpdateRevision: "new-hash"}
 	podWithHash := func(hash string) *corev1.Pod {

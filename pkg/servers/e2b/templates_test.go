@@ -61,7 +61,7 @@ func (s *listSandboxSetsSpy) ListSandboxSets(_ context.Context, opts infracache.
 }
 
 func (s *listSandboxSetsSpy) GetSandboxController() *controllers.CacheSandboxCustomReconciler {
-	return s.Provider.(*infracache.Cache).GetSandboxController()
+	return s.Provider.(*cachetest.Cache).GetSandboxController()
 }
 
 func TestDeleteTemplate(t *testing.T) {
@@ -85,7 +85,8 @@ func TestDeleteTemplate(t *testing.T) {
 		templateID               string
 		setupTemplate            bool // whether to create checkpoint + template using CreateCheckpointAndTemplate
 		setupSandboxSetNamespace string
-		mockDeleteTemplate       error                     // mock error for DefaultDeleteSandboxTemplate
+		mockDeleteTemplate       error // mock error for DefaultDeleteSandboxTemplate
+		templateLookupError      error
 		user                     *models.CreatedTeamAPIKey // user for the request
 		expectStatus             int
 		expectError              bool
@@ -106,6 +107,16 @@ func TestDeleteTemplate(t *testing.T) {
 			user:               user,
 			expectStatus:       http.StatusInternalServerError,
 			expectError:        true,
+		},
+		{
+			name:                "template lookup failure prevents checkpoint deletion",
+			templateID:          "test-tmpl-lookup-error",
+			setupTemplate:       true,
+			templateLookupError: fmt.Errorf("template cache unavailable"),
+			user:                user,
+			expectStatus:        http.StatusInternalServerError,
+			expectError:         true,
+			expectErrorMessage:  "Failed to check template",
 		},
 		{
 			name:          "user is nil returns unauthorized",
@@ -193,12 +204,22 @@ func TestDeleteTemplate(t *testing.T) {
 				}
 				t.Cleanup(func() { sandboxcr.DefaultDeleteSandboxTemplate = orig })
 			}
+			var lookupCache *templateLookupTestCache
+			if tt.templateLookupError != nil {
+				instance := controller.manager.GetInfra().(*sandboxcr.Infra)
+				lookupCache = &templateLookupTestCache{Provider: instance.Cache, templateErr: tt.templateLookupError}
+				instance.Cache = lookupCache
+			}
 
 			req := NewRequest(t, nil, nil, map[string]string{
 				"templateID": tt.templateID,
 			}, tt.user)
 
 			resp, apiErr := controller.DeleteTemplate(req)
+			if lookupCache != nil {
+				assert.Zero(t, lookupCache.checkpointLookups)
+				require.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: Namespace, Name: tt.templateID}, &v1alpha1.Checkpoint{}))
+			}
 
 			if tt.expectError {
 				require.NotNil(t, apiErr)

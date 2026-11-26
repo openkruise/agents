@@ -18,154 +18,48 @@ package sandboxcr
 
 import (
 	"errors"
-	"fmt"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/wait"
-
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 )
 
-type retriableError struct {
-	Message string
-}
-
-func (e retriableError) Error() string {
-	return e.Message
-}
-
-func (e retriableError) Is(target error) bool {
-	as := retriableError{}
-	if !errors.As(target, &as) {
-		return false
-	}
-	return as.Message == e.Message
-}
-
-func NoAvailableError(template, reason string) error {
-	return retriableError{Message: fmt.Sprintf("no available sandboxes for template %s (%s)", template, reason)}
-}
-
-// terminalMutationError marks a user-supplied mutation callback as terminal at
-// the outer claim/clone retry boundary. Unwrap keeps the original callback
-// cause available to errors.Is/errors.As without allowing a retriable cause to
-// repeat a callback or a completed claim/clone attempt.
-type terminalMutationError struct {
-	stage string
-	err   error
-}
-
-func (e terminalMutationError) Error() string {
-	return fmt.Sprintf("%s callback failed: %v", e.stage, e.err)
-}
-
-func (e terminalMutationError) Unwrap() error {
-	return e.err
-}
-
-// terminalValidationError marks an input-validation failure during sandbox
-// mutation (e.g. memory downscale) as terminal at the outer claim/clone retry
-// boundary. Unwrap keeps the underlying classified manager error (such as
-// ErrorBadRequest) available to errors.As so it maps to HTTP 400.
-type terminalValidationError struct {
-	err error
-}
-
-func (e terminalValidationError) Error() string {
-	return fmt.Sprintf("sandbox claim validation failed: %v", e.err)
-}
-
-func (e terminalValidationError) Unwrap() error {
-	return e.err
-}
-
-// candidateResizeIncompatibleError marks a candidate that cannot serve the
-// requested resize. pickAnAvailableSandbox records the skip reason so it can
-// be surfaced in the no-available error; skips never terminate the claim.
-type candidateResizeIncompatibleError struct {
-	err error
-}
-
-func (e *candidateResizeIncompatibleError) Error() string {
-	return e.err.Error()
-}
-
-func (e *candidateResizeIncompatibleError) Unwrap() error {
-	return e.err
-}
-
-// classifyCreateError classifies a Kubernetes API error from a Create
-// operation into one of three categories:
-// - ambiguous: transient server errors, conflicts, network errors -> managererrors.Error{ErrorInternal}
-// - terminal bad request: schema/validation errors -> managererrors.Error{ErrorBadRequest}
-// - terminal internal: Forbidden/auth/platform misconfig -> managererrors.Error{ErrorInternal}
+// classifyCreateError delegates classification to the neutral engine and
+// translates the resulting *claim.Error into a manager error so the clone path
+// keeps manager error codes for HTTP status mapping. claim.ErrorCode mirrors
+// the managererrors code strings, so the conversion is direct. nil and
+// context-interrupted errors pass through unchanged.
 func classifyCreateError(err error, contextMsg string) error {
-	if err == nil {
-		return nil
+	classified := claim.ClassifyCreateError(err, contextMsg)
+	var cErr *claim.Error
+	if errors.As(classified, &cErr) {
+		return managererrors.NewError(managererrors.ErrorCode(cErr.Code), "%s", cErr.Message)
 	}
+	return classified
+}
 
-	// Context interrupted - return as-is so the retry loop stops (non-retriable).
-	if wait.Interrupted(err) {
+// managerErrorFromClaim converts a neutral claim classification into a manager
+// error, keeping the original chain as cause so wait types and context errors
+// stay discoverable. Unclassified errors pass through unchanged.
+func managerErrorFromClaim(err error) error {
+	var cErr *claim.Error
+	if !errors.As(err, &cErr) {
 		return err
 	}
-
-	// Transient server errors are ambiguous for create: the apiserver may have
-	// persisted the CR before the client observed failure, so do not retry with
-	// a new object/lockstring.
-	if apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) ||
-		apierrors.IsServiceUnavailable(err) || apierrors.IsTooManyRequests(err) ||
-		apierrors.IsInternalError(err) {
-		return managererrors.NewError(managererrors.ErrorInternal, "%s: %s", contextMsg, err)
-	}
-
-	// Conflict is also terminal for Create. There is no existing sandbox object
-	// safely locked by this attempt that the retry loop can reuse.
-	if apierrors.IsConflict(err) {
-		return managererrors.NewError(managererrors.ErrorInternal, "%s: %s", contextMsg, err)
-	}
-
-	// AlreadyExists - terminal conflict (create name collision)
-	if apierrors.IsAlreadyExists(err) {
-		return managererrors.NewError(managererrors.ErrorConflict, "%s: %s", contextMsg, err)
-	}
-
-	// Invalid / BadRequest - terminal user error
-	if apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
-		return managererrors.NewError(managererrors.ErrorBadRequest, "%s: %s", contextMsg, err)
-	}
-
-	// Forbidden - always a platform issue. The sandbox-manager service account
-	// lacks the required RBAC permissions, or a cluster-level policy (quota,
-	// admission webhook, PodSecurity, etc.) denied the operation. Either way
-	// this is a server-side misconfiguration, not the HTTP caller's fault.
-	if apierrors.IsForbidden(err) {
-		return newPlatformCreateError(err, contextMsg)
-	}
-
-	// Unauthorized - platform issue
-	if apierrors.IsUnauthorized(err) {
-		return newPlatformCreateError(err, contextMsg)
-	}
-
-	// NotFound (CRD/namespace missing) - platform issue
-	if apierrors.IsNotFound(err) {
-		return newPlatformCreateError(err, contextMsg)
-	}
-
-	// MethodNotSupported - platform issue
-	if apierrors.IsMethodNotSupported(err) {
-		return newPlatformCreateError(err, contextMsg)
-	}
-
-	// Non-StatusError (network errors, etc.) - ambiguous create outcome.
-	return managererrors.NewError(managererrors.ErrorInternal, "%s: %s", contextMsg, err)
+	return managererrors.WrapError(managererrors.ErrorCode(cErr.Code), err, "%s", cErr.Message)
 }
 
-func newPlatformCreateError(err error, contextMsg string) error {
-	return managererrors.NewError(
-		managererrors.ErrorInternal,
-		"%s: sandbox creation failed due to platform configuration issue: %s",
-		contextMsg,
-		err,
-	)
+// sandboxWaitTimeoutError classifies a wait-task timeout with the sandbox action
+// that did not complete. Classifying and wording it here keeps the HTTP layer on
+// manager error codes alone instead of recognizing cache-level wait types. The
+// original wait error stays in the cause chain, so callers can still tell an
+// internal wait timeout from their own deadline or cancellation.
+func sandboxWaitTimeoutError(err error, action, sandboxID string) error {
+	var waitErr *cacheutils.WaitNotSatisfiedError
+	if !errors.As(err, &waitErr) {
+		return err
+	}
+	return managererrors.WrapError(managererrors.ErrorInternal, err,
+		"timed out after %s waiting for sandbox %s to %s; completion was not confirmed, check the sandbox state before retrying",
+		waitErr.Timeout, sandboxID, action)
 }

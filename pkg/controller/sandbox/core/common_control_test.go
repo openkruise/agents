@@ -46,6 +46,121 @@ func defaultCommonSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.S
 	defaultSyncStatusFromPod(pod, newStatus, syncReadyCondition, classifyStartupFailure)
 }
 
+func TestDefaultSyncStatusFromPodReadyTransitionTime(t *testing.T) {
+	previousTime := metav1.NewTime(time.Unix(1700000000, 0))
+	podTime := metav1.NewTime(time.Unix(1600000000, 0))
+	tests := []struct {
+		name              string
+		previousStatus    metav1.ConditionStatus
+		podStatus         corev1.ConditionStatus
+		podTransitionTime metav1.Time
+		normalizerFailure bool
+		wantStatus        metav1.ConditionStatus
+		wantMessage       string
+		wantTime          metav1.Time // A zero value means the reconciliation time is expected.
+	}{
+		{
+			name:           "zero timestamp on transition to ready",
+			previousStatus: metav1.ConditionFalse, podStatus: corev1.ConditionTrue,
+			wantStatus: metav1.ConditionTrue,
+		},
+		{
+			name:           "zero timestamp on transition to not ready",
+			previousStatus: metav1.ConditionTrue, podStatus: corev1.ConditionFalse,
+			wantStatus: metav1.ConditionFalse, wantMessage: "pod not ready",
+		},
+		{
+			name:           "nonzero timestamp on transition to ready is preserved",
+			previousStatus: metav1.ConditionFalse, podStatus: corev1.ConditionTrue,
+			podTransitionTime: podTime, wantStatus: metav1.ConditionTrue, wantTime: podTime,
+		},
+		{
+			name:           "nonzero timestamp on transition to not ready is preserved",
+			previousStatus: metav1.ConditionTrue, podStatus: corev1.ConditionFalse,
+			podTransitionTime: podTime, wantStatus: metav1.ConditionFalse,
+			wantMessage: "pod not ready", wantTime: podTime,
+		},
+		{
+			name:      "new ready condition with zero pod timestamp",
+			podStatus: corev1.ConditionTrue, wantStatus: metav1.ConditionTrue,
+		},
+		{
+			name:      "new ready condition with nonzero pod timestamp",
+			podStatus: corev1.ConditionTrue, podTransitionTime: podTime,
+			wantStatus: metav1.ConditionTrue, wantTime: podTime,
+		},
+		{
+			name:      "new not ready condition with zero pod timestamp",
+			podStatus: corev1.ConditionFalse, wantStatus: metav1.ConditionFalse,
+		},
+		{
+			name:           "unchanged ready status retains original timestamp",
+			previousStatus: metav1.ConditionTrue, podStatus: corev1.ConditionTrue,
+			wantStatus: metav1.ConditionTrue, wantMessage: "previous message", wantTime: previousTime,
+		},
+		{
+			name:           "unchanged not ready status retains original timestamp",
+			previousStatus: metav1.ConditionFalse, podStatus: corev1.ConditionFalse,
+			wantStatus: metav1.ConditionFalse, wantMessage: "previous message", wantTime: previousTime,
+		},
+		{
+			name:           "normalizer transition uses reconciliation time",
+			previousStatus: metav1.ConditionTrue, podStatus: corev1.ConditionTrue,
+			podTransitionTime: podTime, normalizerFailure: true,
+			wantStatus: metav1.ConditionFalse, wantMessage: "startup failure",
+		},
+		{
+			name:           "normalizer overrides transition to ready with zero timestamp",
+			previousStatus: metav1.ConditionFalse, podStatus: corev1.ConditionTrue,
+			normalizerFailure: true, wantStatus: metav1.ConditionFalse, wantMessage: "startup failure",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{{
+					Type: corev1.PodReady, Status: tt.podStatus,
+					LastTransitionTime: tt.podTransitionTime, Message: "pod not ready",
+				}},
+			}}
+			status := &agentsv1alpha1.SandboxStatus{}
+			if tt.previousStatus != "" {
+				status.Conditions = []metav1.Condition{{
+					Type: string(agentsv1alpha1.SandboxConditionReady), Status: tt.previousStatus,
+					LastTransitionTime: previousTime, Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+					Message: "previous message",
+				}}
+			}
+			var normalize func(*corev1.Pod) (string, string, bool)
+			wantReason := agentsv1alpha1.SandboxReadyReasonPodReady
+			if tt.normalizerFailure {
+				wantReason = agentsv1alpha1.SandboxReadyReasonStartContainerFailed
+				normalize = func(*corev1.Pod) (string, string, bool) {
+					return agentsv1alpha1.SandboxReadyReasonStartContainerFailed, "startup failure", true
+				}
+			}
+
+			before := time.Now()
+			defaultSyncStatusFromPod(pod, status, true, normalize)
+			after := time.Now()
+
+			condition := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady))
+			require.NotNil(t, condition)
+			assert.Equal(t, tt.wantStatus, condition.Status)
+			assert.Equal(t, wantReason, condition.Reason)
+			assert.Equal(t, tt.wantMessage, condition.Message)
+			if !tt.wantTime.IsZero() {
+				assert.Equal(t, tt.wantTime, condition.LastTransitionTime)
+			} else {
+				require.False(t, condition.LastTransitionTime.IsZero(), "Ready transition timestamp must not be zero")
+				assert.False(t, condition.LastTransitionTime.Time.Before(before), "fallback timestamp must be from this reconciliation")
+				assert.False(t, condition.LastTransitionTime.Time.After(after), "fallback timestamp must not be in the future")
+			}
+		})
+	}
+}
+
 func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)

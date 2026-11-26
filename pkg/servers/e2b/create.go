@@ -28,7 +28,7 @@ import (
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/pausedretention"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -100,16 +100,33 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}
 	namespace := sc.getNamespaceOfUser(user)
 	log.Info("create sandbox request received", "request", request)
-	if sc.manager.GetInfra().HasTemplate(ctx, infra.HasTemplateOptions{
+	hasTemplate, err := sc.manager.HasTemplate(ctx, infra.HasTemplateOptions{
 		Namespace: namespace,
 		Name:      request.TemplateID,
-	}) {
+	})
+	if err != nil {
+		log.Error(err, "failed to check template existence", "templateID", request.TemplateID)
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to check template",
+		}
+	}
+	if hasTemplate {
 		log.Info("infra has template, will create sandbox with claim", "templateID", request.TemplateID)
 		return sc.createSandboxWithClaim(ctx, request, user, domain)
-	} else if sc.manager.GetInfra().HasCheckpoint(ctx, infra.HasCheckpointOptions{
+	}
+	hasCheckpoint, err := sc.manager.HasCheckpoint(ctx, infra.HasCheckpointOptions{
 		Namespace:    namespace,
 		CheckpointID: request.TemplateID,
-	}) {
+	})
+	if err != nil {
+		log.Error(err, "failed to check checkpoint existence", "templateID", request.TemplateID)
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to check checkpoint",
+		}
+	}
+	if hasCheckpoint {
 		log.Info("infra has checkpoint, will create sandbox with clone", "templateID", request.TemplateID)
 		return sc.createSandboxWithClone(ctx, request, user, domain)
 	}
@@ -128,7 +145,6 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	}
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
-	var accessToken string
 
 	// storageAuthAnnotation holds the annotation key-value pair built by the
 	// BuildStorageAuthAnnotation hook (populated later, captured by reference).
@@ -140,7 +156,8 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		User:              user.ID.String(),
 		ClaimTimeout:      resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		MemoryPersistence: request.AutoPauseMemory,
-		Modifier: func(sbx infra.Sandbox) error {
+		AccessToken:       config.NewDefaultAccessToken(),
+		Modifier: func(sbx claim.Handle) error {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 			sc.csiMountOptionsConfigRecord(ctx, sbx, request)
 			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
@@ -151,10 +168,9 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	}
 
 	if !request.Extensions.SkipInitRuntime {
-		accessToken = config.NewDefaultAccessToken()
 		infraOpts.InitRuntime = &config.InitRuntimeOptions{
 			EnvVars:     request.EnvVars,
-			AccessToken: accessToken,
+			AccessToken: infraOpts.AccessToken,
 		}
 	}
 
@@ -214,7 +230,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
-		Body: sc.convertToE2BSandbox(sbx, accessToken, domain),
+		Body: sc.convertToE2BSandbox(sbx, infraOpts.AccessToken, domain),
 	}, nil
 }
 
@@ -239,7 +255,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		CheckPointID:      request.TemplateID,
 		CloneTimeout:      resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		MemoryPersistence: request.AutoPauseMemory,
-		Modifier: func(sbx infra.Sandbox) error {
+		Modifier: func(sbx claim.Handle) error {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
 			return nil
@@ -396,7 +412,7 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 	return request, nil
 }
 
-func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
+func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx claim.Handle, request models.NewSandboxRequest) {
 	log := klog.FromContext(ctx)
 	// E2B-managed sandboxes persist paused-retention preference so later timeout
 	// writes and controller auto-pause use the same policy. never-timeout keeps
@@ -474,10 +490,10 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	// sandbox hash includes the labels, and the controller patches the pod metadata
 	// directly for metadata-only changes (no image/resources) without setting the
 	// InplaceUpdate condition.
-	claimengine.MergePodLabels(sbx, podLabels)
+	claim.MergePodLabels(sbx, podLabels)
 }
 
-func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
+func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx claim.Handle, request models.NewSandboxRequest) {
 	log := klog.FromContext(ctx)
 	// fetch the csi mount config from request
 	if len(request.Extensions.CSIMount.MountConfigs) == 0 {
@@ -525,7 +541,7 @@ func (sc *Controller) buildCSIMountOptions(ctx context.Context, request models.N
 
 // injectStorageAuthAnnotation injects the storage-auth annotation into the sandbox
 // when enterprise agent-identity credential metadata is available.
-func (sc *Controller) injectStorageAuthAnnotation(sbx infra.Sandbox, key, value string) {
+func (sc *Controller) injectStorageAuthAnnotation(sbx claim.Handle, key, value string) {
 	if key == "" || value == "" {
 		return
 	}

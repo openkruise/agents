@@ -37,9 +37,7 @@ import (
 //   - All fields are unexported; once constructed by a factory, callers can use
 //     Wait(timeout), and pre-acquired callers may use Release to abandon an
 //     unused task before Wait.
-//   - The caller ctx is captured at construction time because UpdateFunc[T] has
-//     no ctx parameter; passing a different ctx to Wait would leak across the
-//     Update closure.
+//   - Each read uses the lifetime of the active wait.
 type WaitTask[T client.Object] struct {
 	ctx       context.Context
 	waitHooks *sync.Map
@@ -49,8 +47,7 @@ type WaitTask[T client.Object] struct {
 	update    UpdateFunc[T]
 	check     CheckFunc[T]
 
-	entry       *WaitEntry[T]
-	releaseOnce sync.Once
+	entry *WaitEntry[T]
 
 	lifecycleMu sync.Mutex
 	started     bool
@@ -93,9 +90,7 @@ func NewAcquiredWaitTask[T client.Object](
 	check CheckFunc[T],
 ) (*WaitTask[T], error) {
 	task := NewWaitTask(ctx, waitHooks, action, object, update, check)
-	entry, err := AcquireEntry[T](waitHooks, task.key, action, func() *WaitEntry[T] {
-		return NewWaitEntry(ctx, action, check)
-	})
+	entry, err := AcquireEntry[T](waitHooks, task.key, action)
 	if err != nil {
 		return nil, err
 	}
@@ -105,9 +100,6 @@ func NewAcquiredWaitTask[T client.Object](
 
 // Action returns the underlying wait action (read-only accessor, used by tests).
 func (t *WaitTask[T]) Action() WaitAction { return t.action }
-
-// Object returns the subject object (read-only accessor, used by tests).
-func (t *WaitTask[T]) Object() T { return t.object }
 
 // Release abandons an unused pre-acquired task and releases its wait hook.
 // Release is idempotent, is a no-op for lazy tasks, and does not release a hook
@@ -123,13 +115,7 @@ func (t *WaitTask[T]) Release() {
 	}
 	t.released = true
 	t.lifecycleMu.Unlock()
-	t.releaseEntry()
-}
-
-func (t *WaitTask[T]) releaseEntry() {
-	t.releaseOnce.Do(func() {
-		ReleaseEntry[T](t.waitHooks, t.key, t.entry)
-	})
+	ReleaseEntry[T](t.waitHooks, t.key, t.entry)
 }
 
 // Wait blocks until the task's Check func reports satisfied, the task's captured
@@ -137,18 +123,39 @@ func (t *WaitTask[T]) releaseEntry() {
 // during Wait. Pre-acquired tasks are single-use, reuse their stored hook, and
 // release it when Wait returns.
 func (t *WaitTask[T]) Wait(timeout time.Duration) error {
-	if t.entry != nil {
+	_, err := t.WaitForObject(t.object, timeout)
+	return err
+}
+
+// WaitForObject returns the read-only snapshot that satisfied the checker.
+// Pass the post-write object to exclude observations from before the mutation.
+func (t *WaitTask[T]) WaitForObject(target T, timeout time.Duration) (T, error) {
+	var zero T
+	entry := t.entry
+	if entry != nil {
 		if !t.claimAcquiredWait() {
-			return fmt.Errorf("pre-acquired wait task already used or released")
+			return zero, fmt.Errorf("pre-acquired wait task already used or released")
 		}
-		defer t.releaseEntry()
-		return waitForAcquiredObjectSatisfied[T](
-			t.ctx, t.entry, t.object, t.update, t.check, timeout,
-		)
+		defer ReleaseEntry(t.waitHooks, t.key, entry)
 	}
-	return WaitForObjectSatisfied[T](
-		t.ctx, t.waitHooks, t.object, t.action, t.update, t.check, timeout,
-	)
+	if WaitHookKey(target) != t.key {
+		return zero, fmt.Errorf("wait target changed for %s", client.ObjectKeyFromObject(t.object))
+	}
+	if entry == nil {
+		satisfied, err := t.check(target)
+		if err != nil || satisfied {
+			return target, err
+		}
+		if timeout <= 0 {
+			return zero, &WaitNotSatisfiedError{Action: t.action, Object: client.ObjectKeyFromObject(target)}
+		}
+		entry, err = AcquireEntry[T](t.waitHooks, t.key, t.action)
+		if err != nil {
+			return zero, err
+		}
+		defer ReleaseEntry(t.waitHooks, t.key, entry)
+	}
+	return entry.wait(t.ctx, target, t.update, t.check, timeout)
 }
 
 func (t *WaitTask[T]) claimAcquiredWait() bool {

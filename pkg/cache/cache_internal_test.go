@@ -129,7 +129,8 @@ func TestPickSandboxSetWait(t *testing.T) {
 					require.ErrorIs(t, err, tt.wantErr)
 					require.Nil(t, got)
 				} else if tt.wantMiss {
-					require.EqualError(t, err, "sandboxset template not found in cache")
+					require.ErrorIs(t, err, ErrSandboxSetNotFound)
+					require.EqualError(t, err, "sandboxset not found in cache: template")
 					require.Nil(t, got)
 				} else {
 					require.NoError(t, err)

@@ -34,6 +34,7 @@ const (
 	IndexNameForOwnerRefUID           = "ownerRefUID"
 	IndexNameForCheckpointSandboxName = "checkpointSandboxName"
 	IndexNameForSandboxSetTemplateRef = "sandboxSetTemplateRef"
+	IndexNameForTemplateName          = "templateName"
 )
 
 var (
@@ -74,6 +75,20 @@ var SandboxSetTemplateRefIndexFunc = func(obj client.Object) []string {
 	return []string{sbs.Spec.TemplateRef.Name}
 }
 
+// TemplateNameIndexFunc indexes SandboxTemplates by the template-name label
+// that marks Build Versions, so callers can list the Versions of one template
+// name through the cache instead of scanning it.
+var TemplateNameIndexFunc = func(obj client.Object) []string {
+	template, ok := obj.(*agentsv1alpha1.SandboxTemplate)
+	if !ok {
+		return nil
+	}
+	if name, ok := template.Labels[agentsv1alpha1.LabelTemplateName]; ok && name != "" {
+		return []string{name}
+	}
+	return nil
+}
+
 var commitUIDIndexFunc = func(obj client.Object) []string {
 	if uid, ok := obj.GetLabels()[commitutil.LabelCommitUID]; ok {
 		return []string{uid}
@@ -90,6 +105,10 @@ func RegisterFieldIndexes(c cache.Cache) error {
 		}
 		// sandboxtemplate ownerReference
 		if err = c.IndexField(context.TODO(), &agentsv1alpha1.SandboxTemplate{}, IndexNameForOwnerRefUID, OwnerIndexFunc); err != nil {
+			return
+		}
+		// sandboxtemplate template-name label (Build Version grouping)
+		if err = c.IndexField(context.TODO(), &agentsv1alpha1.SandboxTemplate{}, IndexNameForTemplateName, TemplateNameIndexFunc); err != nil {
 			return
 		}
 		// checkpoint ownerReference

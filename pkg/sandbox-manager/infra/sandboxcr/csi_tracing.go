@@ -20,32 +20,14 @@ import (
 	"context"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/tracing"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/runtime/config"
 )
 
-// traceCSIMounts wraps runtime.ProcessCSIMounts in a manager child span that
-// records the volume count and driver list, returning the mount duration and
-// error so each caller (claim, clone) keeps its own metrics reporting and
-// error wrapping. rtOpts is forwarded to the runtime transport so a
-// TLS-capable sandbox mounts its volumes over HTTPS; empty keeps plaintext.
+// traceCSIMounts forwards to the neutral engine's tracing wrapper so the clone
+// path reports the same span and attributes as the claim path.
 func traceCSIMounts(ctx context.Context, sbx *v1alpha1.Sandbox, opts config.CSIMountOptions, rtOpts ...runtime.Option) (time.Duration, error) {
-	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraProcessCSIMounts)
-	// Project the mount configs onto the driver-name list accepted by
-	// attribute.StringSlice (which copies the slice internally).
-	drivers := make([]string, len(opts.MountOptionList))
-	for i, m := range opts.MountOptionList {
-		drivers[i] = m.Driver
-	}
-	span.SetAttributes(
-		attribute.Int(tracing.AttrCSIVolumeCount, len(opts.MountOptionList)),
-		attribute.StringSlice(tracing.AttrCSIDrivers, drivers),
-	)
-	duration, err := runtime.ProcessCSIMounts(ctx, sbx, opts, rtOpts...)
-	tracing.EndSpan(ctx, span, err)
-	return duration, err
+	return claim.TraceCSIMounts(ctx, sbx, opts, rtOpts...)
 }

@@ -844,7 +844,7 @@ Hard-coded `activeProbe` and `cronProbe` fields with probe semantics embedded in
 `AutoPauseController` defaults to `true`, but the feature only touches Sandboxes that set `Spec.Probes` — a field no existing Sandbox has — so upgrading the agent-sandbox-controller image alone changes nothing for current workloads. `KruiseIntegration` defaults to `false`, so real-node probe delivery stays off until the operator opts in and declares the OpenKruise dependency. Both are controller-side flags, not Sandbox edits:
 
 ```yaml
-# config/manager: agent-sandbox-controller container args
+# config/sandbox-controller: agent-sandbox-controller container args
 args:
   # KruiseIntegration is only needed when sandboxes land on real nodes;
   # virtual-kubelet-only clusters leave it off and do not need OpenKruise.

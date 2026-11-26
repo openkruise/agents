@@ -30,10 +30,10 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/utils"
 )
@@ -59,17 +59,6 @@ const (
 // This catches mismatches like implementing Destroy() (Config interface) instead of
 // OnDestroy(DestroyReason) (StreamFilter interface).
 var _ api.StreamFilter = (*sandboxFilter)(nil)
-
-// FilterFactory creates a new sandbox filter instance for each stream.
-func FilterFactory(c interface{}, callbacks api.FilterCallbackHandler) api.StreamFilter {
-	cfg := c.(*FilterConfig)
-	return &sandboxFilter{
-		callbacks:      callbacks,
-		config:         cfg.Config,
-		adapter:        cfg.Adapter,
-		jwtAuthManager: cfg.jwtAuthManager,
-	}
-}
 
 type sandboxFilter struct {
 	api.PassThroughStreamFilter
@@ -149,9 +138,9 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		return status
 	}
 
-	if route.State != agentsv1alpha1.SandboxStateRunning {
+	if !route.CanRouteTraffic() {
 		waker := wake.GetWaker()
-		if f.shouldWakeSandbox(route, waker) {
+		if f.shouldWakeSandbox(route, waker, header) {
 			// Apply extra headers before returning Running so they
 			// are visible to subsequent filter phases.
 			for k, v := range extraHeaders {
@@ -172,7 +161,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 			return api.Running
 		}
 		// Not running and not wakeable -> 502 (existing behavior)
-		log.Warn("Sandbox is not running", zap.String("state", route.State))
+		log.Warn("Sandbox is not ready for traffic", zap.String("state", route.State))
 		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
 			502,
 			"healthy sandbox not found: "+sandboxID,
@@ -232,11 +221,8 @@ func (f *sandboxFilter) authenticate(header api.RequestHeaderMap, route sandboxr
 	if !f.config.EnableAuth {
 		return api.Continue
 	}
-	if route.AccessToken == "" {
-		return api.Continue
-	}
 	requestToken, _ := header.Get(accessTokenHeader)
-	if subtle.ConstantTimeCompare([]byte(requestToken), []byte(route.AccessToken)) == 1 {
+	if route.AccessToken != "" && subtle.ConstantTimeCompare([]byte(requestToken), []byte(route.AccessToken)) == 1 {
 		return api.Continue
 	}
 	logger.Warn("Access token mismatch", zap.String("sandboxID", route.ID))
@@ -303,12 +289,13 @@ func (f *sandboxFilter) verifierUnavailable(sandboxID string) api.StatusType {
 // by traffic. Returns true only when wake-on-traffic is enabled, the sandbox
 // is Paused, the waker is initialized, the route carries a full ObjectKey,
 // the informer still holds a sandbox with the route's UID (stale-route
-// fence), and either the route registry already has WakeOnTraffic set or
+// fence), either the route registry already has WakeOnTraffic set or
 // WakeEnabled reads the spec directly from the informer cache (covering the
 // window between a spec patch and the gateway controller reconciling the
-// change into the route registry).
-func (f *sandboxFilter) shouldWakeSandbox(route sandboxroute.Route, waker *wake.Waker) bool {
-	if route.State != agentsv1alpha1.SandboxStatePaused {
+// change into the route registry), and the request satisfies the rule's
+// request matchers.
+func (f *sandboxFilter) shouldWakeSandbox(route sandboxroute.Route, waker *wake.Waker, header api.RequestHeaderMap) bool {
+	if route.State != sandboxstate.Paused {
 		return false
 	}
 	if !f.config.EnableWakeOnTraffic {
@@ -335,13 +322,20 @@ func (f *sandboxFilter) shouldWakeSandbox(route sandboxroute.Route, waker *wake.
 		return false
 	}
 	// route.WakeOnTraffic is the primary check (fast, from registry).
-	if route.WakeOnTraffic {
-		return true
-	}
 	// WakeEnabled is a fallback that reads the informer cache directly,
 	// covering the window between a spec patch and the gateway controller
 	// reconciling the change into the route registry.
-	return waker.WakeEnabled(context.Background(), key.Namespace, key.Name)
+	if !route.WakeOnTraffic && !waker.WakeEnabled(context.Background(), key.Namespace, key.Name) {
+		return false
+	}
+	// Request matchers are not projected into the route registry, so they
+	// are always read from the informer cache.
+	if !waker.RequestMatches(context.Background(), key.Namespace, key.Name, header.Values) {
+		logger.Debug("Request does not match wake rule, not waking sandbox",
+			zap.String("sandboxID", route.ID))
+		return false
+	}
+	return true
 }
 
 // wakeAndContinue runs the wake operation asynchronously. On success it sets
@@ -380,10 +374,10 @@ func (f *sandboxFilter) wakeAndContinue(
 		return
 	}
 
-	// Wake succeeded — verify the sandbox is now Running in the registry.
+	// Wake succeeded — verify the sandbox can receive traffic.
 	route, ok := registry.GetRegistry().Get(sandboxID)
-	if !ok || route.State != agentsv1alpha1.SandboxStateRunning {
-		log.Warn("Sandbox not running after wake")
+	if !ok || !route.CanRouteTraffic() {
+		log.Warn("Sandbox not ready for traffic after wake")
 		f.sendLocalReplyOnce(502, "healthy sandbox not found: "+sandboxID, "sandbox_not_running")
 		return
 	}

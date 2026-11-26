@@ -208,13 +208,23 @@ func isolateClaimMetrics(t *testing.T) {
 	deprecatedResponseMetricsEnabled.Store(false)
 }
 
+type resultCounterLabels struct {
+	namespace string
+	result    string
+}
+
 func resultCounterSum(t *testing.T, collector prometheus.Collector, namespace, result string) float64 {
+	t.Helper()
+	return resultCounterSums(t, collector)[resultCounterLabels{namespace: namespace, result: result}]
+}
+
+func resultCounterSums(t *testing.T, collector prometheus.Collector) map[resultCounterLabels]float64 {
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collector)
 	families, err := reg.Gather()
 	require.NoError(t, err)
-	var sum float64
+	sums := make(map[resultCounterLabels]float64)
 	for _, family := range families {
 		for _, metric := range family.Metric {
 			var ns, outcome string
@@ -226,12 +236,12 @@ func resultCounterSum(t *testing.T, collector prometheus.Collector, namespace, r
 					outcome = label.GetValue()
 				}
 			}
-			if ns == namespace && outcome == result {
-				sum += metric.GetCounter().GetValue()
+			if value := metric.GetCounter().GetValue(); value != 0 {
+				sums[resultCounterLabels{namespace: ns, result: outcome}] += value
 			}
 		}
 	}
-	return sum
+	return sums
 }
 
 func TestRecordSandboxCreations(t *testing.T) {

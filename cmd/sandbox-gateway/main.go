@@ -36,6 +36,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	peerserver "github.com/openkruise/agents/pkg/sandbox-gateway/server"
+	serving "github.com/openkruise/agents/pkg/sandbox-gateway/sessionservice"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 )
 
@@ -43,11 +44,16 @@ func init() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 
 	jwtAuthManager := jwtauth.NewManager()
+	// SessionService routing and its dedicated watch are opt-in per process.
+	var servingService *serving.Service
+	if os.Getenv("ENABLE_SESSION_SERVICE") == "true" {
+		servingService = serving.NewService()
+	}
 
 	envoyhttp.RegisterHttpFilterFactoryAndConfigParser(
 		"sandbox-gateway",
 		filter.FilterFactory,
-		filter.NewConfigParser(jwtAuthManager),
+		filter.NewConfigParser(jwtAuthManager, servingService),
 	)
 	routeRegistry := registry.GetRegistry()
 
@@ -55,6 +61,8 @@ func init() {
 		if err := controller.StartManager(context.Background(), controller.ManagerOptions{
 			Registry:       routeRegistry,
 			JWTAuthManager: jwtAuthManager,
+
+			SessionServiceService: servingService,
 		}); err != nil {
 			api.LogErrorf("sandbox controller manager exited with error: %v", err)
 			os.Exit(1)

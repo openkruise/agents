@@ -271,6 +271,9 @@ func defaultSyncStatusFromPod(
 	if pCond != nil && string(pCond.Status) != string(cond.Status) {
 		cond.Status = metav1.ConditionStatus(pCond.Status)
 		cond.LastTransitionTime = pCond.LastTransitionTime
+		if cond.LastTransitionTime.IsZero() {
+			cond.LastTransitionTime = metav1.Now()
+		}
 		if cond.Status == metav1.ConditionTrue {
 			// Flipping to Ready clears any prior failure classification.
 			cond.Reason = agentsv1alpha1.SandboxReadyReasonPodReady

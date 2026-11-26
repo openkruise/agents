@@ -32,13 +32,13 @@ import (
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 // CreateVolume creates a new PersistentVolumeClaim for the user
 func (i *Infra) CreateVolume(ctx context.Context, opts infra.CreateVolumeOptions) (*infra.VolumeInfo, error) {
 	log := klog.FromContext(ctx)
-	log.V(utils.DebugLogLevel).Info("create volume options", "options", opts)
+	log.V(logs.DebugLogLevel).Info("create volume options", "options", opts)
 
 	// Create PVC
 	pvc := &corev1.PersistentVolumeClaim{
@@ -96,8 +96,9 @@ func (i *Infra) CreateVolume(ctx context.Context, opts infra.CreateVolumeOptions
 	task := i.Cache.NewPVCTask(ctx, pvc)
 	if err := task.Wait(opts.WaitBoundTimeout); err != nil {
 		log.Error(err, "Failed to wait for PVC", "name", opts.Name, "namespace", opts.Namespace)
-		if errors.Is(err, cacheutils.ErrWaitNotSatisfied) {
-			return nil, fmt.Errorf("PVC %s/%s binding timed out after %v: %w", opts.Namespace, opts.Name, opts.WaitBoundTimeout, err)
+		var waitErr *cacheutils.WaitNotSatisfiedError
+		if errors.As(err, &waitErr) {
+			return nil, managererrors.WrapError(managererrors.ErrorInternal, err, "volume %s/%s was not bound within %s. Check its binding status before retrying", opts.Namespace, opts.Name, waitErr.Timeout)
 		}
 		return nil, fmt.Errorf("failed to wait for PVC %s/%s: %w", opts.Namespace, opts.Name, err)
 	}
@@ -120,7 +121,7 @@ func (i *Infra) CreateVolume(ctx context.Context, opts infra.CreateVolumeOptions
 // ListVolumes lists all volumes for a user in a namespace
 func (i *Infra) ListVolumes(ctx context.Context, opts infra.ListVolumesOptions) ([]*infra.VolumeInfo, error) {
 	log := klog.FromContext(ctx)
-	log.V(utils.DebugLogLevel).Info("list volumes", "userId", opts.UserID, "namespace", opts.Namespace)
+	log.V(logs.DebugLogLevel).Info("list volumes", "userId", opts.UserID, "namespace", opts.Namespace)
 
 	// List PVCs using User index for efficient filtering
 	pvcList := &corev1.PersistentVolumeClaimList{}
@@ -147,7 +148,7 @@ func (i *Infra) ListVolumes(ctx context.Context, opts infra.ListVolumesOptions) 
 // GetVolume retrieves a volume by volumeID (PV Name)
 func (i *Infra) GetVolume(ctx context.Context, opts infra.GetVolumeOptions) (*infra.VolumeInfo, error) {
 	log := klog.FromContext(ctx)
-	log.V(utils.DebugLogLevel).Info("get volume", "volumeID", opts.VolumeID, "namespace", opts.Namespace, "userId", opts.UserID)
+	log.V(logs.DebugLogLevel).Info("get volume", "volumeID", opts.VolumeID, "namespace", opts.Namespace, "userId", opts.UserID)
 
 	// Find PVC by VolumeName (PV Name) using index
 	pvcList := &corev1.PersistentVolumeClaimList{}
@@ -176,7 +177,7 @@ func (i *Infra) GetVolume(ctx context.Context, opts infra.GetVolumeOptions) (*in
 // DeleteVolume deletes a volume by volumeID (PV Name)
 func (i *Infra) DeleteVolume(ctx context.Context, opts infra.DeleteVolumeOptions) error {
 	log := klog.FromContext(ctx)
-	log.V(utils.DebugLogLevel).Info("delete volume", "volumeID", opts.VolumeID, "namespace", opts.Namespace, "userId", opts.UserID)
+	log.V(logs.DebugLogLevel).Info("delete volume", "volumeID", opts.VolumeID, "namespace", opts.Namespace, "userId", opts.UserID)
 
 	// Find PVC by VolumeName (PV Name) using index
 	pvcList := &corev1.PersistentVolumeClaimList{}

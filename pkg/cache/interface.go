@@ -42,6 +42,7 @@ type Provider interface {
 
 	GetCheckpoint(ctx context.Context, opts GetCheckpointOptions) (*agentsv1alpha1.Checkpoint, error)
 
+	// PickSandboxSet returns an error wrapping ErrSandboxSetNotFound for a definitive miss.
 	PickSandboxSet(ctx context.Context, opts PickSandboxSetOptions) (*agentsv1alpha1.SandboxSet, error)
 
 	ListSandboxSets(ctx context.Context, opts ListSandboxSetsOptions) ([]*agentsv1alpha1.SandboxSet, error)
@@ -51,7 +52,7 @@ type Provider interface {
 	// Ownership is determined by the AnnotationOwner annotation on the Sandbox resource when User is set.
 	ListSandboxes(ctx context.Context, opts ListSandboxesOptions) ([]*agentsv1alpha1.Sandbox, error)
 
-	// CountActiveSandboxes counts active (non-dead and not reserved-failed) sandboxes
+	// CountActiveSandboxes counts active (creating, available, running or paused, and not reserved-failed) sandboxes
 	// filtered by namespace and optional owner. Faster than ListSandboxes when only the count is needed.
 	CountActiveSandboxes(ctx context.Context, opts ListSandboxesOptions) (int32, error)
 

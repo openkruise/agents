@@ -75,8 +75,16 @@ func deleting[T client.Object](obj T) T {
 	return obj
 }
 
+// fakeClientBuilder starts a ClientBuilder with IndexFieldAgentIdentityRef
+// already registered, the same index SetupFieldIndex registers on a real
+// cache, so every test's reader matches what Authorize actually depends on.
+func fakeClientBuilder() *fake.ClientBuilder {
+	return fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&securityv1alpha1.AgentRoleBinding{}, IndexFieldAgentIdentityRef, agentIdentityRefIndexFunc)
+}
+
 func authorizerFor(objs ...client.Object) *Authorizer {
-	return New(fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build())
+	return New(fakeClientBuilder().WithObjects(objs...).Build())
 }
 
 func exchangeRequest(identity, resource string) Request {
@@ -403,7 +411,7 @@ func TestAuthorizeSurfacesReadFailures(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := fake.NewClientBuilder().WithScheme(scheme).
+			c := fakeClientBuilder().
 				WithObjects(
 					role("r", rule(securityv1alpha1.ActionExchangePrincipalToken, "*")),
 					binding("b", "r", "sample-agent"),
@@ -467,7 +475,7 @@ func TestDecisionString(t *testing.T) {
 // once per binding.
 func TestAuthorizeReadsADuplicatedRoleOnce(t *testing.T) {
 	var roleGets int
-	c := fake.NewClientBuilder().WithScheme(scheme).
+	c := fakeClientBuilder().
 		WithObjects(
 			role("r", rule(securityv1alpha1.ActionGetResourceOAuth2Token, "CredentialProvider/gitlab")),
 			binding("b1", "r", "sample-agent"),

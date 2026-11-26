@@ -18,15 +18,15 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
 type WaitAction string
@@ -39,17 +39,15 @@ const (
 	WaitActionPVCBind    WaitAction = "PVCBind"
 )
 
-// defaultWaitPollInterval is the interval for the ticker-based polling fallback.
-// When the event-driven WaitReconciler fails to close the wait entry (due to
-// transient errors, controller backoff, or queue delays), the polling ticker
-// provides an independent second path that periodically re-checks whether the
-// condition is satisfied. Both the ticker and the reconciler read from the same
-// informer cache, so the ticker cannot on its own overcome informer staleness
-// caused by watch connection loss before a re-list completes.
+// Polling covers missed informer notifications. Reads still use the informer
+// cache unless the object is missing, so a stale cached object stays stale
+// until the informer catches up.
 var defaultWaitPollInterval = 10 * time.Second
 
+// CheckFunc must be fast and non-blocking: the reconciler calls it while
+// holding the entry lock shared by all waiters on the object.
 type CheckFunc[T client.Object] func(obj T) (bool, error)
-type UpdateFunc[T client.Object] func(obj T) (T, error)
+type UpdateFunc[T client.Object] func(ctx context.Context, obj T) (T, error)
 
 // WaitHookKey generates a unique key for wait hooks by combining object type with namespace/name.
 // This prevents key collisions when different resource types (e.g., Sandbox and Checkpoint)
@@ -68,37 +66,18 @@ func WaitHookKeyFromRequest[T client.Object](req ctrl.Request) string {
 type WaitEntry[T client.Object] struct {
 	Action WaitAction
 
-	ctx       context.Context
-	done      chan struct{}
-	checker   CheckFunc[T]
-	closeOnce sync.Once
-
-	mu   sync.Mutex
-	refs int
-}
-
-func NewWaitEntry[T client.Object](ctx context.Context, action WaitAction, checker CheckFunc[T]) *WaitEntry[T] {
-	return &WaitEntry[T]{
-		ctx:     ctx,
-		Action:  action,
-		checker: checker,
-		done:    make(chan struct{}),
-	}
+	mu      sync.Mutex
+	refs    int
+	waiters map[*objectWaiter[T]]struct{}
 }
 
 // AcquireEntry increments the entry refcount only after confirming that the
 // map still points at that entry while holding entry.mu. Together with
 // ReleaseEntry holding the same lock across refs-- and CompareAndDelete, this
 // prevents a waiter from acquiring an orphan entry that was just removed.
-//
-// A same-action late joiner may still acquire an entry whose done channel has
-// already been closed but has not yet been released from the map. That is
-// intentional for the current wait flow: Close is triggered from the same
-// informer/cache object that later post-acquire and double-check reads use, so
-// the late joiner should observe the satisfied state immediately and return.
-func AcquireEntry[T client.Object](waitHooks *sync.Map, key string, action WaitAction, newEntry func() *WaitEntry[T]) (*WaitEntry[T], error) {
+func AcquireEntry[T client.Object](waitHooks *sync.Map, key string, action WaitAction) (*WaitEntry[T], error) {
 	for {
-		value, _ := waitHooks.LoadOrStore(key, newEntry())
+		value, _ := waitHooks.LoadOrStore(key, &WaitEntry[T]{Action: action})
 		entry := value.(*WaitEntry[T])
 
 		entry.mu.Lock()
@@ -132,130 +111,113 @@ func ReleaseEntry[T client.Object](waitHooks *sync.Map, key string, entry *WaitE
 	}
 }
 
-func (e *WaitEntry[T]) Close() {
-	e.closeOnce.Do(func() {
-		close(e.done)
-	})
+// Observe delivers this exact informer snapshot to every active waiter.
+// A pre-acquired task starts listening only after its caller has written the spec.
+func (e *WaitEntry[T]) Observe(obj T) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for w := range e.waiters {
+		w.observe(obj, nil)
+	}
 }
 
-func (e *WaitEntry[T]) Done() <-chan struct{} {
-	return e.done
-}
-
-func (e *WaitEntry[T]) Context() context.Context {
-	return e.ctx
-}
-
-func (e *WaitEntry[T]) Check(obj T) (bool, error) {
-	return e.checker(obj)
-}
-
-func WaitForObjectSatisfied[T client.Object](ctx context.Context, waitHooks *sync.Map, obj T, action WaitAction,
-	update UpdateFunc[T], satisfiedFunc CheckFunc[T], timeout time.Duration) error {
-	key := WaitHookKey(obj)
-	objKey := client.ObjectKeyFromObject(obj)
-	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("waitHookKey", key, "object", objKey)
-	satisfied, err := satisfiedFunc(obj)
-	if satisfied || err != nil {
-		log.Info("no need to wait for satisfied", "satisfied", satisfied, "error", err)
-		return err
-	}
-	if timeout <= 0 {
-		log.Info("waiting is skipped due to zero timeout")
-		return &WaitNotSatisfiedError{Object: objKey, Action: action}
-	}
-	entry, err := AcquireEntry[T](waitHooks, key, action, func() *WaitEntry[T] {
-		return NewWaitEntry(ctx, action, satisfiedFunc)
-	})
-	if err != nil {
-		log.Error(err, "wait hook conflict", "new", action)
-		return err
-	}
-	log.Info("wait hook acquired", "action", action)
-	defer func() {
-		ReleaseEntry[T](waitHooks, key, entry)
-		log.Info("wait hook released")
-	}()
-
-	return waitForAcquiredObjectSatisfied(ctx, entry, obj, update, satisfiedFunc, timeout)
-}
-
-func waitForAcquiredObjectSatisfied[T client.Object](ctx context.Context, entry *WaitEntry[T], obj T,
-	update UpdateFunc[T], satisfiedFunc CheckFunc[T], timeout time.Duration) error {
-	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("object", client.ObjectKeyFromObject(obj))
-	satisfied, err := CheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
-	if satisfied || err != nil {
-		log.Info("post-acquire satisfaction check completed", "satisfied", satisfied, "error", err)
-		return err
-	}
-	if timeout <= 0 {
-		log.Info("waiting is skipped due to zero timeout")
-		return fmt.Errorf("object is not satisfied")
-	}
-
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	// Polling ticker serves as an independent fallback for the event-driven path
-	// (entry.Done). It guards against scenarios where the WaitReconciler fails to
-	// call entry.Close() — for example, when the reconciler encounters a transient
-	// Get error, is delayed by controller-runtime backoff, or the checkWaitHooks
-	// logic does not fire. The ticker runs on a fixed interval independent of the
-	// controller-runtime event queue.
-	//
-	// Note: the ticker reads from the same informer cache as the reconciler via
-	// the update function, so it does not bypass informer staleness caused by
-	// watch event loss. In those cases recovery still depends on the informer
-	// re-listing on its own.
-	ticker := time.NewTicker(defaultWaitPollInterval)
-	defer ticker.Stop()
-
-	for {
+// RequestRead asks each waiter to confirm an informer miss through its own reader.
+func (e *WaitEntry[T]) RequestRead() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for w := range e.waiters {
 		select {
-		case <-entry.Done():
-			log.Info("satisfied signal received")
-			return DoubleCheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
-		case <-ticker.C:
-			satisfied, err := CheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
-			if err != nil {
-				return err
-			}
-			if satisfied {
-				log.Info("object satisfied by polling check")
-				return nil
-			}
-		case <-waitCtx.Done():
-			log.Info("stop waiting for object satisfied: context canceled", "reason", waitCtx.Err())
-			return DoubleCheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
+		case w.read <- struct{}{}:
+		default:
 		}
 	}
 }
 
-func CheckObjectSatisfied[T client.Object](ctx context.Context, obj T, update UpdateFunc[T], satisfiedFunc CheckFunc[T]) (bool, error) {
-	log := klog.FromContext(ctx).WithValues("object", klog.KObj(obj))
-	updated, err := update(obj)
-	if err != nil {
-		log.Error(err, "failed to get object while checking satisfaction")
-		return false, err
-	}
-	satisfied, err := satisfiedFunc(updated)
-	if err != nil {
-		log.Error(err, "failed to check object satisfied")
-		return false, err
-	}
-	return satisfied, nil
+type objectWaiter[T client.Object] struct {
+	target T
+	check  CheckFunc[T]
+	ctx    context.Context
+	cancel context.CancelFunc
+	read   chan struct{}
+
+	// Protected by the entry mutex. Completion cancels an in-flight Get.
+	object    T
+	err       error
+	completed bool
 }
 
-func DoubleCheckObjectSatisfied[T client.Object](ctx context.Context, obj T, update UpdateFunc[T], satisfiedFunc CheckFunc[T]) error {
-	log := klog.FromContext(ctx).WithValues("object", klog.KObj(obj))
-	satisfied, err := CheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
-	if err != nil {
-		return err
+func (w *objectWaiter[T]) observe(obj T, err error) {
+	if w.completed || w.ctx.Err() != nil {
+		return
 	}
-	if !satisfied {
-		err = &WaitNotSatisfiedError{Object: client.ObjectKeyFromObject(obj), DuringDoubleCheck: true}
-		log.Error(err, "object not satisfied")
-		return err
+	if err == nil {
+		if !expectations.IsResourceVersionNewerOrEqual(w.target.GetResourceVersion(), obj.GetResourceVersion()) {
+			return
+		}
+		if uid := w.target.GetUID(); uid != "" && obj.GetUID() != uid {
+			err = fmt.Errorf("object %s UID changed while waiting: expected %s, got %s", client.ObjectKeyFromObject(w.target), uid, obj.GetUID())
+		} else {
+			var satisfied bool
+			satisfied, err = w.check(obj)
+			if !satisfied && err == nil {
+				return
+			}
+		}
 	}
-	return nil
+	if w.ctx.Err() == nil {
+		w.object, w.err, w.completed = obj, err, true
+		w.cancel()
+	}
+}
+
+func (e *WaitEntry[T]) wait(ctx context.Context, target T, update UpdateFunc[T], check CheckFunc[T], timeout time.Duration) (T, error) {
+	var zero T
+	start := time.Now()
+	timeoutErr := &WaitNotSatisfiedError{Action: e.Action, Object: client.ObjectKeyFromObject(target), Timeout: timeout}
+	// A non-positive timeout expires readCtx immediately, so the wait reports
+	// not-satisfied without reading.
+	readCtx, cancel := context.WithTimeoutCause(ctx, timeout, timeoutErr)
+	defer cancel()
+	w := &objectWaiter[T]{target: target, check: check, ctx: readCtx, cancel: cancel, read: make(chan struct{}, 1)}
+	e.mu.Lock()
+	if e.waiters == nil {
+		e.waiters = make(map[*objectWaiter[T]]struct{})
+	}
+	e.waiters[w] = struct{}{}
+	e.mu.Unlock()
+	ticker := time.NewTicker(defaultWaitPollInterval)
+	defer ticker.Stop()
+	for readCtx.Err() == nil {
+		obj, err := update(readCtx, target)
+		e.mu.Lock()
+		w.observe(obj, err)
+		e.mu.Unlock()
+		select {
+		case <-readCtx.Done():
+			// Normal exit: observe cancels readCtx once a snapshot completes the
+			// wait (satisfied or error). Timeouts and parent cancellation also land here.
+		case <-w.read:
+		case <-ticker.C:
+		}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.waiters, w)
+	if w.completed {
+		return w.object, w.err
+	}
+	cause := context.Cause(readCtx)
+	if cause == timeoutErr {
+		return zero, timeoutErr
+	}
+	// Preserve both the caller's cause and the standard context classification.
+	ctxErr := readCtx.Err()
+	if !errors.Is(cause, ctxErr) {
+		cause = fmt.Errorf("%w: %w", ctxErr, cause)
+	}
+	if ctxErr == context.Canceled {
+		return zero, cause
+	}
+	deadline, _ := readCtx.Deadline()
+	return zero, &WaitNotSatisfiedError{Action: e.Action, Object: timeoutErr.Object, Timeout: max(0, deadline.Sub(start)), cause: cause}
 }

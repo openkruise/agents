@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // #nosec -- intentional pprof endpoint for diagnostics
@@ -27,6 +28,7 @@ import (
 	"time"
 	_ "time/tzdata" // Embed timezone database for scratch-based container images
 
+	"github.com/google/uuid"
 	"github.com/spf13/pflag"
 	gozap "go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -53,10 +55,15 @@ import (
 	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxmetricsgc"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/peersecurity"
+	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
+	"github.com/openkruise/agents/pkg/utils/network"
 	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/webhookutils"
 	customwebhook "github.com/openkruise/agents/pkg/webhook"
@@ -68,6 +75,8 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+var defaultPeerSelector = "component=sandbox-manager"
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -92,6 +101,11 @@ func main() {
 	var clientBurst int
 	var defaultPersistentContents string
 	var runtimeClientCertDir string
+	var peerSelector string
+	var networkInterface string
+	var memberlistBindPort int
+	var peerKeySecret, peerTLSServerSecret, peerTLSClientSecret string
+	var peerSecurity peersecurity.Inputs
 
 	// New variables for pprof
 	var enablePprof bool
@@ -135,6 +149,14 @@ func main() {
 			"When set, the controller reaches TLS-capable agent-runtimes over HTTPS and advertises the runtime "+
 			"HTTPS capability on newly created sandboxes; empty disables both. Set it only after the sidecar "+
 			"injection template already serves HTTPS, since the capability annotation is write-once.")
+
+	flag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip; only used when SandboxRouteSync is enabled; non-positive values use the default.")
+	flag.StringVar(&peerSelector, "peer-selector", defaultPeerSelector, "Label selector of memberlist seed Pods in sandbox-system; only used when SandboxRouteSync is enabled; empty disables sync.")
+	flag.StringVar(&networkInterface, "network-interface", "eni1", "Network interface whose single global-unicast address (IPv4 preferred, IPv6 otherwise) binds and advertises controller memberlist; only used when SandboxRouteSync is enabled; empty uses POD_IP or the first non-loopback IPv4.")
+
+	flag.StringVar(&peerKeySecret, "peer-key-secret", "", "Existing 32-byte memberlist key Secret (namespace/name); only used when SandboxRouteSync is enabled.")
+	flag.StringVar(&peerTLSServerSecret, "peer-tls-server-secret", "", "Peer TLS server Secret (namespace/name), shared with sandbox-manager; only used when SandboxRouteSync is enabled.")
+	flag.StringVar(&peerTLSClientSecret, "peer-tls-client-secret", "", "Peer TLS client Secret (namespace/name), shared with sandbox-manager; only used when SandboxRouteSync is enabled.")
 
 	var metricsAsyncWorkers int
 	var metricsAsyncQueueCap int
@@ -182,6 +204,38 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "unable to start")
 		os.Exit(1)
+	}
+
+	peerSelector = strings.TrimSpace(peerSelector)
+	var bindAddress string
+	if utilfeature.DefaultFeatureGate.Enabled(features.SandboxRouteSyncGate) && peerSelector != "" {
+		if memberlistBindPort <= 0 {
+			memberlistBindPort = 7946
+		}
+		if memberlistBindPort > 65535 {
+			setupLog.Error(errors.New("port is outside the range 1-65535"), "invalid --memberlist-bind-port", "port", memberlistBindPort)
+			os.Exit(1)
+		}
+		if peerSecurity.PeerKeySecret, err = utils.ParseSecretRef(peerKeySecret); err != nil {
+			setupLog.Error(err, "invalid --peer-key-secret")
+			os.Exit(1)
+		}
+		if peerSecurity.TLSServerSecret, err = utils.ParseSecretRef(peerTLSServerSecret); err != nil {
+			setupLog.Error(err, "invalid --peer-tls-server-secret")
+			os.Exit(1)
+		}
+		if peerSecurity.TLSClientSecret, err = utils.ParseSecretRef(peerTLSClientSecret); err != nil {
+			setupLog.Error(err, "invalid --peer-tls-client-secret")
+			os.Exit(1)
+		}
+		if err = peerSecurity.Validate(); err != nil {
+			setupLog.Error(err, "invalid peer security flags")
+			os.Exit(1)
+		}
+		if bindAddress, err = network.ResolveNetworkInterfaceAddress(networkInterface); err != nil {
+			setupLog.Error(err, "invalid --network-interface", "interface", networkInterface)
+			os.Exit(1)
+		}
 	}
 
 	// Start pprof server if enabled
@@ -315,7 +369,9 @@ func main() {
 		setupLog.Info("Pod informer cache label selector disabled, all Pods will be cached")
 	}
 
+	shutdownTimeout := 30 * time.Second
 	mgr, err := ctrl.NewManager(config, ctrl.Options{
+		GracefulShutdownTimeout: &shutdownTimeout,
 		Scheme:                  scheme,
 		Metrics:                 metricsServerOptions,
 		WebhookServer:           webhookServer,
@@ -363,13 +419,46 @@ func main() {
 		setupLog.Info("runtime client TLS disabled, using legacy plaintext runtime paths")
 	}
 
+	ctx, cancelRun := context.WithCancel(ctrl.SetupSignalHandler())
+	defer cancelRun()
+	deps := controller.Deps{MetricsCleanup: metricsGC, RuntimeTLSBundle: runtimeTLSBundle}
+	var peerManager *peers.MemberlistPeers
+	var peerOutbound *refresh.PeerOutbound
+	if utilfeature.DefaultFeatureGate.Enabled(features.SandboxRouteSyncGate) && peerSelector != "" {
+		peerClient, err := ctrlclient.New(config, ctrlclient.Options{Scheme: mgr.GetScheme(), Mapper: mgr.GetRESTMapper()})
+		if err != nil {
+			setupLog.Error(err, "unable to create peer client")
+			os.Exit(1)
+		}
+		nodeName := os.Getenv("HOSTNAME")
+		if nodeName == "" {
+			nodeName = os.Getenv("POD_NAME")
+		}
+		if nodeName == "" {
+			nodeName = uuid.NewString()[:8]
+		}
+		peerManager = peers.NewMemberlistPeers(peerClient, peers.NodePrefixSandboxController+nodeName, utils.DefaultSandboxDeployNamespace, peerSelector)
+		loadCtx, cancel := context.WithTimeout(ctx, peersecurity.LoadTimeout)
+		secretKey, _, clientTLS, err := peersecurity.Load(loadCtx, peerClient, peerSecurity)
+		if err == nil {
+			err = loadCtx.Err()
+		}
+		cancel()
+		if err != nil {
+			setupLog.Error(err, "unable to load peer security")
+			os.Exit(1)
+		}
+		peerManager.SetSecretKey(secretKey)
+		peerOutbound = refresh.NewPeerOutbound(clientTLS)
+		deps.SyncRouteWithPeers = func(ctx context.Context, route sandboxroute.Route) error {
+			return refresh.SyncRouteWithPeers(ctx, peerManager, route, peerOutbound)
+		}
+	}
 	setupLog.Info("setup controllers",
 		"metricsAsyncWorkers", metricsAsyncWorkers,
-		"metricsAsyncQueueCap", metricsAsyncQueueCap)
-	if err = controller.SetupWithManager(mgr, controller.Deps{
-		MetricsCleanup:   metricsGC,
-		RuntimeTLSBundle: runtimeTLSBundle,
-	}); err != nil {
+		"metricsAsyncQueueCap", metricsAsyncQueueCap,
+		"routeSyncEnabled", peerManager != nil)
+	if err = controller.SetupWithManager(mgr, deps); err != nil {
 		setupLog.Error(err, "unable to setup controllers")
 		os.Exit(1)
 	}
@@ -404,8 +493,36 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The shared Start launches discovery in the background on every replica, independently of leader election.
+	var peerStopDone chan error
+	if peerManager != nil {
+		if err := peerManager.Start(ctx, bindAddress, memberlistBindPort); err != nil {
+			peerOutbound.CloseIdleConnections()
+			setupLog.Error(err, "unable to start controller peers")
+			os.Exit(1)
+		}
+		peerStopDone = make(chan error, 1)
+		// Start waiting from the same stop signal so join and cleanup get the full manager shutdown budget,
+		// instead of restarting the clock after mgr.Start returns or ending early on a separate 15-second limit.
+		context.AfterFunc(ctx, func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			peerStopDone <- peerManager.Stop(stopCtx)
+		})
+	}
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	err = mgr.Start(ctx)
+	// Manager startup failure also cancels peers; Stop is still called only once, by the callback above.
+	cancelRun()
+	if peerStopDone != nil {
+		stopErr := <-peerStopDone
+		peerOutbound.CloseIdleConnections()
+		if stopErr != nil {
+			setupLog.Error(stopErr, "unable to stop controller peers")
+			err = errors.Join(err, stopErr)
+		}
+	}
+	if err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}

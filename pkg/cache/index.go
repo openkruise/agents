@@ -19,8 +19,6 @@ package cache
 import (
 	"context"
 
-	"github.com/openkruise/agents/pkg/sandboxid"
-	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog/v2"
@@ -29,6 +27,9 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
+	"github.com/openkruise/agents/pkg/sandboxid"
+	"github.com/openkruise/agents/pkg/sandboxstate"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 // Index name constants
@@ -74,8 +75,8 @@ func GetIndexFuncs() []IndexFunc {
 					return nil
 				}
 				state, _ := utils.GetSandboxState(sbx)
-				if state == agentsv1alpha1.SandboxStateAvailable ||
-					(state == agentsv1alpha1.SandboxStateCreating && utils.IsControlledBySandboxSet(sbx)) {
+				if state == sandboxstate.Available ||
+					(state == sandboxstate.Creating && utils.IsControlledBySandboxSet(sbx)) {
 					tmpl := utils.GetTemplateFromSandbox(sbx)
 					if tmpl != "" {
 						return []string{tmpl}

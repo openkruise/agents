@@ -1,0 +1,231 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package binding
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+func TestDecode(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		raw     string
+		absent  bool
+		want    int
+		invalid bool
+	}{
+		{name: "absent", absent: true},
+		{name: "empty map", raw: `{}`},
+		{name: "active", raw: `{"0000000000000000sess_1":{"createdAt":"2026-11-03T10:00:00Z"}}`, want: 1},
+		{name: "moving pending", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","phase":"Moving"}}`, want: 1},
+		{name: "moving target", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","phase":"Moving","targetSandboxUID":"target"}}`, want: 1},
+		{name: "invalid phase", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","phase":"Unknown"}}`, invalid: true},
+		{name: "target without moving", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","targetSandboxUID":"target"}}`, invalid: true},
+		{name: "invalid phase type", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","phase":1}}`, invalid: true},
+		{name: "empty annotation", invalid: true},
+		{name: "null", raw: `null`, invalid: true},
+		{name: "invalid JSON", raw: `{`, invalid: true},
+		{name: "trailing JSON", raw: `{} {}`, invalid: true},
+		{name: "duplicate ID", raw: `{"000000000000000000000s":{},"000000000000000000000s":{}}`, invalid: true},
+		{name: "unknown field", raw: `{"000000000000000000000s":{"future":"value","createdAt":"2026-11-03T10:00:00Z"}}`, want: 1},
+		{name: "invalid ID", raw: `{"bad.id":{"createdAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
+		{name: "empty ID", raw: `{"":{"createdAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
+		{name: "21 character ID", raw: `{"` + strings.Repeat("a", 21) + `":{"createdAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
+		{name: "23 character ID", raw: `{"` + strings.Repeat("a", 23) + `":{"createdAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
+		{name: "fractional seconds", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00.1Z"}}`, invalid: true},
+		{name: "offset", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00+00:00"}}`, invalid: true},
+		{name: "missing time", raw: `{"000000000000000000000s":{}}`, invalid: true},
+		{name: "duplicate field", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","createdAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			annotations := map[string]string{}
+			if !tt.absent {
+				annotations[BindingsAnnotation] = tt.raw
+			}
+			got, err := Decode(annotations)
+			if (err != nil) != tt.invalid {
+				t.Fatalf("Decode error=%v, invalid=%v", err, tt.invalid)
+			}
+			if err == nil && len(got) != tt.want {
+				t.Fatalf("got %d records, want %d", len(got), tt.want)
+			}
+		})
+	}
+}
+
+func TestEncodeKnownFieldsAndBudgets(t *testing.T) {
+	input := map[string]string{BindingsAnnotation: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","future":{"keep":true}}}`, "other": "kept"}
+	bindings, err := Decode(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Encode(input, bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["other"] != "kept" || got[BindingsAnnotation] != `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}` {
+		t.Fatalf("unexpected encoded annotations: %v", got)
+	}
+	if input[BindingsAnnotation] != `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","future":{"keep":true}}}` {
+		t.Fatal("mutated input")
+	}
+	for i := 0; i < 512; i++ {
+		bindings[fmt.Sprintf("s_%020d", i)] = bindings["000000000000000000000s"]
+	}
+	delete(bindings, "000000000000000000000s")
+	encoded, err := Encode(nil, bindings)
+	if err != nil {
+		t.Fatalf("512 records: %v", err)
+	}
+	if decoded, err := Decode(encoded); err != nil || len(decoded) != 512 {
+		t.Fatalf("512-record round trip: count=%d error=%v", len(decoded), err)
+	}
+	bindings["00000000000000000extra"] = bindings[fmt.Sprintf("s_%020d", 0)]
+	if _, err := Encode(nil, bindings); err == nil {
+		t.Fatal("accepted 513 records")
+	}
+	delete(bindings, "00000000000000000extra")
+	if _, err := Encode(map[string]string{"large": strings.Repeat("x", 256*1024)}, bindings); err == nil {
+		t.Fatal("accepted excessive total annotations")
+	}
+}
+
+func TestExactByteBudgets(t *testing.T) {
+	for _, bindings := range []Bindings{nil, {}} {
+		encoded, err := Encode(nil, bindings)
+		if err != nil || encoded[BindingsAnnotation] != "{}" {
+			t.Fatalf("empty bindings must encode as an object: %v %v", encoded, err)
+		}
+	}
+	// Input byte limits still apply even though unknown fields are discarded.
+	raw := `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","pad":""}}`
+	padding := MaxBindingBytes - len(BindingsAnnotation) - len(raw)
+	raw = strings.Replace(raw, `"pad":""`, `"pad":"`+strings.Repeat("x", padding)+`"`, 1)
+	annotations := map[string]string{BindingsAnnotation: raw}
+	if _, err := Decode(annotations); err != nil {
+		t.Fatalf("cannot decode exact binding budget: %v", err)
+	}
+	annotations[BindingsAnnotation] = raw + " "
+	if _, err := Decode(annotations); err == nil {
+		t.Fatal("accepted binding budget plus one byte")
+	}
+	annotations = map[string]string{"other": strings.Repeat("x", MaxAnnotationBytes-len("other")-len(BindingsAnnotation)-len("{}"))}
+	encoded, err := Encode(annotations, Bindings{})
+	if err != nil {
+		t.Fatalf("rejected exact annotation budget: %v", err)
+	}
+	if _, err := Decode(encoded); err != nil {
+		t.Fatal(err)
+	}
+	annotations["other"] += "x"
+	if _, err := Encode(annotations, Bindings{}); err == nil {
+		t.Fatal("accepted annotation budget plus one byte")
+	}
+}
+
+func TestMovingBindingRoundTrip(t *testing.T) {
+	const raw = `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","phase":"Moving","targetSandboxUID":"target"}}`
+	records, err := Decode(map[string]string{BindingsAnnotation: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotations, err := Encode(nil, records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if annotations[BindingsAnnotation] != raw {
+		t.Fatalf("migration state lost: %s", annotations[BindingsAnnotation])
+	}
+}
+
+func TestExpiresAt(t *testing.T) {
+	for _, tt := range []struct {
+		name, lifetime string
+		want           time.Time
+		invalid        bool
+	}{
+		{name: "disabled"},
+		{name: "creation deadline", lifetime: "1h", want: time.Date(2026, 11, 19, 1, 0, 0, 0, time.UTC)},
+		{name: "zero", lifetime: "0s", invalid: true},
+		{name: "negative", lifetime: "-1h", invalid: true},
+		{name: "malformed", lifetime: "later", invalid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ExpiresAt(Record{CreatedAt: "2026-11-19T00:00:00Z", Phase: Moving, TargetSandboxUID: "target"}, tt.lifetime)
+			if (err != nil) != tt.invalid || !got.Equal(tt.want) {
+				t.Fatalf("deadline=%v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestMergePatch(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		records Bindings
+		invalid bool
+	}{
+		{name: "active", records: Bindings{"0000000000000000sess_1": {CreatedAt: "2026-11-03T10:00:00Z"}}},
+		{name: "empty"},
+		{name: "invalid", records: Bindings{"bad": {}}, invalid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			obj := &metav1.ObjectMeta{UID: "member-uid", ResourceVersion: "123", Annotations: map[string]string{"unrelated": "keep"}}
+			raw, err := MergePatch(obj, tt.records)
+			if tt.invalid {
+				if err == nil {
+					t.Fatal("expected validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var patch map[string]map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &patch); err != nil {
+				t.Fatal(err)
+			}
+			metadata := patch["metadata"]
+			if len(patch) != 1 || len(metadata) != 3 || string(metadata["uid"]) != `"member-uid"` || string(metadata["resourceVersion"]) != `"123"` {
+				t.Fatalf("unexpected patch: %s", raw)
+			}
+			var annotations map[string]string
+			if err := json.Unmarshal(metadata["annotations"], &annotations); err != nil {
+				t.Fatal(err)
+			}
+			if len(annotations) != 1 {
+				t.Fatalf("unexpected annotations: %v", annotations)
+			}
+			expected, err := Encode(obj.Annotations, tt.records)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if annotations[BindingsAnnotation] != expected[BindingsAnnotation] {
+				t.Fatalf("unexpected bindings: %v", annotations)
+			}
+			if len(obj.Annotations) != 1 || obj.Annotations["unrelated"] != "keep" {
+				t.Fatal("mutated input annotations")
+			}
+		})
+	}
+}

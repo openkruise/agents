@@ -121,6 +121,80 @@ spec:
                               the floor are raised to it so the fresh PauseTime cannot expire while
                               the sandbox is still resuming.
                             type: string
+                          requestMatches:
+                            description: |-
+                              RequestMatches restricts which inbound requests may wake the paused
+                              sandbox. When empty, every authenticated request addressed to the
+                              sandbox wakes it. When set, a request wakes the sandbox if it
+                              satisfies any entry; a request that satisfies none is rejected the
+                              same way as for a sandbox without wake-on-traffic, and the sandbox
+                              stays paused. Requests to a Running sandbox are never filtered.
+
+                              For example, one entry matching sec-fetch-mode=navigate limits wake
+                              from browsers to page navigations, so script-initiated reconnects from
+                              a page left open in the background do not keep waking the sandbox; a
+                              second entry matching a custom header lets SDK or webhook clients that
+                              send it still wake the sandbox.
+                            items:
+                              description: |-
+                                IngressTrafficRequestMatch describes one kind of request allowed to wake a
+                                paused sandbox. A request satisfies it when every condition matches.
+                              properties:
+                                headers:
+                                  description: Headers lists header conditions that
+                                    must all match.
+                                  items:
+                                    description: IngressTrafficHeaderMatch matches
+                                      a request header against Values using Operator.
+                                    properties:
+                                      name:
+                                        description: |-
+                                          Name is the header name, matched case-insensitively. Pseudo-headers
+                                          are not supported.
+                                        maxLength: 256
+                                        minLength: 1
+                                        pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                        type: string
+                                      operator:
+                                        default: In
+                                        description: |-
+                                          Operator selects the matching operation and defaults to In when omitted.
+                                          In requires at least one header value to be in Values; an absent header
+                                          does not match. NotIn requires every header value to be outside Values;
+                                          an absent header matches. Unknown operators do not match.
+                                          This condition applies only to its RequestMatches entry and does not
+                                          veto other OR entries.
+                                        enum:
+                                        - In
+                                        - NotIn
+                                        type: string
+                                      values:
+                                        description: |-
+                                          Values is the set of exact, case-sensitive header values to compare against.
+                                          In and NotIn both require at least one value; all values of a repeated
+                                          header are checked.
+                                        items:
+                                          maxLength: 512
+                                          type: string
+                                        maxItems: 16
+                                        minItems: 1
+                                        type: array
+                                    required:
+                                    - name
+                                    - values
+                                    type: object
+                                  maxItems: 8
+                                  minItems: 1
+                                  type: array
+                                  x-kubernetes-list-map-keys:
+                                  - name
+                                  x-kubernetes-list-type: map
+                              required:
+                              - headers
+                              type: object
+                            maxItems: 8
+                            type: array
+                            x-kubernetes-list-type: atomic
                         type: object
                       whenProbedScheduleTime:
                         description: |-
@@ -171,16 +245,29 @@ spec:
                 - message: backend is immutable
                   rule: self == oldSelf
               buildOptions:
-                description: |-
-                  BuildOptions is the declarative snapshot of the Template Build request.
-                  It is populated by a build entry and consumed by the SandboxTemplate
-                  controller. Logical Template admission keeps it immutable after the
-                  build input is accepted.
+                description: BuildOptions stores the accepted build recipe; admission
+                  freezes finalized Versions.
                 properties:
+                  checkpoint:
+                    description: Checkpoint captures the completed build as a restorable
+                      artifact.
+                    properties:
+                      enable:
+                        description: Enable turns artifact capture on for the Build.
+                        type: boolean
+                    type: object
                   fromTemplate:
                     description: FromTemplate names an existing logical Template used
                       as the build base.
                     type: string
+                  imageAcceleration:
+                    description: ImageAcceleration requests best-effort image pre-warming.
+                    properties:
+                      enable:
+                        description: Enable turns best-effort image acceleration on
+                          for the Build.
+                        type: boolean
+                    type: object
                   readyCommand:
                     description: ReadyCommand checks business process readiness before
                       capture.
@@ -235,36 +322,75 @@ spec:
                     - command
                     type: object
                   steps:
-                    description: Steps is the ordered provisioning command sequence.
+                    description: Steps is the ordered provisioning sequence.
                     items:
-                      description: |-
-                        TemplateBuildCommand is one self-contained shell command in a Template
-                        Build. User, Cwd, and Env are the complete execution context folded from
-                        the caller's build DSL.
+                      description: TemplateBuildStep is a command or a COPY operation.
                       properties:
                         command:
-                          description: Command is the shell command to execute.
-                          minLength: 1
-                          type: string
-                        cwd:
-                          description: Cwd optionally selects the working directory
-                            inside the container.
-                          type: string
-                          x-kubernetes-validations:
-                          - message: cwd must be an absolute path
-                            rule: self == '' || self.startsWith('/')
-                        env:
-                          additionalProperties:
-                            type: string
-                          description: Env is the complete environment of this command.
+                          description: |-
+                            TemplateBuildCommand is one self-contained shell command in a Template
+                            Build. User, Cwd, and Env are the complete execution context folded from
+                            the caller's build DSL.
+                          properties:
+                            command:
+                              description: Command is the shell command to execute.
+                              minLength: 1
+                              type: string
+                            cwd:
+                              description: Cwd optionally selects the working directory
+                                inside the container.
+                              type: string
+                              x-kubernetes-validations:
+                              - message: cwd must be an absolute path
+                                rule: self == '' || self.startsWith('/')
+                            env:
+                              additionalProperties:
+                                type: string
+                              description: Env is the complete environment of this
+                                command.
+                              type: object
+                            user:
+                              description: User optionally selects the executing user
+                                inside the container.
+                              type: string
+                          required:
+                          - command
                           type: object
-                        user:
-                          description: User optionally selects the executing user
-                            inside the container.
-                          type: string
-                      required:
-                      - command
+                        copy:
+                          description: TemplateBuildCopy materializes an uploaded
+                            build-context file or directory.
+                          properties:
+                            dest:
+                              minLength: 1
+                              type: string
+                              x-kubernetes-validations:
+                              - message: dest must be an absolute path
+                                rule: self.startsWith('/')
+                            filesHash:
+                              type: string
+                            forceUpload:
+                              type: boolean
+                            mode:
+                              format: int32
+                              maximum: 4095
+                              minimum: 0
+                              type: integer
+                            src:
+                              minLength: 1
+                              type: string
+                              x-kubernetes-validations:
+                              - message: src must be a relative path
+                                rule: '!self.startsWith(''/'')'
+                            user:
+                              type: string
+                          required:
+                          - dest
+                          - src
+                          type: object
                       type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of command or copy is required
+                        rule: has(self.command) != has(self.copy)
                     type: array
                     x-kubernetes-list-type: atomic
                 type: object
@@ -648,6 +774,18 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
+              startupMode:
+                default: Immediate
+                description: |-
+                  StartupMode controls whether sandboxes created from this template have
+                  their main container command wrapped by run_with_envs.sh (claim-time
+                  envVars/command + deferred main-process start). It is only informational
+                  when a SandboxSet uses spec.templateRef: SandboxSetSpec.StartupMode always
+                  takes precedence and is what actually reaches created Sandboxes.
+                enum:
+                - Immediate
+                - Deferred
+                type: string
               template:
                 description: |-
                   Template describes the pods that will be created.
@@ -677,9 +815,15 @@ spec:
                     type:
                       description: Type is the artifact reference type.
                       type: string
+                    value:
+                      description: Value is the backend identifier used to restore
+                        the artifact.
+                      minLength: 1
+                      type: string
                   required:
                   - name
                   - type
+                  - value
                   type: object
                 type: array
                 x-kubernetes-list-map-keys:

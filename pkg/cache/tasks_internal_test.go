@@ -18,14 +18,20 @@ package cache
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
+	"github.com/openkruise/agents/pkg/cache/controllers"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -72,7 +78,7 @@ func TestCheckpointUpdateFunc_FallsBackToAPIReader(t *testing.T) {
 			cp := &agentsv1alpha1.Checkpoint{
 				ObjectMeta: metav1.ObjectMeta{Name: checkpointUpdateFuncTestCheckpointName(tt), Namespace: "default"},
 			}
-			got, err := c.CheckpointUpdateFunc(context.Background())(cp)
+			got, err := c.CheckpointUpdateFunc(context.Background(), cp)
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -107,4 +113,70 @@ func newCheckpointUpdateFuncTestClient(t *testing.T, objects ...ctrlclient.Objec
 	scheme := runtime.NewScheme()
 	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+}
+
+// The waiter blocks in the APIReader fallback while the reconciler observes
+// the same object through its own informer-backed client.
+func TestSandboxPauseTask_BlockedRead(t *testing.T) {
+	for _, outcome := range []string{"completion", "timeout", "cancel"} {
+		t.Run(outcome, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				sbx := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "ns"}, Spec: agentsv1alpha1.SandboxSpec{Paused: true}, Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPaused}}
+				builder, err := controllers.NewMockManagerBuilder(t)
+				require.NoError(t, err)
+				source := fake.NewClientBuilder().WithScheme(builder.Build().GetScheme()).WithStatusSubresource(sbx).WithObjects(sbx).Build()
+				hooks := &sync.Map{}
+				mgr := builder.WithClient(source).WithWaitSimulation(sbx).Build()
+				mgr.SetWaitHooks(hooks)
+				require.NoError(t, mgr.Start(ctx))
+				blocked := make(chan struct{})
+				api := interceptor.NewClient(source, interceptor.Funcs{Get: func(readCtx context.Context, _ ctrlclient.WithWatch, _ ctrlclient.ObjectKey, _ ctrlclient.Object, _ ...ctrlclient.GetOption) error {
+					close(blocked)
+					<-readCtx.Done()
+					if outcome == "completion" {
+						cancel()
+					} // The event has already committed its result.
+					return readCtx.Err()
+				}})
+				c := &Cache{client: newCheckpointUpdateFuncTestClient(t), reader: api, waitHooks: hooks}
+				task, err := c.NewSandboxPauseTask(ctx, sbx)
+				require.NoError(t, err)
+				finished := make(chan error, 1)
+				go func() {
+					got, err := task.WaitForObject(sbx, 6*time.Second)
+					if err == nil {
+						assert.Equal(t, metav1.ConditionTrue, got.Status.Conditions[0].Status)
+					}
+					finished <- err
+				}()
+				<-blocked
+				time.Sleep(4 * time.Second)
+				synctest.Wait()
+				select {
+				case err := <-finished:
+					t.Fatalf("unfinished Pause returned early: %v", err)
+				default:
+				}
+				switch outcome {
+				case "completion":
+					current := sbx.DeepCopy()
+					require.NoError(t, source.Get(ctx, ctrlclient.ObjectKeyFromObject(sbx), current))
+					current.Status.Conditions = []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue}}
+					require.NoError(t, source.Status().Update(ctx, current))
+					require.NoError(t, <-finished)
+				case "timeout":
+					err := <-finished
+					require.ErrorIs(t, err, cacheutils.ErrWaitNotSatisfied)
+					require.ErrorContains(t, err, "6s")
+				case "cancel":
+					cancel()
+					require.ErrorIs(t, <-finished, context.Canceled)
+				}
+				_, exists := hooks.Load(cacheutils.WaitHookKey(sbx))
+				require.False(t, exists)
+			})
+		})
+	}
 }

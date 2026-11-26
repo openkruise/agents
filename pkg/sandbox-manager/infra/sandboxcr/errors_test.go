@@ -21,12 +21,15 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 )
 
@@ -234,7 +237,7 @@ func TestClassifyCreateError(t *testing.T) {
 				return
 			}
 			if tt.expectRetryable {
-				assert.True(t, errors.As(result, &retriableError{}), "expected retriableError, got %T: %v", result, result)
+				assert.True(t, errors.As(result, &claim.RetriableError{}), "expected claim.RetriableError, got %T: %v", result, result)
 			} else {
 				code := managererrors.GetErrCode(result)
 				assert.Equal(t, tt.expectErrorCode, code, "expected ErrorCode mismatch for %v", result)
@@ -243,6 +246,40 @@ func TestClassifyCreateError(t *testing.T) {
 				assert.Contains(t, result.Error(), tt.expectContains)
 			}
 			assert.Contains(t, result.Error(), tt.err.Error())
+		})
+	}
+}
+
+func TestSandboxWaitTimeoutError(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		expectCode managererrors.ErrorCode
+		expectMsg  string
+	}{
+		{
+			name:       "wait timeout carries the sandbox action and budget",
+			err:        &cacheutils.WaitNotSatisfiedError{Action: cacheutils.WaitActionPause, Timeout: 10 * time.Minute},
+			expectCode: managererrors.ErrorInternal,
+			expectMsg:  "timed out after 10m0s waiting for sandbox sbx-1 to pause; completion was not confirmed",
+		},
+		{
+			name:       "non-wait error passes through unchanged",
+			err:        context.Canceled,
+			expectCode: managererrors.ErrorUnknown,
+			expectMsg:  context.Canceled.Error(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sandboxWaitTimeoutError(tt.err, "pause", "sbx-1")
+			assert.Equal(t, tt.expectCode, managererrors.GetErrCode(got))
+			assert.Contains(t, got.Error(), tt.expectMsg)
+			if tt.expectCode == managererrors.ErrorInternal {
+				assert.ErrorIs(t, got, cacheutils.ErrWaitNotSatisfied)
+				return
+			}
+			assert.Same(t, tt.err, got)
 		})
 	}
 }

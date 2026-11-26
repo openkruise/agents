@@ -45,6 +45,7 @@ import (
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -351,7 +352,7 @@ func TestNewSandboxFromTemplate_NamingAndClaimIsolation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.opts.Modifier = func(sbx infra.Sandbox) error {
+			tt.opts.Modifier = func(sbx claim.Handle) error {
 				sbx.SetAnnotations(map[string]string{"user.example/key": "keep"})
 				sbx.SetLabels(map[string]string{v1alpha1.LabelSandboxSource: "forged", v1alpha1.LabelSandboxClaimMethod: v1alpha1.ClaimMethodHotStart})
 				return nil
@@ -683,7 +684,7 @@ func TestPrepareSandboxFromCheckpoint_JWTAuthMerge(t *testing.T) {
 			}
 			opts := infra.CloneSandboxOptions{User: "test-user", CheckPointID: "cp-jwt"}
 			if tt.requestSetting != nil {
-				opts.Modifier = func(sbx infra.Sandbox) error {
+				opts.Modifier = func(sbx claim.Handle) error {
 					annotations := sbx.GetAnnotations()
 					annotations[identity.AnnotationEnableJwtAuth] = *tt.requestSetting
 					sbx.SetAnnotations(annotations)
@@ -700,6 +701,89 @@ func TestPrepareSandboxFromCheckpoint_JWTAuthMerge(t *testing.T) {
 			}
 			assert.True(t, present)
 			assert.Equal(t, *tt.expectSetting, value)
+		})
+	}
+}
+
+func TestPrepareSandboxFromCheckpoint_TokenRotation(t *testing.T) {
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "cp-token", Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test-image"}}},
+			},
+		},
+	}
+
+	tests := []struct {
+		name           string
+		checkpointInit string
+		expectInit     bool
+		expectEnvVars  map[string]string
+	}{
+		{
+			name:           "rotates source token and keeps env vars",
+			checkpointInit: `{"envVars":{"FOO":"bar"},"accessToken":"source-token"}`,
+			expectInit:     true,
+			expectEnvVars:  map[string]string{"FOO": "bar"},
+		},
+		{
+			name:           "mints token when checkpoint init has none",
+			checkpointInit: `{}`,
+			expectInit:     true,
+		},
+		{
+			name:           "no init annotation keeps clone uninitiated",
+			checkpointInit: "",
+			expectInit:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{Name: "cp-token", Namespace: "default"},
+			}
+			if tt.checkpointInit != "" {
+				cp.Annotations = map[string]string{v1alpha1.AnnotationInitRuntimeRequest: tt.checkpointInit}
+			}
+			opts := infra.CloneSandboxOptions{User: "test-user", CheckPointID: "cp-token"}
+
+			sbx, initRuntimeOpts, err := prepareSandboxFromCheckpoint(t.Context(), opts, tmpl, cp, nil)
+			require.NoError(t, err)
+			require.NotNil(t, sbx)
+
+			if !tt.expectInit {
+				assert.Nil(t, initRuntimeOpts)
+				// Without an init request the clone skips /init, but it still gets
+				// an independent gateway credential minted at preparation time.
+				assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken])
+				assert.NotContains(t, sbx.GetAnnotations(), v1alpha1.AnnotationInitRuntimeRequest)
+				return
+			}
+
+			require.NotNil(t, initRuntimeOpts)
+			token := sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken]
+			assert.NotEmpty(t, token)
+			assert.NotEqual(t, "source-token", token)
+			assert.Equal(t, token, initRuntimeOpts.AccessToken)
+
+			var persisted config.InitRuntimeOptions
+			require.NoError(t, json.Unmarshal([]byte(sbx.GetAnnotations()[v1alpha1.AnnotationInitRuntimeRequest]), &persisted))
+			assert.Equal(t, token, persisted.AccessToken)
+			assert.Equal(t, tt.expectEnvVars, persisted.EnvVars)
+
+			// The checkpoint itself must keep the source token untouched.
+			assert.Equal(t, tt.checkpointInit, cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest])
+
+			// A later resume/recreate cycle reads the persisted annotation and
+			// must re-init with the rotated token; the resume caller opts into
+			// ReInit itself, the parser stays policy-free.
+			resumed, err := runtime.GetInitRuntimeRequest(sbx.Sandbox)
+			require.NoError(t, err)
+			require.NotNil(t, resumed)
+			assert.False(t, resumed.ReInit)
+			assert.Equal(t, token, resumed.AccessToken)
 		})
 	}
 }
@@ -916,14 +1000,14 @@ func (q *admissionQuotaTracker) liveCount() int {
 func TestCloneSandbox_AdmissionReceivesPreparedResource(t *testing.T) {
 	tests := []struct {
 		name       string
-		modifier   func(infra.Sandbox) error
+		modifier   func(claim.Handle) error
 		wantReqCPU int64
 		wantLimCPU int64
 	}{
 		{
 			name: "clone admission sees modifier-updated cpu limit",
-			modifier: func(sbx infra.Sandbox) error {
-				return sbx.(*Sandbox).SetResources(nil, corev1.ResourceList{
+			modifier: func(sbx claim.Handle) error {
+				return claim.SetResources(sbx.(*Sandbox).Sandbox, nil, corev1.ResourceList{
 					corev1.ResourceCPU: resource.MustParse("2"),
 				})
 			},
@@ -1061,14 +1145,14 @@ func TestInfraCloneSandbox_ModifierErrorStopsBeforeCreate(t *testing.T) {
 	}
 	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
 
-	modifierErr := NoAvailableError(checkpointID, expectError)
+	modifierErr := claim.NoAvailableError(checkpointID, expectError)
 	modifierCalls := 0
 	admissionCalls := 0
 	cloned, metrics, err := testInfra.CloneSandbox(t.Context(), infra.CloneSandboxOptions{
 		User:         "test-user",
 		CheckPointID: checkpointID,
 		CloneTimeout: time.Second,
-		Modifier: func(infra.Sandbox) error {
+		Modifier: func(claim.Handle) error {
 			modifierCalls++
 			return modifierErr
 		},
@@ -1486,6 +1570,8 @@ func TestCloneSandbox(t *testing.T) {
 		preProcess            func(t *testing.T, cache infracache.Provider, c client.Client)
 		postCheck             func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics)
 		expectError           string
+		expectTerminal        bool
+		expectInterrupted     bool
 		readyBeforeFailure    bool
 	}{
 		{
@@ -1523,7 +1609,7 @@ func TestCloneSandbox(t *testing.T) {
 				User:             user,
 				CheckPointID:     checkpointID,
 				WaitReadyTimeout: 30 * time.Second,
-				Modifier: func(sbx infra.Sandbox) error {
+				Modifier: func(sbx claim.Handle) error {
 					sbx.SetAnnotations(map[string]string{
 						"custom-annotation": "custom-value",
 					})
@@ -1569,13 +1655,20 @@ func TestCloneSandbox(t *testing.T) {
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
 				assert.NotNil(t, sbx)
 				assert.GreaterOrEqual(t, metrics.InitRuntime, time.Duration(0))
-				// Check runtime init annotations
-				assert.Equal(t, "test-access-token", sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken])
-				assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationInitRuntimeRequest])
+				// The fork must not reuse the source token from the checkpoint.
+				token := sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken]
+				assert.NotEmpty(t, token)
+				assert.NotEqual(t, "test-access-token", token)
+				// The persisted init request must carry the rotated token and
+				// keep the checkpoint env vars for later resume/recreate cycles.
+				var persisted config.InitRuntimeOptions
+				require.NoError(t, json.Unmarshal([]byte(sbx.GetAnnotations()[v1alpha1.AnnotationInitRuntimeRequest]), &persisted))
+				assert.Equal(t, token, persisted.AccessToken)
+				assert.Equal(t, map[string]string{"VAR1": "value1", "VAR2": "value2"}, persisted.EnvVars)
 			},
 		},
 		{
-			name: "re-init runtime 401 (ReInit success)",
+			name: "re-init runtime 401 fails with rotated token",
 			opts: infra.CloneSandboxOptions{
 				User:             user,
 				CheckPointID:     checkpointID,
@@ -1595,14 +1688,10 @@ func TestCloneSandbox(t *testing.T) {
 				RunCommandImmediately: true,
 				InitErrCode:           401,
 			},
-			sbxOverride: sbxOverride{Name: "test-sandbox-clone-4"},
-			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
-				assert.NotNil(t, sbx)
-				assert.GreaterOrEqual(t, metrics.InitRuntime, time.Duration(0))
-				// Check runtime init annotations
-				assert.Equal(t, "test-access-token", sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken])
-				assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationInitRuntimeRequest])
-			},
+			sbxOverride:        sbxOverride{Name: "test-sandbox-clone-4"},
+			expectError:        "failed to init runtime",
+			expectTerminal:     true,
+			readyBeforeFailure: true,
 		},
 		{
 			name: "re-init runtime 500 error",
@@ -1627,6 +1716,30 @@ func TestCloneSandbox(t *testing.T) {
 			},
 			sbxOverride:        sbxOverride{Name: "test-sandbox-clone-5"},
 			expectError:        "failed to init runtime",
+			readyBeforeFailure: true,
+		},
+		{
+			name: "re-init runtime cancellation is preserved",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+				CloneTimeout:     2 * time.Second,
+			},
+			initRuntime: &config.InitRuntimeOptions{
+				AccessToken: "test-access-token",
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately:  true,
+				InitBlockUntilCanceled: true,
+			},
+			sbxOverride:        sbxOverride{Name: "test-sandbox-clone-interrupted"},
+			expectError:        "context deadline exceeded",
+			expectInterrupted:  true,
 			readyBeforeFailure: true,
 		},
 		{
@@ -1741,7 +1854,9 @@ func TestCloneSandbox(t *testing.T) {
 				},
 				RunCommandImmediately: true,
 			},
-			sbxOverride: sbxOverride{Name: "test-sandbox-csi-mount-1", AccessToken: runtime.AccessToken},
+			// The rotated token minted at prepare time is installed by /init and
+			// already stamped on the clone, so no access-token override is needed.
+			sbxOverride: sbxOverride{Name: "test-sandbox-csi-mount-1"},
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
 				assert.NotNil(t, sbx)
 				assert.Greater(t, metrics.InitRuntime, time.Duration(0), "InitRuntime metric should be greater than 0")
@@ -1948,6 +2063,15 @@ func TestCloneSandbox(t *testing.T) {
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
+				if tt.expectTerminal {
+					var retryErr claim.RetriableError
+					assert.False(t, errors.As(err, &retryErr), "a deterministic init failure must stop the clone retry loop")
+				}
+				if tt.expectInterrupted {
+					assert.ErrorIs(t, err, context.DeadlineExceeded)
+					var retryErr claim.RetriableError
+					assert.False(t, errors.As(err, &retryErr), "cancellation must surface as-is, not as a retriable failure")
+				}
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, sbx)
@@ -2730,9 +2854,9 @@ func TestCreateCheckPoint(t *testing.T) {
 			})}
 
 			if tt.deleteFails {
-				origTimeout := DefaultCleanupTimeout
-				DefaultCleanupTimeout = 200 * time.Millisecond
-				t.Cleanup(func() { DefaultCleanupTimeout = origTimeout })
+				origTimeout := claim.DefaultCleanupTimeout
+				claim.DefaultCleanupTimeout = 200 * time.Millisecond
+				t.Cleanup(func() { claim.DefaultCleanupTimeout = origTimeout })
 			}
 
 			deletes := 0
@@ -2846,7 +2970,12 @@ func TestCreateCheckpoint_WaitFailureCleanup(t *testing.T) {
 			}
 			require.Error(t, err)
 			assert.Empty(t, id)
-			assert.Contains(t, err.Error(), "failed to wait checkpoint ready")
+			if tt.cancel {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.ErrorContains(t, err, "timed out after 10ms")
+				require.ErrorContains(t, err, "Check the sandbox status")
+			}
 			wantDeletes := 1
 			if tt.retryDelete {
 				wantDeletes++
@@ -3158,8 +3287,8 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 			if tt.expectError != "" {
 				require.Error(t, cloneErr)
 				assert.Contains(t, cloneErr.Error(), tt.expectError)
-				var retryErr retriableError
-				assert.True(t, errors.As(cloneErr, &retryErr), "error should be a retriableError")
+				var retryErr claim.RetriableError
+				assert.True(t, errors.As(cloneErr, &retryErr), "error should be a claim.RetriableError")
 			} else {
 				require.NoError(t, cloneErr)
 				require.NotNil(t, sbx)
@@ -3277,7 +3406,7 @@ func TestCloneSandbox_TrafficAccessToken(t *testing.T) {
 				assert.Contains(t, cloneErr.Error(), tt.expectError)
 				assert.Nil(t, sbx)
 				assert.True(t, providerCalled)
-				var retryErr retriableError
+				var retryErr claim.RetriableError
 				if tt.expectInterrupted {
 					assert.ErrorIs(t, cloneErr, context.Canceled)
 					assert.False(t, errors.As(cloneErr, &retryErr))

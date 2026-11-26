@@ -38,6 +38,21 @@ type RuntimeConfig struct {
 	Name string `json:"name"`
 }
 
+// StartupMode defines when the sandbox's main process starts.
+// +enum
+type StartupMode string
+
+const (
+	// StartupModeDeferred wraps the main container command with
+	// run_with_envs.sh: the main process starts only after the claim-time
+	// envVars, the optional claim command, and a readiness signal have been
+	// delivered to the sandbox.
+	StartupModeDeferred StartupMode = "Deferred"
+	// StartupModeImmediate (default) leaves the main process untouched:
+	// it starts as soon as the container starts, exactly as before.
+	StartupModeImmediate StartupMode = "Immediate"
+)
+
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
@@ -69,6 +84,27 @@ type SandboxSpec struct {
 	// +optional
 	// +listType=atomic
 	Runtimes []RuntimeConfig `json:"runtimes,omitempty"`
+
+	// OndemandVolumesMount specifies the volumes to be mounted into the sandbox
+	// on demand via CSI NodePublishVolume.
+	// +optional
+	// +patchMergeKey=mountPath
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=mountPath
+	OndemandVolumesMount []CSIMountConfig `json:"ondemandVolumesMount,omitempty" patchMergeKey:"mountPath" patchStrategy:"merge"`
+
+	// StartupMode controls whether the sandbox main container command is
+	// wrapped by run_with_envs.sh. When Deferred, the main process is held
+	// until the claim-time envVars, the optional claim command, and a readiness
+	// signal are in place, then executed with those inputs. When Immediate
+	// (default), the main process starts immediately, exactly as before. It is
+	// copied verbatim from the owning SandboxSet and is read-only for the
+	// sandbox controller.
+	// +kubebuilder:validation:Enum=Immediate;Deferred
+	// +kubebuilder:default="Immediate"
+	// +optional
+	StartupMode StartupMode `json:"startupMode,omitempty"`
 
 	// PauseTime - Absolute time when the sandbox will be paused automatically.
 	// +kubebuilder:validation:Format="date-time"
@@ -393,7 +429,77 @@ type IngressTrafficRule struct {
 	// the sandbox is still resuming.
 	// +optional
 	PauseTimeout *metav1.Duration `json:"pauseTimeout,omitempty"`
+
+	// RequestMatches restricts which inbound requests may wake the paused
+	// sandbox. When empty, every authenticated request addressed to the
+	// sandbox wakes it. When set, a request wakes the sandbox if it
+	// satisfies any entry; a request that satisfies none is rejected the
+	// same way as for a sandbox without wake-on-traffic, and the sandbox
+	// stays paused. Requests to a Running sandbox are never filtered.
+	//
+	// For example, one entry matching sec-fetch-mode=navigate limits wake
+	// from browsers to page navigations, so script-initiated reconnects from
+	// a page left open in the background do not keep waking the sandbox; a
+	// second entry matching a custom header lets SDK or webhook clients that
+	// send it still wake the sandbox.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=8
+	RequestMatches []IngressTrafficRequestMatch `json:"requestMatches,omitempty"`
 }
+
+// IngressTrafficRequestMatch describes one kind of request allowed to wake a
+// paused sandbox. A request satisfies it when every condition matches.
+type IngressTrafficRequestMatch struct {
+	// Headers lists header conditions that must all match.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=map
+	// +listMapKey=name
+	Headers []IngressTrafficHeaderMatch `json:"headers"`
+}
+
+// IngressTrafficHeaderMatch matches a request header against Values using Operator.
+type IngressTrafficHeaderMatch struct {
+	// Name is the header name, matched case-insensitively. Pseudo-headers
+	// are not supported.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
+	Name string `json:"name"`
+
+	// Operator selects the matching operation and defaults to In when omitted.
+	// In requires at least one header value to be in Values; an absent header
+	// does not match. NotIn requires every header value to be outside Values;
+	// an absent header matches. Unknown operators do not match.
+	// This condition applies only to its RequestMatches entry and does not
+	// veto other OR entries.
+	// +optional
+	// +kubebuilder:default=In
+	Operator IngressTrafficHeaderMatchOperator `json:"operator,omitempty"`
+
+	// Values is the set of exact, case-sensitive header values to compare against.
+	// In and NotIn both require at least one value; all values of a repeated
+	// header are checked.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=512
+	Values []string `json:"values"`
+}
+
+// IngressTrafficHeaderMatchOperator defines set matching operations for request headers.
+// +kubebuilder:validation:Enum=In;NotIn
+type IngressTrafficHeaderMatchOperator string
+
+const (
+	// IngressTrafficHeaderMatchIn matches when at least one header value is in Values.
+	IngressTrafficHeaderMatchIn IngressTrafficHeaderMatchOperator = "In"
+	// IngressTrafficHeaderMatchNotIn matches when no header value is in Values.
+	IngressTrafficHeaderMatchNotIn IngressTrafficHeaderMatchOperator = "NotIn"
+)
 
 // Schedule tracks the upcoming pause/resume timing for the auto-pause controller.
 // Reason indicates which rule produced the current schedule, NextPauseTime is the

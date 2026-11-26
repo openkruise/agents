@@ -33,6 +33,9 @@ const (
 	// SandboxClaimGate enable SandboxClaim-controller to claim sandboxes from SandboxSet pools.
 	SandboxClaimGate featuregate.Feature = "SandboxClaim"
 
+	// SandboxRouteSyncGate enables the controller's sender-only peer route synchronization.
+	SandboxRouteSyncGate featuregate.Feature = "SandboxRouteSync"
+
 	// SandboxCreatePodRateLimitGate enables rate limiting for sandbox controller creating pod.
 	SandboxCreatePodRateLimitGate featuregate.Feature = "SandboxCreatePodRateLimitGate"
 
@@ -110,6 +113,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxGate:                            {Default: true, PreRelease: featuregate.Alpha},
 	SandboxSetGate:                         {Default: true, PreRelease: featuregate.Alpha},
 	SandboxClaimGate:                       {Default: true, PreRelease: featuregate.Alpha},
+	SandboxRouteSyncGate:                   {Default: false, PreRelease: featuregate.Alpha},
 	SandboxCreatePodRateLimitGate:          {Default: false, PreRelease: featuregate.Alpha},
 	SandboxCreatePodInjectConfigGate:       {Default: false, PreRelease: featuregate.Alpha},
 	CachePodLabelSelectorGate:              {Default: true, PreRelease: featuregate.Alpha},

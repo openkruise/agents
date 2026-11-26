@@ -44,12 +44,17 @@ import (
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/lifecycle/pool"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
+
+// ownerManagerScaleDown is the AnnotationOwner value this controller stamps on a
+// Sandbox it locks during scale-down, distinguishing that lock from a claim lock.
+const ownerManagerScaleDown = "__manager_scale_down"
 
 func init() {
 	flag.IntVar(&concurrentReconciles, "sandboxset-workers", concurrentReconciles, "Max concurrent workers for SandboxSet controller.")
@@ -250,7 +255,7 @@ func (r *Reconciler) scaleUp(ctx context.Context, count int, sbs *agentsv1alpha1
 			log.Error(err, "failed to create sandbox")
 			return err
 		}
-		log.V(utils.DebugLogLevel).Info("sandbox created", "sandbox", klog.KObj(created))
+		log.V(logs.DebugLogLevel).Info("sandbox created", "sandbox", klog.KObj(created))
 		return nil
 	})
 	log.Info("scale up finished", "successes", successes, "fails", count-successes)
@@ -398,6 +403,10 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 			return nil, fmt.Errorf("failed to resolve sandbox template %s/%s: %w",
 				sbs.Namespace, sbs.Spec.TemplateRef.Name, err)
 		}
+		if err := r.validateTemplateRef(ctx, refTemplate); err != nil {
+			r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to validate template ref: %s", err)
+			return nil, err
+		}
 		if refTemplate.Spec.Template == nil {
 			err := fmt.Errorf("sandbox template %s/%s has no pod template", sbs.Namespace, sbs.Spec.TemplateRef.Name)
 			r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to build sandbox: %s", err)
@@ -420,15 +429,15 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 }
 
 func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, lock string) (err error) {
-	log := logf.FromContext(ctx).WithValues("sandbox", client.ObjectKeyFromObject(sbx)).V(utils.DebugLogLevel)
+	log := logf.FromContext(ctx).WithValues("sandbox", client.ObjectKeyFromObject(sbx)).V(logs.DebugLogLevel)
 	log.Info("try to scale down sandbox")
-	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
+	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != ownerManagerScaleDown {
 		log.Info("sandbox to be scaled down claimed before performed, skip")
 		return errors.New("sandbox to be scaled down claimed before performed, skip")
 	}
 	// Deep copy the sandbox before mutating it to avoid corrupting the informer cache.
 	sbx = sbx.DeepCopy()
-	utils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
+	utils.LockSandbox(sbx, lock, ownerManagerScaleDown)
 	if err = r.Update(ctx, sbx); err != nil {
 		return fmt.Errorf("failed to lock sandbox when scaling down: %s", err)
 	}
@@ -445,7 +454,7 @@ func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.S
 // require maintaining replica counts (or rather, only needs to maintain the dead group's replica count at 0), so just
 // delete all dead sandboxes.
 func (r *Reconciler) deleteDeadSandboxes(ctx context.Context, dead []*agentsv1alpha1.Sandbox) error {
-	log := logf.FromContext(ctx).V(utils.DebugLogLevel)
+	log := logf.FromContext(ctx).V(logs.DebugLogLevel)
 	failNum := 0
 	for _, sbx := range dead {
 		if sbx.DeletionTimestamp != nil {
@@ -465,7 +474,7 @@ func (r *Reconciler) deleteDeadSandboxes(ctx context.Context, dead []*agentsv1al
 }
 
 func (r *Reconciler) updateSandboxSetStatus(ctx context.Context, newStatus agentsv1alpha1.SandboxSetStatus, sbs *agentsv1alpha1.SandboxSet) error {
-	log := logf.FromContext(ctx).V(utils.DebugLogLevel)
+	log := logf.FromContext(ctx).V(logs.DebugLogLevel)
 	clone := sbs.DeepCopy()
 	if err := r.Get(ctx, client.ObjectKey{Namespace: sbs.Namespace, Name: sbs.Name}, clone); err != nil {
 		log.Error(err, "failed to get updated sandboxset from client")
@@ -504,18 +513,22 @@ func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.
 	for i := range sandboxList.Items {
 		sbx := &sandboxList.Items[i]
 		scaleUpExpectation.ObserveScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
-		debugLog := log.V(utils.DebugLogLevel).WithValues("sandbox", sbx.Name)
+		debugLog := log.V(logs.DebugLogLevel).WithValues("sandbox", sbx.Name)
 		state, reason := utils.GetSandboxState(sbx)
 		switch state {
-		case agentsv1alpha1.SandboxStateCreating:
+		case sandboxstate.Creating:
 			groups.Creating = append(groups.Creating, sbx)
-		case agentsv1alpha1.SandboxStateAvailable:
+		case sandboxstate.Available:
 			groups.Available = append(groups.Available, sbx)
-		case agentsv1alpha1.SandboxStateRunning:
-			fallthrough
-		case agentsv1alpha1.SandboxStatePaused:
+		case sandboxstate.Running,
+			sandboxstate.Paused,
+			sandboxstate.Provisioning:
+			// Claimed observations, ready or not, are never garbage collected
+			// by the pool.
 			groups.Used = append(groups.Used, sbx)
-		case agentsv1alpha1.SandboxStateDead:
+		case sandboxstate.Expired,
+			sandboxstate.Dead:
+			// Past the shutdown deadline or terminal: the pool reclaims them.
 			groups.Dead = append(groups.Dead, sbx)
 		default: // unknown, impossible, just in case
 			return GroupedSandboxes{}, fmt.Errorf("cannot find state for sandbox %s", sbx.Name)

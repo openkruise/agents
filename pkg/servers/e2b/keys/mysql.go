@@ -46,7 +46,7 @@ import (
 	"github.com/openkruise/agents/pkg/configreload"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 // AdminTeamUID is the well-known UUID for the default admin team row.
@@ -626,7 +626,7 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTeam
 		return nil, fmt.Errorf("wait for mysql key storage publication: %w", err)
 	}
 	defer k.operationGate.Release(1)
-	log := klog.FromContext(ctx).WithValues("name", opts.Name).V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("name", opts.Name).V(logs.DebugLogLevel)
 	teamName, err := validateCreateKeyOptions(key, opts)
 	if err != nil {
 		return nil, err
@@ -711,7 +711,7 @@ func (k *mysqlKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeam
 		return fmt.Errorf("wait for mysql key storage publication: %w", err)
 	}
 	defer k.operationGate.Release(1)
-	log := klog.FromContext(ctx).V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).V(logs.DebugLogLevel)
 	if key == nil {
 		return nil
 	}

@@ -32,12 +32,13 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandboxid"
-	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	"github.com/openkruise/agents/pkg/utils/logs"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -136,10 +137,13 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	log := klog.FromContext(ctx)
 	metrics := infra.ClaimMetrics{}
 
-	opts, err := ValidateAndInitClaimOptions(opts)
+	opts, err := claim.ValidateAndInitClaimOptions(opts)
 	if err != nil {
 		log.Error(err, "invalid claim options")
-		return nil, metrics, err
+		// Convert at the Infra boundary so a typed *claim.Error (e.g. resize
+		// validation BadRequest) keeps its code for HTTP status mapping rather
+		// than escaping unclassified and being re-wrapped as Internal upstream.
+		return nil, metrics, buildClaimError(err, nil, nil)
 	}
 	// Overwrite with the Infra-owned runtime TLS bundle so claim
 	// post-processing can resolve the per-sandbox transport; the field is
@@ -150,7 +154,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	defer cancel()
 
 	// Start claiming sandbox
-	log.V(utils.DebugLogLevel).Info("claim sandbox options", "options", opts)
+	log.V(logs.DebugLogLevel).Info("claim sandbox options", "options", opts)
 	metrics.Retries = -1 // starts from 0
 	var claimedSandbox infra.Sandbox
 	// The create retry budget is intentionally bounded (CreateMaxRetrySteps) to
@@ -161,7 +165,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	waitErr := wait.ExponentialBackoffWithContext(claimCtx, createRetryBackoff(), func(context.Context) (bool, error) {
 		metrics.Retries++
 		log.Info("try to claim sandbox", "retries", metrics.Retries)
-		claimed, tryMetrics, claimErr := TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.claimLockChannel, i.createLimiter)
+		claimed, tryMetrics, claimErr := claim.TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.claimLockChannel, i.createLimiter)
 		metrics.Total += tryMetrics.Total
 		metrics.Wait += tryMetrics.Wait
 		metrics.PickAndLock += tryMetrics.PickAndLock
@@ -175,18 +179,23 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		metrics.ClaimResults = append(metrics.ClaimResults, tryMetrics.ClaimResults...)
 		metrics.MergePickSandboxFailures(tryMetrics.PickSandboxFailures)
 		if tryMetrics.LastError != nil {
-			metrics.LastError = tryMetrics.LastError
+			metrics.LastError = managerErrorFromClaim(tryMetrics.LastError)
 		}
 		if claimErr == nil {
-			claimedSandbox = claimed
+			// The neutral engine returns a *claim.Sandbox; wrap it back into the
+			// fat sandboxcr.Sandbox the Manager/API layers consume, carrying over
+			// the transient traffic token that is never persisted to the CR.
+			wrapped := AsSandbox(claimed.Sandbox, i.Cache)
+			wrapped.trafficToken = claimed.TrafficToken()
+			claimedSandbox = wrapped
 			return true, nil
 		}
 		metrics.RetryCost += tryMetrics.Total
 		lastErr = claimErr
-		if errors.As(claimErr, &terminalMutationError{}) || errors.As(claimErr, &terminalValidationError{}) {
+		if errors.As(claimErr, &claim.TerminalMutationError{}) || errors.As(claimErr, &claim.TerminalValidationError{}) {
 			return false, claimErr
 		}
-		if errors.As(claimErr, &retriableError{}) {
+		if errors.As(claimErr, &claim.RetriableError{}) {
 			return false, nil
 		}
 		// Terminal error (e.g. classified BadRequest/Internal): stop retrying so
@@ -207,10 +216,22 @@ func buildClaimError(err error, lastError error, failures []infra.PickSandboxFai
 	if err == nil {
 		return nil
 	}
-	// Preserve terminal error type (ErrorBadRequest / ErrorInternal) from the classifier.
-	// These errors were not retried and carry the correct ErrorCode for HTTP status mapping.
+	// Preserve classified terminal errors. An exhausted retry can also carry a
+	// classified cause, but still needs the accumulated attempt diagnostics.
+	_, retriable := err.(claim.RetriableError)
+	// The neutral engine reports terminal failures as *claim.Error carrying a
+	// category. claim.ErrorCode intentionally mirrors the managererrors codes
+	// (same underlying strings), so convert it directly to preserve the HTTP
+	// status mapping for BadRequest / Conflict / NotFound / Internal.
+	var cErr *claim.Error
+	if !retriable && errors.As(err, &cErr) {
+		return managererrors.WrapError(managererrors.ErrorCode(cErr.Code), err, "%s", cErr.Message)
+	}
+	// Preserve an already-classified manager error (e.g. a typed quota-exceeded
+	// error surfaced by an injected admission hook) so its ErrorCode reaches the
+	// HTTP layer unchanged.
 	var mErr *managererrors.Error
-	if errors.As(err, &mErr) {
+	if !retriable && errors.As(err, &mErr) {
 		return mErr
 	}
 	// Retry exhausted or interrupted: wrap as Internal
@@ -232,7 +253,7 @@ func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions
 		log.Error(err, "invalid clone options")
 		return nil, metrics, err
 	}
-	log.V(utils.DebugLogLevel).Info("clone sandbox options", "options", opts)
+	log.V(logs.DebugLogLevel).Info("clone sandbox options", "options", opts)
 
 	cloneCtx, cancel := context.WithTimeout(ctx, opts.CloneTimeout)
 	defer cancel()
@@ -258,10 +279,10 @@ func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions
 		}
 		metrics.LastError = cloneErr
 		lastErr = cloneErr
-		if errors.As(cloneErr, &terminalMutationError{}) || errors.As(cloneErr, &terminalValidationError{}) {
+		if errors.As(cloneErr, &claim.TerminalMutationError{}) || errors.As(cloneErr, &claim.TerminalValidationError{}) {
 			return false, cloneErr
 		}
-		if errors.As(cloneErr, &retriableError{}) {
+		if errors.As(cloneErr, &claim.RetriableError{}) {
 			return false, nil
 		}
 		// Terminal error: stop retrying and preserve its ErrorCode.
@@ -290,6 +311,14 @@ func buildCloneError(err error) error {
 	var mErr *managererrors.Error
 	if errors.As(err, &mErr) {
 		return mErr
+	}
+	// The clone path reaches shared engine primitives (for example the CSI mount
+	// limit guard) that report failures as *claim.Error. Convert it the same way
+	// buildClaimError does so its category reaches the HTTP layer instead of
+	// being flattened to ErrorInternal.
+	var cErr *claim.Error
+	if errors.As(err, &cErr) {
+		return managererrors.WrapError(managererrors.ErrorCode(cErr.Code), err, "%s", cErr.Message)
 	}
 	if apierrors.IsAlreadyExists(err) {
 		return managererrors.WrapError(managererrors.ErrorConflict, err, "%v", err)
@@ -340,14 +369,20 @@ func (i *Infra) GetCache() cache.Provider {
 	return i.Cache
 }
 
-func (i *Infra) HasTemplate(ctx context.Context, opts infra.HasTemplateOptions) bool {
+func (i *Infra) HasTemplate(ctx context.Context, opts infra.HasTemplateOptions) (bool, error) {
 	_, err := i.Cache.PickSandboxSet(ctx, cache.PickSandboxSetOptions{Namespace: opts.Namespace, Name: opts.Name})
-	return err == nil
+	if errors.Is(err, cache.ErrSandboxSetNotFound) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
-func (i *Infra) HasCheckpoint(ctx context.Context, opts infra.HasCheckpointOptions) bool {
+func (i *Infra) HasCheckpoint(ctx context.Context, opts infra.HasCheckpointOptions) (bool, error) {
 	_, err := i.Cache.GetCheckpoint(ctx, cache.GetCheckpointOptions{Namespace: opts.Namespace, CheckpointID: opts.CheckpointID})
-	return err == nil
+	if errors.Is(err, cache.ErrCheckpointNotFound) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (i *Infra) SelectSandboxes(ctx context.Context, opts infra.SelectSandboxesOptions) ([]infra.Sandbox, error) {
@@ -467,7 +502,7 @@ func (l *claimedSandboxLookup) observeRoute(reader infra.RouteReader, sandboxID 
 	if !ok {
 		return l.hasRoute
 	}
-	if !l.hasRoute || expectations.IsResourceVersionReallyNewer(l.routeResourceVersion, route.ResourceVersion) {
+	if !l.hasRoute || expectations.IsResourceVersionStrictlyNewer(l.routeResourceVersion, route.ResourceVersion) {
 		l.routeResourceVersion = route.ResourceVersion
 		l.hasRoute = true
 	}
@@ -486,12 +521,12 @@ func isSandboxStale(ctx context.Context, lookup claimedSandboxLookup) bool {
 		reason = fallbackReasonRVExpectation
 	case lookup.hasRoute &&
 		lookup.routeResourceVersion != "" &&
-		expectations.IsResourceVersionReallyNewer(cacheRV, lookup.routeResourceVersion):
+		expectations.IsResourceVersionStrictlyNewer(cacheRV, lookup.routeResourceVersion):
 		reason = fallbackReasonCacheLagging
 	default:
 	}
 	if reason != "" {
-		klog.FromContext(ctx).V(utils.DebugLogLevel).Info("informer cache result requires APIReader fallback",
+		klog.FromContext(ctx).V(logs.DebugLogLevel).Info("informer cache result requires APIReader fallback",
 			"sandbox", klog.KObj(lookup.sandbox), "reason", reason,
 			"routeRV", lookup.routeResourceVersion, "cacheRV", cacheRV)
 		sandboxFallbackTotal.WithLabelValues(lookup.sandbox.Namespace, reason).Inc()

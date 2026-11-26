@@ -732,7 +732,7 @@ type TLSAction struct {
 	// Action is required and has no default. Deny rejects the connection;
 	// it does not promise an HTTP response or a specific TLS alert.
 	// Passthrough forwards without decryption or HTTP rule processing.
-	// Both actions stop further TLS rule selection.
+	// Both actions stop further TLS rule selection and skip TCPRules.
 	Action TLSActionType `json:"action"`
 }
 
@@ -741,12 +741,15 @@ type TLSAction struct {
 // and rule-level Audit. Bypass false is equivalent to omission.
 // The following execution order applies only to HTTP rules.
 // Actions run in this order: Bypass, Block, MCPToolPolicy,
-// HeaderManipulation, HTTPCallout, and TokenTransformation. Audit
+// HeaderManipulation, HTTPCallout, TokenTransformation, and Proxy. Audit
 // actions are emitted asynchronously after the request is resolved.
 //
 // Bypass, Block, and a denying MCPToolPolicy stop the remaining actions and
 // rules. Non-terminal actions continue to the next configured action. Every
 // matching rule executes its own actions.
+// +kubebuilder:validation:XValidation:rule="!has(self.proxy) || !has(self.tls)",message="proxy cannot be combined with tls"
+// +kubebuilder:validation:XValidation:rule="!has(self.proxy) || !has(self.block)",message="proxy cannot be combined with block"
+// +kubebuilder:validation:XValidation:rule="!has(self.proxy) || !has(self.bypass) || !self.bypass",message="proxy cannot be combined with enabled bypass"
 type SecurityRuleActions struct {
 	// TLS selects a connection action using visible SNI and the original
 	// destination port. This rule does not participate in HTTP processing.
@@ -757,7 +760,8 @@ type SecurityRuleActions struct {
 	// +optional
 	Block *BlockAction `json:"block,omitempty"`
 	// Bypass forwards the request and skips all remaining actions and rules
-	// across matching profiles. False is equivalent to omission.
+	// across matching profiles, including TCPRules. Independent platform
+	// authorization still applies. False is equivalent to omission.
 	// +optional
 	Bypass bool `json:"bypass,omitempty"`
 	// TokenTransformation rewrites request credentials.
@@ -792,6 +796,13 @@ type SecurityRuleActions struct {
 	//       failStrategy: Block
 	// +optional
 	HTTPCallout *HTTPCalloutAction `json:"httpCallout,omitempty"`
+	// Proxy selects an unauthenticated upstream proxy for normal HTTP/HTTPS
+	// requests. The first executed Proxy wins without terminating evaluation;
+	// later denials still prevent forwarding. If none executes, existing
+	// forwarding and security semantics apply. Explicit client proxy requests,
+	// client CONNECT tunnels, and Sandbox inline rules are not supported.
+	// +optional
+	Proxy *ProxyAction `json:"proxy,omitempty"`
 	// Audit lists rule-specific audit actions. A non-empty list replaces the
 	// profile-level Audit list for this rule. An empty list inherits the
 	// profile-level list.
@@ -799,6 +810,24 @@ type SecurityRuleActions struct {
 	// +listType=map
 	// +listMapKey=name
 	Audit []AuditAction `json:"audit,omitempty"`
+}
+
+// ProxyAction selects an upstream proxy after authorizing the real target.
+// Proxy failures must not fall back to a direct connection. The proxy resolves
+// target domains; HTTP(S) proxy authorization is never sent or forwarded, and
+// SOCKS5 uses only no-auth. HTTPS targets require gateway TLS termination.
+type ProxyAction struct {
+	// URL is an absolute http, https, or socks5 proxy URL with an explicit
+	// port (1-65535). Hosts may be DNS names, IPv4, or bracketed IPv6.
+	// Userinfo, business paths, queries, and fragments are forbidden; a root
+	// slash is accepted. HTTPS proxies require certificate verification.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// The IPv6 alternatives cover eight groups, compressed groups, and an
+	// IPv4 tail (two groups). A pattern avoids per-rule CEL URL parsing costs
+	// in profiles whose existing rule list is unbounded.
+	// +kubebuilder:validation:Pattern=`^(?i:http|https|socks5)://([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.?|\[(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|::|:(:[0-9a-fA-F]{1,4}){1,7}|([0-9a-fA-F]{1,4}:){1,6}(:[0-9a-fA-F]{1,4}){1}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){5}|([0-9a-fA-F]{1,4}:){1}(:[0-9a-fA-F]{1,4}){6}|(([0-9a-fA-F]{1,4}:){6}|::([0-9a-fA-F]{1,4}:){0,5}|([0-9a-fA-F]{1,4}:){1}:([0-9a-fA-F]{1,4}:){0,4}|([0-9a-fA-F]{1,4}:){2}:([0-9a-fA-F]{1,4}:){0,3}|([0-9a-fA-F]{1,4}:){3}:([0-9a-fA-F]{1,4}:){0,2}|([0-9a-fA-F]{1,4}:){4}:([0-9a-fA-F]{1,4}:){0,1}|([0-9a-fA-F]{1,4}:){5}:([0-9a-fA-F]{1,4}:){0,0})(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3})\]):0*([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])/?$`
+	URL string `json:"url"`
 }
 
 // HeaderManipulationAction sets or removes plaintext request headers on
@@ -916,7 +945,50 @@ type SecurityProfileInput struct {
 	Inline map[string]string `json:"inline,omitempty"`
 }
 
-// SecurityProfileSpec defines TLS connection and HTTP security policy for selected Pods.
+// TCPActionType identifies a gateway destination authorization decision.
+// +kubebuilder:validation:Enum=Allow;Deny
+type TCPActionType string
+
+const (
+	// TCPActionAllow permits the destination and stops TCP rule evaluation.
+	TCPActionAllow TCPActionType = "Allow"
+	// TCPActionDeny rejects the destination and stops TCP rule evaluation.
+	TCPActionDeny TCPActionType = "Deny"
+)
+
+// TCPRule is one entry in the ordered gateway destination rule chain.
+// The first matching rule across applicable profiles decides; an unmatched
+// destination is allowed only after the entire chain has been evaluated.
+type TCPRule struct {
+	// Name uniquely identifies the rule within the profile.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+	// Match lists alternative conditions. Entries are ORed; fields within
+	// an entry are ANDed. An empty entry matches every destination.
+	// +kubebuilder:validation:MinItems=1
+	Match []TCPMatch `json:"match"`
+	// Action is required and has no default. Allow permits the destination;
+	// Deny rejects it. Both stop evaluation of all remaining TCP rules.
+	Action TCPActionType `json:"action"`
+}
+
+// TCPMatch matches a forwarding destination IP address and port.
+type TCPMatch struct {
+	// CIDRs lists IPv4 or IPv6 addresses or networks. A single address matches
+	// only that address (IPv4 /32 or IPv6 /128). Entries are ORed; an omitted
+	// or empty list matches any address. Consumers validate address syntax.
+	// +optional
+	CIDRs []string `json:"cidrs,omitempty"`
+	// Ports lists destination ports. Entries are ORed. An omitted or empty
+	// list matches any port.
+	// +optional
+	// +kubebuilder:validation:items:Minimum=1
+	// +kubebuilder:validation:items:Maximum=65535
+	Ports []int32 `json:"ports,omitempty"`
+}
+
+// SecurityProfileSpec defines gateway TLS, HTTP, and TCP destination policy for selected Pods.
 type SecurityProfileSpec struct {
 	// Selector chooses the Pods to which this profile applies. An empty
 	// selector matches every Pod in scope.
@@ -937,11 +1009,43 @@ type SecurityProfileSpec struct {
 	// Rules is the ordered rule chain. TLS selection uses the first matching
 	// rule; HTTP processing accumulates matching HTTP rules until a terminal
 	// action. Rules from matching profiles are combined in profile evaluation
-	// order. An empty list preserves the existing default traffic behavior.
+	// order. Requests without a terminal decision continue to TCPRules.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
 	Rules []SecurityRule `json:"rules,omitempty"`
+	// TCPRules authorizes forwarding destinations at the egress gateway.
+	// Applicable profiles contribute rules in the same priority order as Rules.
+	// Evaluation proceeds as follows:
+	//
+	// 1. Evaluate application Rules when the protocol permits. HTTP Bypass or
+	//    Block and explicit TLS Passthrough or Deny are terminal and skip TCPRules.
+	// 2. Otherwise, evaluate TCPRules in order. The first matching rule's Allow
+	//    or Deny ends TCP evaluation across all applicable profiles.
+	// 3. If no TCP rule matches, including when the chain is empty, allow.
+	//
+	// HTTP uses the resolved forwarding IP and port. Unmatched TLS (including
+	// missing SNI), raw TCP, and sniffing timeouts use the original destination.
+	// TLS termination followed by non-HTTP traffic also uses the original
+	// destination. Non-terminal HTTP actions, such as header or token changes,
+	// do not skip TCPRules. TrafficPolicy remains independently enforced at the
+	// sandbox side, including ingress and UDP; TCPRules does not replace it.
+	// For example, in an IPv4 deployment:
+	//
+	//     tcpRules:
+	//     - name: allow-database
+	//       match:
+	//       - cidrs: ["10.20.0.0/16"]
+	//         ports: [5432]
+	//       action: Allow
+	//     - name: deny-other-ipv4
+	//       match:
+	//       - cidrs: ["0.0.0.0/0"]
+	//       action: Deny
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	TCPRules []TCPRule `json:"tcpRules,omitempty"`
 	// Audit defines the audit actions inherited by rules that do not configure
 	// their own Audit list. Applies only to HTTP rules, never TLS rules.
 	// +optional
@@ -984,7 +1088,7 @@ type SecurityProfileStatus struct {
 // +kubebuilder:printcolumn:name="Accepted",type="string",JSONPath=`.status.conditions[?(@.type=="Accepted")].status`,priority=1
 // +kubebuilder:printcolumn:name="ResolvedRefs",type="string",JSONPath=`.status.conditions[?(@.type=="ResolvedRefs")].status`,priority=1
 //
-// SecurityProfile defines namespaced TLS and HTTP security policy for selected Pods.
+// SecurityProfile defines namespaced TLS, HTTP, and TCP destination policy for selected Pods.
 type SecurityProfile struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional
@@ -1015,7 +1119,7 @@ type SecurityProfileList struct {
 // +kubebuilder:printcolumn:name="Accepted",type="string",JSONPath=`.status.conditions[?(@.type=="Accepted")].status`,priority=1
 // +kubebuilder:printcolumn:name="ResolvedRefs",type="string",JSONPath=`.status.conditions[?(@.type=="ResolvedRefs")].status`,priority=1
 //
-// GlobalSecurityProfile defines cluster-scoped TLS and HTTP security policy for
+// GlobalSecurityProfile defines cluster-scoped TLS, HTTP, and TCP destination policy for
 // selected Pods in all namespaces. Global and namespaced profiles share the
 // same priority ordering.
 type GlobalSecurityProfile struct {

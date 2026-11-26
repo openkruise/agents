@@ -41,13 +41,16 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -59,7 +62,7 @@ import (
 
 func imageChecker(image string, controller *Controller) func(t *testing.T, resp *models.Sandbox) {
 	return func(t *testing.T, resp *models.Sandbox) {
-		sbx, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{v1alpha1.SandboxStateRunning, v1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+		sbx, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 			SandboxID: resp.SandboxID,
 		})
 		assert.NoError(t, err)
@@ -260,7 +263,7 @@ func TestCreateSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox) {
 				assert.Equal(t, "0001-01-01T00:00:00Z", resp.EndAt)
-				sbx, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{v1alpha1.SandboxStateRunning, v1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+				sbx, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 					SandboxID: resp.SandboxID,
 				})
 				assert.NoError(t, err)
@@ -388,7 +391,7 @@ func TestCreateSandbox(t *testing.T) {
 
 				assert.NotContains(t, sbx.Spec.Template.Labels, "regular-metadata-key")
 
-				sandboxFromManager, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{v1alpha1.SandboxStateRunning, v1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+				sandboxFromManager, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 					SandboxID: resp.SandboxID,
 				})
 				assert.NoError(t, err)
@@ -558,18 +561,21 @@ func TestCreateSandboxReturnsImmediatelyWhenCreateOnNoStockHitsQuota(t *testing.
 	// being rejected by ResourceQuota. Forbidden create failures are classified
 	// as terminal platform errors, so CreateSandbox must return immediately
 	// instead of sleeping and retrying sandbox creation.
+	//
+	// Create-on-no-stock is a claim, so it creates through the neutral engine's
+	// hook (claim.DefaultCreateSandbox), not the sandboxcr clone hook.
 	quotaError := apierrors.NewForbidden(
 		schema.GroupResource{Group: "agents.kruise.io", Resource: "sandboxes"},
 		"quota-denied-sandbox",
 		fmt.Errorf("exceeded quota: cpu-quota, requested: cpu=2, used: cpu=10, limited: cpu=10"),
 	)
-	origCreateSandbox := sandboxcr.DefaultCreateSandbox
+	origCreateSandbox := claim.DefaultCreateSandbox
 	var createCalls atomic.Int32
-	sandboxcr.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) (*v1alpha1.Sandbox, error) {
+	claim.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) (*v1alpha1.Sandbox, error) {
 		createCalls.Add(1)
 		return nil, quotaError
 	}
-	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
+	t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
 	user := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
@@ -809,7 +815,7 @@ func TestCreateSandboxAlwaysCreatesAccessToken(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxSkipsAccessTokenWhenInitRuntimeIsSkipped(t *testing.T) {
+func TestCreateSandboxAllocatesAccessTokenWhenInitRuntimeIsSkipped(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
 
@@ -850,10 +856,13 @@ func TestCreateSandboxSkipsAccessTokenWhenInitRuntimeIsSkipped(t *testing.T) {
 			resp, apiError := controller.CreateSandbox(NewRequest(t, nil, body, nil, user))
 			require.Nil(t, apiError)
 			require.NotNil(t, resp.Body)
-			assert.Empty(t, resp.Body.EnvdAccessToken)
+			require.NotEmpty(t, resp.Body.EnvdAccessToken)
+			_, err := uuid.Parse(resp.Body.EnvdAccessToken)
+			require.NoError(t, err)
 
 			sbx := GetSandbox(t, resp.Body.SandboxID, fc)
-			assert.NotContains(t, sbx.Annotations, v1alpha1.AnnotationRuntimeAccessToken)
+			assert.Equal(t, resp.Body.EnvdAccessToken, sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken])
+			assert.NotContains(t, sbx.Annotations, v1alpha1.AnnotationInitRuntimeRequest)
 		})
 	}
 }
@@ -1106,9 +1115,11 @@ func CreateCheckpointAndTemplate(t *testing.T, controller *Controller, checkpoin
 	err = fc.Status().Update(t.Context(), cp)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
+		ok, err := controller.manager.HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
 			CheckpointID: checkpointID,
 		})
+		assert.NoError(t, err)
+		return ok
 	}, time.Second, 10*time.Millisecond)
 
 	return func() {
@@ -1176,9 +1187,11 @@ func CreateCheckpointAndTemplateWithAnnotations(t *testing.T, controller *Contro
 	err = fc.Status().Update(t.Context(), cp)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
+		ok, err := controller.manager.HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
 			CheckpointID: checkpointID,
 		})
+		assert.NoError(t, err)
+		return ok
 	}, time.Second, 10*time.Millisecond)
 
 	return func() {
@@ -1309,7 +1322,7 @@ func TestCloneSandbox(t *testing.T) {
 				_, err := time.Parse(time.RFC3339, resp.TrafficAccessTokenExpiration)
 				require.NoError(t, err)
 
-				persisted, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{v1alpha1.SandboxStateRunning}, infra.GetSandboxOptions{
+				persisted, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{sandboxstate.Running}, infra.GetSandboxOptions{
 					SandboxID: resp.SandboxID,
 				})
 				require.NoError(t, err)
@@ -1371,7 +1384,7 @@ func TestCloneSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox, controller *Controller) {
 				assert.Equal(t, "0001-01-01T00:00:00Z", resp.EndAt)
-				sbx, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{v1alpha1.SandboxStateRunning, v1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+				sbx, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 					SandboxID: resp.SandboxID,
 				})
 				assert.NoError(t, err)
@@ -1386,7 +1399,7 @@ func TestCloneSandbox(t *testing.T) {
 				AutoPause:  true,
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox, controller *Controller) {
-				sbx, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{v1alpha1.SandboxStateRunning, v1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+				sbx, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 					SandboxID: resp.SandboxID,
 				})
 				assert.NoError(t, err)
@@ -1872,7 +1885,7 @@ func TestAutoPause(t *testing.T) {
 			tt.createChecker(t, GetSandbox(t, createResp.Body.SandboxID, client))
 
 			// Register sandbox key for wait simulation
-			mockMgr := controller.cache.(*cache.Cache).GetMockManager()
+			mockMgr := controller.cache.(*cachetest.Cache).GetMockManager()
 			sbx := GetSandbox(t, createResp.Body.SandboxID, client)
 			mockMgr.AddWaitReconcileKey(sbx)
 
@@ -1961,11 +1974,11 @@ func TestDeleteSandbox(t *testing.T) {
 
 			// Decorator: DefaultDeleteSandbox - control delete result (set after create)
 			if tt.mockDeleteErr != nil {
-				origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-				sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
+				origDeleteSandbox := claim.DefaultDeleteSandbox
+				claim.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
 					return tt.mockDeleteErr
 				}
-				t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+				t.Cleanup(func() { claim.DefaultDeleteSandbox = origDeleteSandbox })
 			}
 
 			sandboxID := tt.sandboxID
@@ -1995,40 +2008,51 @@ func TestDeleteSandbox(t *testing.T) {
 }
 
 func TestDeleteSandbox_ReleasesQuotaAfterAcceptedDelete(t *testing.T) {
-	fakeQuota := &fakeQuotaManager{}
-	controller, _, teardown := SetupWithQuota(t, fakeQuota)
-	defer teardown()
+	for _, state := range []string{sandboxstate.Running, sandboxstate.Expired} {
+		t.Run(state, func(t *testing.T) {
+			fakeQuota := &fakeQuotaManager{}
+			controller, fc, teardown := SetupWithQuota(t, fakeQuota)
+			defer teardown()
 
-	user := &models.CreatedTeamAPIKey{
-		ID:        uuid.New(),
-		Key:       InitKey,
-		Name:      "admin",
-		Team:      models.AdminTeam(),
-		QuotaSpec: quotaSpecForAPIKeyTest(2),
+			user := &models.CreatedTeamAPIKey{
+				ID:        uuid.New(),
+				Key:       InitKey,
+				Name:      "admin",
+				Team:      models.AdminTeam(),
+				QuotaSpec: quotaSpecForAPIKeyTest(2),
+			}
+
+			cleanup := CreateSandboxPool(t, controller, "test-template", 1)
+			_ = cleanup
+
+			createResp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+				},
+			}, nil, user))
+			require.Nil(t, apiErr)
+			require.NotNil(t, createResp.Body)
+
+			sandboxID := createResp.Body.SandboxID
+			sandbox := GetSandbox(t, sandboxID, fc)
+			if state == sandboxstate.Expired {
+				expired := metav1.NewTime(time.Now().Add(-time.Minute))
+				sandbox.Spec.ShutdownTime = &expired
+				require.NoError(t, fc.Update(t.Context(), sandbox))
+				waitForSandboxState(t, controller, sandboxID, user, state)
+			}
+			deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{"sandboxID": sandboxID}, user))
+
+			require.Nil(t, apiErr)
+			assert.Equal(t, http.StatusNoContent, deleteResp.Code)
+			assert.Equal(t, int64(1), fakeQuota.releaseCalls.Load())
+			assert.True(t, fakeQuota.releaseHasDeadline.Load())
+			assert.Equal(t, user.ID.String(), fakeQuota.lastRelease.User)
+			assert.NotEmpty(t, fakeQuota.lastRelease.LockString)
+			assert.True(t, apierrors.IsNotFound(fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sandbox), &v1alpha1.Sandbox{})))
+		})
 	}
-
-	cleanup := CreateSandboxPool(t, controller, "test-template", 1)
-	_ = cleanup
-
-	createResp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
-		TemplateID: "test-template",
-		Metadata: map[string]string{
-			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
-		},
-	}, nil, user))
-	require.Nil(t, apiErr)
-	require.NotNil(t, createResp.Body)
-
-	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
-		"sandboxID": createResp.Body.SandboxID,
-	}, user))
-
-	require.Nil(t, apiErr)
-	assert.Equal(t, http.StatusNoContent, deleteResp.Code)
-	assert.Equal(t, int64(1), fakeQuota.releaseCalls.Load())
-	assert.True(t, fakeQuota.releaseHasDeadline.Load())
-	assert.Equal(t, user.ID.String(), fakeQuota.lastRelease.User)
-	assert.NotEmpty(t, fakeQuota.lastRelease.LockString)
 }
 
 func TestDeleteSandbox_UnlimitedKeyDoesNotReleaseQuota(t *testing.T) {
@@ -2251,11 +2275,11 @@ func TestDeleteSandbox_DeleteFailureDoesNotReleaseQuota(t *testing.T) {
 	require.Nil(t, apiErr)
 	require.NotNil(t, createResp.Body)
 
-	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-	sandboxcr.DefaultDeleteSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) error {
+	origDeleteSandbox := claim.DefaultDeleteSandbox
+	claim.DefaultDeleteSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) error {
 		return fmt.Errorf("mock delete error")
 	}
-	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+	t.Cleanup(func() { claim.DefaultDeleteSandbox = origDeleteSandbox })
 
 	_, apiErr = controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": createResp.Body.SandboxID,
@@ -2321,7 +2345,16 @@ func (c *fixedClaimedSandboxCache) GetClaimedSandbox(ctx context.Context, _ cach
 	return c.sandbox.DeepCopy(), nil
 }
 
-func TestDeleteSandboxDeadClaimedSandbox(t *testing.T) {
+func waitForSandboxState(t *testing.T, controller *Controller, sandboxID string, user *models.CreatedTeamAPIKey, state string) {
+	t.Helper()
+	req := NewRequest(t, nil, nil, map[string]string{"sandboxID": sandboxID}, user)
+	require.Eventually(t, func() bool {
+		_, apiErr := controller.getSandboxOfUser(req.Context(), sandboxID, []string{state})
+		return apiErr == nil
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestDeleteSandboxProvisioningClaimedSandbox(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
 
@@ -2331,18 +2364,18 @@ func TestDeleteSandboxDeadClaimedSandbox(t *testing.T) {
 		Name: "admin",
 		Team: models.AdminTeam(),
 	}
-	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "dead-delete-sandbox", "test-template", user.ID.String(), nil)
+	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "provisioning-delete-sandbox", "test-template", user.ID.String(), nil)
 	sandboxID := fmt.Sprintf("%s--%s", sandbox.Namespace, sandbox.Name)
 	UpdateSandboxWhen(t, fc, sandboxID, Immediately, DoSetSandboxStatus(v1alpha1.SandboxRunning, "", metav1.ConditionFalse))
-	require.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, &v1alpha1.Sandbox{}))
+	waitForSandboxState(t, controller, sandboxID, user, sandboxstate.Provisioning)
 
 	deleteCalls := 0
-	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-	sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
+	origDeleteSandbox := claim.DefaultDeleteSandbox
+	claim.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
 		deleteCalls++
 		return origDeleteSandbox(ctx, sbx, client)
 	}
-	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+	t.Cleanup(func() { claim.DefaultDeleteSandbox = origDeleteSandbox })
 
 	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": sandboxID,
@@ -2375,12 +2408,12 @@ func TestDeleteSandboxTerminalDeadClaimedSandbox(t *testing.T) {
 	UpdateSandboxWhen(t, fc, sandboxID, Immediately, DoSetSandboxStatus(v1alpha1.SandboxTerminating, "", metav1.ConditionFalse))
 
 	deleteCalls := 0
-	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-	sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
+	origDeleteSandbox := claim.DefaultDeleteSandbox
+	claim.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
 		deleteCalls++
 		return origDeleteSandbox(ctx, sbx, client)
 	}
-	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+	t.Cleanup(func() { claim.DefaultDeleteSandbox = origDeleteSandbox })
 
 	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": sandboxID,
@@ -2392,8 +2425,8 @@ func TestDeleteSandboxTerminalDeadClaimedSandbox(t *testing.T) {
 	assert.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, &v1alpha1.Sandbox{}))
 }
 
-// Delete only targets claimed sandboxes. When the lookup resolves a state
-// outside claimedSandboxStates (here "creating" from a Pending phase), the
+// When the lookup resolves a state outside deletableSandboxStates
+// (here "creating" from a Pending phase), the
 // manager rejects the lookup and the handler reports success without
 // performing a deletion; the CR stays untouched.
 func TestDeleteSandboxNonClaimedStateReturnsSuccessWithoutDelete(t *testing.T) {
@@ -2410,21 +2443,23 @@ func TestDeleteSandboxNonClaimedStateReturnsSuccessWithoutDelete(t *testing.T) {
 	sandboxID := fmt.Sprintf("%s--%s", sandbox.Namespace, sandbox.Name)
 	UpdateSandboxWhen(t, fc, sandboxID, Immediately, DoSetSandboxStatus(v1alpha1.SandboxPending, "", ""))
 
-	// Wait until the informer cache reports the Pending phase, so the lookup
-	// deterministically observes the "creating" state.
+	waitForSandboxState(t, controller, sandboxID, user, sandboxstate.Creating)
 	req := NewRequest(t, nil, nil, map[string]string{"sandboxID": sandboxID}, user)
 	require.Eventually(t, func() bool {
-		_, apiErr := controller.getSandboxOfUser(req.Context(), sandboxID, claimedSandboxStates)
-		return apiErr != nil && apiErr.Code == http.StatusNotFound
+		list, apiErr := controller.ListSandboxes(NewRequest(t, nil, nil, nil, user))
+		return apiErr == nil && len(list.Body) == 0
 	}, 5*time.Second, 50*time.Millisecond)
+	_, describeErr := controller.DescribeSandbox(req)
+	require.NotNil(t, describeErr)
+	assert.Equal(t, http.StatusNotFound, describeErr.Code)
 
 	deleteCalls := 0
-	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-	sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
+	origDeleteSandbox := claim.DefaultDeleteSandbox
+	claim.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
 		deleteCalls++
 		return origDeleteSandbox(ctx, sbx, client)
 	}
-	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+	t.Cleanup(func() { claim.DefaultDeleteSandbox = origDeleteSandbox })
 
 	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": sandboxID,
@@ -2438,7 +2473,7 @@ func TestDeleteSandboxNonClaimedStateReturnsSuccessWithoutDelete(t *testing.T) {
 	assert.Nil(t, got.DeletionTimestamp)
 }
 
-func TestDescribeSandboxDeadClaimedSandbox(t *testing.T) {
+func TestDescribeSandboxProvisioningClaimedSandbox(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
 
@@ -2448,22 +2483,20 @@ func TestDescribeSandboxDeadClaimedSandbox(t *testing.T) {
 		Name: "admin",
 		Team: models.AdminTeam(),
 	}
-	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "dead-describe-sandbox", "test-template", user.ID.String(), nil)
+	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "provisioning-describe-sandbox", "test-template", user.ID.String(), nil)
 	sandboxID := fmt.Sprintf("%s--%s", sandbox.Namespace, sandbox.Name)
 	UpdateSandboxWhen(t, fc, sandboxID, Immediately, DoSetSandboxStatus(v1alpha1.SandboxRunning, "", metav1.ConditionFalse))
+	waitForSandboxState(t, controller, sandboxID, user, sandboxstate.Provisioning)
 
 	describeResp, apiErr := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": sandboxID,
 	}, user))
 
-	// The sandbox is in the Running phase with Ready=False, which
-	// GetSandboxState reports as ("dead", "RunningResourceClaimedButNotReady").
-	// DescribeSandbox uses claimedSandboxStates so the sandbox is found, and
-	// convertToE2BSandbox surfaces the state as "running" because the
-	// underlying phase is Running and the sandbox is still live.
+	// Running with Ready=False is provisioning. Describe admits that state
+	// and exposes it as running for E2B clients.
 	assert.Nil(t, apiErr)
 	require.NotNil(t, describeResp.Body)
-	assert.Equal(t, v1alpha1.SandboxStateRunning, describeResp.Body.State)
+	assert.Equal(t, models.SandboxStateRunning, describeResp.Body.State)
 }
 
 func TestDescribeSandboxTerminalDeadClaimedSandbox(t *testing.T) {
@@ -2546,7 +2579,7 @@ func TestDescribeSandboxByShortID(t *testing.T) {
 	)
 }
 
-func TestConnectSandboxDeadClaimedSandbox(t *testing.T) {
+func TestConnectSandboxProvisioningClaimedSandbox(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
 
@@ -2556,9 +2589,10 @@ func TestConnectSandboxDeadClaimedSandbox(t *testing.T) {
 		Name: "admin",
 		Team: models.AdminTeam(),
 	}
-	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "dead-connect-sandbox", "test-template", user.ID.String(), nil)
+	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "provisioning-connect-sandbox", "test-template", user.ID.String(), nil)
 	sandboxID := fmt.Sprintf("%s--%s", sandbox.Namespace, sandbox.Name)
 	UpdateSandboxWhen(t, fc, sandboxID, Immediately, DoSetSandboxStatus(v1alpha1.SandboxRunning, "", metav1.ConditionFalse))
+	waitForSandboxState(t, controller, sandboxID, user, sandboxstate.Provisioning)
 
 	connectResp, apiErr := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
 		TimeoutSeconds: 60,
@@ -2840,11 +2874,11 @@ func TestDeleteSandboxFailurePropagatesResourceContext(t *testing.T) {
 	}, nil, user))
 	require.Nil(t, err)
 
-	origDelete := sandboxcr.DefaultDeleteSandbox
-	sandboxcr.DefaultDeleteSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) error {
+	origDelete := claim.DefaultDeleteSandbox
+	claim.DefaultDeleteSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) error {
 		return fmt.Errorf("delete backend unavailable")
 	}
-	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDelete })
+	t.Cleanup(func() { claim.DefaultDeleteSandbox = origDelete })
 
 	_, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": createResp.Body.SandboxID,

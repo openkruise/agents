@@ -162,7 +162,7 @@ func (d *AntiDriftDriver) Run(ctx context.Context) {
 		go func() {
 			defer close(runDone)
 			// Derive a context that cancels when stopCh closes, so WaitPrimary
-			// unblocks on Stop() even if the parent context is still alive.
+			// unblocks on Stop even if the parent context is still alive.
 			runCtx, cancel := context.WithCancel(ctx)
 			go func() {
 				select {
@@ -406,7 +406,8 @@ func (d *AntiDriftDriver) QuotaEventHandler() func(infra.QuotaSandboxEvent) {
 	}
 }
 
-func (d *AntiDriftDriver) Stop() {
+// Stop signals shutdown and bounds worker draining by the caller's budget.
+func (d *AntiDriftDriver) Stop(ctx context.Context) {
 	if d == nil {
 		return
 	}
@@ -419,8 +420,6 @@ func (d *AntiDriftDriver) Stop() {
 		d.seenLeaked = map[string]leakedObservation{}
 		d.pendingEvents = map[string]infra.QuotaSandboxEvent{}
 		d.limitedOwners = map[string]struct{}{}
-		done := d.runDone
-		eventWorkerDone := d.eventWorkerDone
 		eventQueue := d.eventQueue
 		cycleCancel := d.cycleCancel
 		close(d.stopCh)
@@ -437,13 +436,19 @@ func (d *AntiDriftDriver) Stop() {
 				klog.Background().Error(err, "failed to remove quota anti-drift subscription")
 			}
 		}
-		if eventWorkerDone != nil {
-			<-eventWorkerDone
-		}
-		if done != nil {
-			<-done
-		}
 	})
+	d.mu.Lock()
+	done, eventWorkerDone := d.runDone, d.eventWorkerDone
+	d.mu.Unlock()
+	for _, ch := range []<-chan struct{}{eventWorkerDone, done} {
+		if ch != nil {
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
 }
 
 func (d *AntiDriftDriver) stillPrimary() bool {

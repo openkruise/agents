@@ -25,10 +25,10 @@ import (
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
-
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -120,8 +120,11 @@ func countStartupBlocked(groups GroupedSandboxes, sbxMaxPendingTimeout time.Dura
 			blockers.Failed++
 			continue
 		}
-		state, reason := utils.GetSandboxState(sandbox)
-		if state != agentsv1alpha1.SandboxStateCreating || reason != agentsv1alpha1.SandboxStateReasonResourcePending {
+		// The startup budget only charges instances the resource itself still
+		// reports as creating, so an observation that merely lacks readiness
+		// (a pool member waiting on its own rollout) is not charged here.
+		state, _ := utils.GetSandboxState(sandbox)
+		if state != sandboxstate.Creating || sandbox.Status.Phase != agentsv1alpha1.SandboxPending {
 			continue
 		}
 		deadline := sandbox.CreationTimestamp.Add(sbxMaxPendingTimeout)

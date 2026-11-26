@@ -134,10 +134,18 @@ func (sc *Controller) DeleteTemplate(r *http.Request) (web.ApiResponse[struct{}]
 	}
 
 	namespace := sc.getNamespaceOfUser(user)
-	if sc.manager.GetInfra().HasTemplate(ctx, infra.HasTemplateOptions{
+	isSandboxSetTemplate, err := sc.manager.HasTemplate(ctx, infra.HasTemplateOptions{
 		Namespace: namespace,
 		Name:      templateID,
-	}) {
+	})
+	if err != nil {
+		log.Error(err, "failed to check template existence", "templateID", templateID)
+		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to check template",
+		}
+	}
+	if isSandboxSetTemplate {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Code:    http.StatusUnauthorized,
 			Message: "Deleting SandboxSet-backed templates through the E2B API is not supported",

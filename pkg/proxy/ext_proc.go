@@ -35,11 +35,10 @@ import (
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
-var LogLevel = utils.DebugLogLevel + 1
+var LogLevel = logs.DebugLogLevel + 1
 
 func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 	log := klog.LoggerWithValues(klog.Background(), "contextID", uuid.NewString()).V(LogLevel)
@@ -129,8 +128,8 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 		log.Info("route not found", "sandboxID", sandboxID)
 		return s.logAndCreateErrorResponse(http.StatusBadGateway, errorMsg, log)
 	}
-	if route.State != agentsv1alpha1.SandboxStateRunning {
-		log.Info("sandbox is not running", "sandboxID", sandboxID, "route", route)
+	if !route.CanRouteTraffic() {
+		log.Info("sandbox is not ready for traffic", "sandboxID", sandboxID, "route", route)
 		return s.logAndCreateErrorResponse(http.StatusBadGateway, errorMsg, log)
 	}
 	if extraHeaders == nil {

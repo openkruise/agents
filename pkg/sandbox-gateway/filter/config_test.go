@@ -300,7 +300,7 @@ func TestConfigParserJWT(t *testing.T) {
 			}
 			parser := &ConfigParser{}
 			if tt.manager != nil {
-				parser = NewConfigParser(tt.manager)
+				parser = NewConfigParser(tt.manager, nil)
 			}
 			result, err := parser.Parse(input, &fakeConfigCallbackHandler{})
 			if tt.expectError != "" {
@@ -364,7 +364,7 @@ func TestConfigParserProcessWideJWTMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			manager := &fakeJWTAuthManager{}
-			parser := NewConfigParser(manager)
+			parser := NewConfigParser(manager, nil)
 			if tt.parseRouteFirst {
 				_, err := parser.Parse(typedFilterConfig(t, map[string]any{}), nil)
 				require.NoError(t, err)
@@ -674,7 +674,7 @@ func TestConfigParserMerge(t *testing.T) {
 
 func TestConfigParserMergeJWT(t *testing.T) {
 	manager := &fakeJWTAuthManager{}
-	parser := NewConfigParser(manager)
+	parser := NewConfigParser(manager, nil)
 	parent := newFilterConfig(&Config{EnableAuth: true}, manager)
 	child := newFilterConfig(&Config{
 		EnableJWTAuth:            true,

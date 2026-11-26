@@ -17,6 +17,7 @@ GATEWAY_SO_FILE ?= $(GATEWAY_PLUGIN_NAME).so
 CONTROLLER_IMG ?= agent-sandbox-controller:latest
 MANAGER_IMG ?= sandbox-manager:latest
 RUNTIME_IMG ?= agent-runtime:latest
+IDENTITY_PROVIDER_IMG ?= agent-identity-provider:latest
 GATEWAY_IMG ?= $(GATEWAY_PLUGIN_NAME):latest
 PLATFORMS ?= linux/amd64,linux/arm64
 
@@ -59,7 +60,7 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=controller-role crd webhook paths="./api/..." paths="./pkg/..." paths="./cmd/..." output:crd:artifacts:config=config/crd/bases output:webhook:artifacts:config=config/webhook
+	$(CONTROLLER_GEN) rbac:roleName=controller-role crd:generateEmbeddedObjectMeta=true webhook paths="./api/..." paths="./pkg/..." paths="./cmd/..." output:crd:artifacts:config=config/crd/bases output:webhook:artifacts:config=config/webhook
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -154,6 +155,18 @@ docker-buildx-manager: ## Build multi-platform docker image for sandbox-manager.
 .PHONY: docker-pushx-manager
 docker-pushx-manager: ## Build and push multi-platform docker image for sandbox-manager.
 	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/sandbox-manager.Dockerfile -t ${MANAGER_IMG} --push .
+
+.PHONY: docker-build-identity-provider
+docker-build-identity-provider: ## Build docker image for agent-identity-provider.
+	docker build -f dockerfiles/agent-identity-provider.Dockerfile -t ${IDENTITY_PROVIDER_IMG} .
+
+.PHONY: docker-buildx-identity-provider
+docker-buildx-identity-provider: ## Build multi-platform docker image for agent-identity-provider.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/agent-identity-provider.Dockerfile -t ${IDENTITY_PROVIDER_IMG} .
+
+.PHONY: docker-pushx-identity-provider
+docker-pushx-identity-provider: ## Build and push multi-platform docker image for agent-identity-provider.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/agent-identity-provider.Dockerfile -t ${IDENTITY_PROVIDER_IMG} --push .
 
 # RUNTIME_VERSION stamps the agent-runtime binary with the revision it was built
 # from (nearest agent-runtime tag + commit + dirty marker), falling back to the
@@ -254,13 +267,19 @@ undeploy-all: undeploy-sandbox-manager undeploy-agent-sandbox-controller
 KUBECTL ?= kubectl
 KIND ?= kind
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
-CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
+# controller-gen is declared as a tool directive in tools.mod (see the comment
+# near the "deps" target for the tools.mod sync mechanism) and runs through
+# the module toolchain instead of a go-install-tool download. GOWORK=off and
+# -mod=readonly pin dependency resolution to tools.mod, bypassing any active
+# Go workspace (incompatible with -modfile) and the main module's vendor tree
+# (which lacks the tool-only dependencies); go tool cannot pass -mod, so the
+# generator is invoked with go run.
+CONTROLLER_GEN ?= GOWORK=off go run -mod=readonly -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
-CONTROLLER_TOOLS_VERSION ?= v0.23.0
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
@@ -271,9 +290,13 @@ ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -
 # pkg/servers/e2b bind the fixed route-refresh (7789) and ext-proc (9002)
 # ports, and a bind failure is now a hard test failure. Drop it once those
 # listeners take injectable ports.
+# -coverpkg credits a package's coverage from every test binary that exercises
+# it, not just its own. Lower-layer packages (e.g. pkg/cache) are driven through
+# upper-layer controller/infra tests, so without this their cross-package
+# coverage is dropped and project/patch coverage under-reports.
 .PHONY: test
 test:
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -race -p 1 ./pkg/... -coverprofile raw-cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -race -p 1 ./pkg/... -coverpkg=./pkg/... -coverprofile raw-cover.out
 	grep -v "pkg/client" raw-cover.out > cover.out
 
 .PHONY: kustomize
@@ -304,13 +327,12 @@ endif
 
 .PHONY: deploy-crd
 deploy-crd: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${CONTROLLER_IMG}
+	cd config/sandbox-controller && $(KUSTOMIZE) edit set image controller=${CONTROLLER_IMG}
 	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
 
 .PHONY: controller-gen
-controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
-$(CONTROLLER_GEN): $(LOCALBIN)
-	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
+controller-gen: ## Tidy tools.mod, which pins the code generation tools as tool directives.
+	go mod tidy -modfile=tools.mod
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
@@ -323,9 +345,17 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 # $3 - specific version of package
 
 # Install dependencies
+#
+# tools.mod mirrors go.mod (same module path, same dependency versions) and adds
+# tool directives for the code generation tools: controller-gen
+# (sigs.k8s.io/controller-tools) and the client generators
+# (k8s.io/code-generator). Whenever dependencies are upgraded in go.mod, apply
+# the same upgrades to tools.mod and re-run tidy so both files and tools.sum
+# stay in sync; `make deps` tidies both module files.
 .PHONY: deps
 deps:
 	go mod tidy
+	go mod tidy -modfile=tools.mod
 
 define go-install-tool
 @[ -f "$(1)-$(3)" ] && [ "$$(readlink -- "$(1)" 2>/dev/null)" = "$(1)-$(3)" ] || { \

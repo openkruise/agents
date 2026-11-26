@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,8 +35,10 @@ import (
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/identity/oidc"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	serving "github.com/openkruise/agents/pkg/sandbox-gateway/sessionservice"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
 
@@ -89,7 +92,9 @@ func useTestRegistry(t *testing.T) *registry.Registry {
 
 // mockRequestHeaderMap implements api.RequestHeaderMap for testing
 type mockRequestHeaderMap struct {
-	headers map[string]string
+	headers    map[string]string
+	additional [][2]string
+	inRange    bool
 }
 
 func newMockRequestHeaderMap() *mockRequestHeaderMap {
@@ -97,6 +102,9 @@ func newMockRequestHeaderMap() *mockRequestHeaderMap {
 }
 
 func (m *mockRequestHeaderMap) Get(key string) (string, bool) {
+	if m.inRange {
+		panic("Get during Range")
+	}
 	val, ok := m.headers[key]
 	return val, ok
 }
@@ -107,25 +115,61 @@ func (m *mockRequestHeaderMap) GetRaw(name string) string {
 }
 
 func (m *mockRequestHeaderMap) Values(key string) []string {
-	if val, ok := m.headers[key]; ok {
-		return []string{val}
+	var values []string
+	for name, value := range m.headers {
+		if strings.EqualFold(name, key) {
+			values = append(values, value)
+		}
 	}
-	return nil
+	for _, kv := range m.additional {
+		if strings.EqualFold(kv[0], key) {
+			values = append(values, kv[1])
+		}
+	}
+	return values
 }
 
 func (m *mockRequestHeaderMap) Set(key, value string) {
+	if m.inRange {
+		panic("Set during Range")
+	}
 	m.headers[key] = value
 }
 
 func (m *mockRequestHeaderMap) Add(key, value string) {
+	if _, ok := m.headers[key]; ok {
+		m.additional = append(m.additional, [2]string{key, value})
+		return
+	}
 	m.headers[key] = value
 }
 
 func (m *mockRequestHeaderMap) Del(key string) {
-	delete(m.headers, key)
+	if m.inRange {
+		panic("Del during Range")
+	}
+	for name := range m.headers {
+		if strings.EqualFold(name, key) {
+			delete(m.headers, name)
+		}
+	}
+	kept := m.additional[:0]
+	for _, kv := range m.additional {
+		if !strings.EqualFold(kv[0], key) {
+			kept = append(kept, kv)
+		}
+	}
+	m.additional = kept
 }
 
 func (m *mockRequestHeaderMap) Range(f func(key, value string) bool) {
+	m.inRange = true
+	defer func() { m.inRange = false }()
+	for _, kv := range m.additional {
+		if !f(kv[0], kv[1]) {
+			return
+		}
+	}
 	// Include pseudo-headers that a real Envoy filter would provide
 	if !f(":scheme", m.Scheme()) {
 		return
@@ -156,6 +200,9 @@ func (m *mockRequestHeaderMap) GetAllHeaders() map[string][]string {
 	for k, v := range m.headers {
 		result[k] = []string{v}
 	}
+	for _, kv := range m.additional {
+		result[kv[0]] = append(result[kv[0]], kv[1])
+	}
 	return result
 }
 
@@ -178,6 +225,13 @@ func (m *mockRequestHeaderMapWithHost) Host() string {
 }
 
 func (m *mockRequestHeaderMapWithHost) Range(f func(key, value string) bool) {
+	m.inRange = true
+	defer func() { m.inRange = false }()
+	for _, kv := range m.additional {
+		if !f(kv[0], kv[1]) {
+			return
+		}
+	}
 	if !f(":scheme", m.Scheme()) {
 		return
 	}
@@ -224,6 +278,13 @@ func (m *mockRequestHeaderMapCustom) Scheme() string {
 }
 
 func (m *mockRequestHeaderMapCustom) Range(f func(key, value string) bool) {
+	m.inRange = true
+	defer func() { m.inRange = false }()
+	for _, kv := range m.additional {
+		if !f(kv[0], kv[1]) {
+			return
+		}
+	}
 	if !f(":scheme", m.Scheme()) {
 		return
 	}
@@ -256,7 +317,7 @@ func putRunningTestRoute(t *testing.T, routeRegistry *registry.Registry, id, ip 
 	t.Helper()
 	putTestRoute(t, routeRegistry, id, sandboxroute.Route{
 		IP:              ip,
-		State:           agentsv1alpha1.SandboxStateRunning,
+		State:           sandboxstate.Running,
 		ResourceVersion: "1",
 	})
 }
@@ -358,6 +419,7 @@ type mockDecoderFilterCallbacks struct {
 	replyStatusCode      int
 	replyBody            string
 	replyDetails         string
+	replyHeaders         map[string][]string
 
 	continueCalled bool
 	continueStatus api.StatusType
@@ -383,6 +445,10 @@ func (m *mockDecoderFilterCallbacks) SendLocalReply(responseCode int, bodyText s
 	m.replyStatusCode = responseCode
 	m.replyBody = bodyText
 	m.replyDetails = details
+	m.replyHeaders = make(map[string][]string, len(headers))
+	for key, values := range headers {
+		m.replyHeaders[key] = append([]string(nil), values...)
+	}
 	if m.done != nil {
 		select {
 		case m.done <- struct{}{}:
@@ -584,7 +650,7 @@ func TestDecodeHeadersLocalReplies(t *testing.T) {
 			name: "creating sandbox is not routable",
 			arrange: func(t *testing.T, r *registry.Registry) {
 				putTestRoute(t, r, "default--test-sandbox", sandboxroute.Route{
-					IP: "10.0.0.1", State: agentsv1alpha1.SandboxStateCreating, ResourceVersion: "1",
+					IP: "10.0.0.1", State: sandboxstate.Creating, ResourceVersion: "1",
 				})
 			},
 			sandboxID:    "default--test-sandbox",
@@ -596,8 +662,18 @@ func TestDecodeHeadersLocalReplies(t *testing.T) {
 			name: "available sandbox is not routable",
 			arrange: func(t *testing.T, r *registry.Registry) {
 				putTestRoute(t, r, "default--test-sandbox", sandboxroute.Route{
-					IP: "10.0.0.1", State: agentsv1alpha1.SandboxStateAvailable, ResourceVersion: "1",
+					IP: "10.0.0.1", State: sandboxstate.Available, ResourceVersion: "1",
 				})
+			},
+			sandboxID:    "default--test-sandbox",
+			wantCode:     502,
+			wantDetails:  "sandbox_not_running",
+			wantBodyPart: "healthy sandbox not found",
+		},
+		{
+			name: "running sandbox without an address is not routable",
+			arrange: func(t *testing.T, r *registry.Registry) {
+				putRunningTestRoute(t, r, "default--test-sandbox", "")
 			},
 			sandboxID:    "default--test-sandbox",
 			wantCode:     502,
@@ -799,17 +875,85 @@ func TestDecodeHeadersRuntimeMTLSRouting(t *testing.T) {
 	}
 }
 
-// TestFilterFactory tests the FilterFactory function
+// TestFilterFactory verifies domain dispatch and delegation of stream callbacks.
 func TestFilterFactory(t *testing.T) {
-	cfg := NewFilterConfig(DefaultConfig())
-	mockCallbacks := newMockFilterCallbackHandler()
-	filter := FilterFactory(cfg, mockCallbacks)
-
-	// Verify the returned filter is a sandboxFilter
-	sf, ok := filter.(*sandboxFilter)
-	assert.True(t, ok)
-	assert.Equal(t, DefaultSandboxHeaderName, sf.config.SandboxHeaderName)
-	assert.NotNil(t, sf.adapter)
+	for _, tt := range []struct {
+		name, host, sandboxHeader string
+		sessionService            bool
+		disabled                  bool
+		headerPresent, authorized bool
+		emptyHeader               bool
+	}{
+		{name: "sandbox", host: "8080-sandbox.example.com"},
+		{name: "old sessionservice hostname", host: "8080-demo.team.svc.example.com"},
+		{name: "disabled SessionService", host: "svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com", disabled: true},
+		{name: "disabled malformed SessionService", host: "svc-no-port.example.com", disabled: true},
+		{name: "sessionservice", host: "svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com", sessionService: true},
+		{name: "malformed sessionservice", host: "svc-no-port.example.com", sessionService: true},
+		{name: "service host with E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", headerPresent: true},
+		{name: "sessionservice host with E2B header", host: "svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com", headerPresent: true},
+		{name: "custom E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", sandboxHeader: "custom-sandbox-id", headerPresent: true},
+		{name: "empty E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", headerPresent: true, emptyHeader: true},
+		{name: "authorized E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", headerPresent: true, authorized: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := useTestRegistry(t)
+			activateTestRegistry(reg)
+			putTestRoute(t, reg, "test--sandbox", sandboxroute.Route{IP: "127.0.0.1", State: sandboxstate.Running, AccessToken: "test-secret"})
+			config := DefaultConfig()
+			config.EnableAuth = true
+			if tt.sandboxHeader != "" {
+				config.SandboxHeaderName = tt.sandboxHeader
+			}
+			cfg := NewFilterConfig(config)
+			if !tt.disabled {
+				cfg.servingService = serving.NewService()
+			}
+			callbacks := newMockFilterCallbackHandler()
+			filter := FilterFactory(cfg, callbacks)
+			dispatcher, ok := filter.(*routingFilter)
+			require.True(t, ok)
+			header := newHostHeader(tt.host)
+			if tt.headerPresent {
+				header.Set(config.GetSandboxHeaderName(), "test--sandbox")
+				if tt.emptyHeader {
+					header.Set(config.GetSandboxHeaderName(), "")
+				}
+			}
+			if tt.authorized {
+				header.Set(accessTokenHeader, "test-secret")
+			}
+			status := filter.DecodeHeaders(header, true)
+			if tt.sessionService {
+				sf, ok := dispatcher.StreamFilter.(*sessionServiceFilter)
+				require.True(t, ok)
+				assert.Equal(t, cfg.Config, sf.config)
+				response := &servingResponseHeader{*newMockRequestHeaderMap()}
+				filter.EncodeHeaders(response, true)
+				value, _ := response.Get("cache-control")
+				assert.Equal(t, "no-store", value)
+				filter.OnDestroy(api.Normal)
+				assert.True(t, sf.destroyed)
+			} else {
+				sf, ok := dispatcher.StreamFilter.(*sandboxFilter)
+				require.True(t, ok)
+				assert.Equal(t, config.GetSandboxHeaderName(), sf.config.GetSandboxHeaderName())
+				if tt.headerPresent && !tt.emptyHeader {
+					if tt.authorized {
+						assert.Equal(t, api.Continue, status)
+						assert.False(t, callbacks.decoderCallbacks.sendLocalReplyCalled)
+					} else {
+						assert.Equal(t, api.LocalReply, status)
+						assert.Equal(t, 401, callbacks.decoderCallbacks.replyStatusCode)
+						assert.Equal(t, "unauthorized", callbacks.decoderCallbacks.replyDetails)
+					}
+				}
+				assert.NotNil(t, sf.adapter)
+				filter.OnDestroy(api.Normal)
+				assert.True(t, sf.destroyed)
+			}
+		})
+	}
 }
 
 // TestDecodeHeadersAccessTokenAuth tests access token authentication logic for
@@ -819,6 +963,7 @@ func TestFilterFactory(t *testing.T) {
 func TestDecodeHeadersAccessTokenAuth(t *testing.T) {
 	tests := []struct {
 		name                string
+		legacySVCDomain     bool
 		disableAuth         bool
 		enableJWTAuth       bool
 		useKruisePath       bool
@@ -830,6 +975,23 @@ func TestDecodeHeadersAccessTokenAuth(t *testing.T) {
 		expectedStatusCode  int
 		expectedReplyDetail string
 	}{
+		{
+			name:             "legacy E2B svc domain valid UUID token",
+			legacySVCDomain:  true,
+			routeAccessToken: "secret-token-123",
+			requestToken:     "secret-token-123",
+			setTokenHeader:   true,
+			expectedStatus:   api.Continue,
+		},
+		{
+			name:                "legacy E2B svc domain missing UUID token",
+			legacySVCDomain:     true,
+			routeAccessToken:    "secret-token-123",
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
+		},
 		{
 			name:             "valid token - request matches route token",
 			routeAccessToken: "secret-token-123",
@@ -859,20 +1021,55 @@ func TestDecodeHeadersAccessTokenAuth(t *testing.T) {
 			expectedReplyDetail: "unauthorized",
 		},
 		{
-			name:             "no token configured - backward compatible, skip auth",
-			routeAccessToken: "",
-			requestToken:     "",
-			setTokenHeader:   false,
-			expectedStatus:   api.Continue,
-			expectLocalReply: false,
+			name:                "no token configured - missing request token is rejected",
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
 		},
 		{
-			name:             "no token configured - request carries token anyway, still allowed",
-			routeAccessToken: "",
-			requestToken:     "some-token",
-			setTokenHeader:   true,
-			expectedStatus:   api.Continue,
-			expectLocalReply: false,
+			name:                "no token configured - arbitrary request token is rejected",
+			requestToken:        "some-token",
+			setTokenHeader:      true,
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
+		},
+		{
+			name:                "no token configured - empty token header is rejected",
+			setTokenHeader:      true,
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
+		},
+		{
+			name:                "no token configured via kruise path",
+			useKruisePath:       true,
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
+		},
+		{
+			name:                "JWT mode rejects a route without a UUID token",
+			enableJWTAuth:       true,
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
+		},
+		{
+			name:           "auth disabled allows a route without a UUID token",
+			disableAuth:    true,
+			expectedStatus: api.Continue,
+		},
+		{
+			name:           "JWT mode without the baseline allows a route without a UUID token",
+			disableAuth:    true,
+			enableJWTAuth:  true,
+			expectedStatus: api.Continue,
 		},
 		{
 			name:             "auth disabled skips validation despite route token",
@@ -949,9 +1146,14 @@ func TestDecodeHeadersAccessTokenAuth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := useTestRegistry(t)
-			putTestRoute(t, r, "default--auth-sandbox", sandboxroute.Route{
+			sandboxID := "default--auth-sandbox"
+			port := "49983"
+			if tt.legacySVCDomain {
+				sandboxID, port = "test-id", "8080"
+			}
+			putTestRoute(t, r, sandboxID, sandboxroute.Route{
 				IP:              "10.0.0.1",
-				State:           agentsv1alpha1.SandboxStateRunning,
+				State:           sandboxstate.Running,
 				ResourceVersion: "1",
 				AccessToken:     tt.routeAccessToken,
 			})
@@ -969,7 +1171,9 @@ func TestDecodeHeadersAccessTokenAuth(t *testing.T) {
 			filter, mockCallbacks := newTestFilterWithDeps(cfg, defaultTestAdapter(), manager)
 
 			var header api.RequestHeaderMap
-			if tt.useKruisePath {
+			if tt.legacySVCDomain {
+				header = newHostHeader("8080-test-id.svc.example.com")
+			} else if tt.useKruisePath {
 				header = newKruisePathHeader("/kruise/default--auth-sandbox/49983/api/v1/data")
 			} else {
 				header = newSandboxHeader("default--auth-sandbox")
@@ -992,11 +1196,12 @@ func TestDecodeHeadersAccessTokenAuth(t *testing.T) {
 				assert.Equal(t, tt.expectedStatusCode, mockCallbacks.decoderCallbacks.replyStatusCode)
 				assert.Equal(t, tt.expectedReplyDetail, mockCallbacks.decoderCallbacks.replyDetails)
 				assert.Contains(t, mockCallbacks.decoderCallbacks.replyBody, "unauthorized")
+				assert.NotContains(t, mockCallbacks.streamInfo.dynamicMetadata.data, "envoy.lb.original_dst")
 			} else {
 				// Verify upstream was set correctly for successful cases
 				metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
 				assert.NotNil(t, metadata)
-				assert.Equal(t, "10.0.0.1:49983", metadata["host"])
+				assert.Equal(t, "10.0.0.1:"+port, metadata["host"])
 			}
 		})
 	}
@@ -1010,7 +1215,7 @@ func TestDecodeHeadersWakeOnTrafficDisabled(t *testing.T) {
 		IP:            "10.0.0.1",
 		Namespace:     "default",
 		Name:          "paused-sbx",
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: true,
 	})
 
@@ -1035,7 +1240,7 @@ func TestDecodeHeadersWakeOnTrafficRouteNotEnabled(t *testing.T) {
 		IP:            "10.0.0.1",
 		Namespace:     "default",
 		Name:          "paused-sbx",
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: false,
 	})
 
@@ -1076,7 +1281,7 @@ func TestDecodeHeadersWakeOnTrafficNoWaker(t *testing.T) {
 		IP:            "10.0.0.1",
 		Namespace:     "default",
 		Name:          "paused-sbx",
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: true,
 	})
 
@@ -1101,7 +1306,7 @@ func TestDecodeHeadersWakeOnTrafficPausedWithRunning(t *testing.T) {
 		IP:            "10.0.0.5",
 		Namespace:     "default",
 		Name:          "running-wakeable",
-		State:         agentsv1alpha1.SandboxStateRunning,
+		State:         sandboxstate.Running,
 		WakeOnTraffic: true,
 	})
 
@@ -1141,6 +1346,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 		{
 			name:             "route without JWT requirement skips JWT verification",
 			managerState:     "missing",
+			routeToken:       "runtime-token",
 			requestJWT:       "unused-jwt",
 			expectStatus:     api.Continue,
 			expectJWTRemoved: true,
@@ -1233,7 +1439,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			putTestRoute(t, useTestRegistry(t), sandboxID, sandboxroute.Route{
 				ID: sandboxID, UID: types.UID(sandboxUID), IP: "10.0.0.1",
-				State: agentsv1alpha1.SandboxStateRunning, ResourceVersion: "1", AccessToken: tt.routeToken,
+				State: sandboxstate.Running, ResourceVersion: "1", AccessToken: tt.routeToken,
 				RequireTrafficAuth: !tt.skipRouteAuth,
 			})
 
@@ -1287,7 +1493,7 @@ func TestDecodeHeadersRequiredJWTWithoutJWTMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			putTestRoute(t, useTestRegistry(t), sandboxID, sandboxroute.Route{
-				ID: sandboxID, IP: "10.0.0.1", State: agentsv1alpha1.SandboxStateRunning,
+				ID: sandboxID, IP: "10.0.0.1", State: sandboxstate.Running,
 				ResourceVersion: "1", RequireTrafficAuth: true,
 			})
 
@@ -1316,7 +1522,7 @@ func TestDecodeHeadersWakeOnTrafficCacheFallback(t *testing.T) {
 		IP:            "10.0.0.1",
 		Namespace:     "default",
 		Name:          "cache-fallback",
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: false,
 	})
 
@@ -1392,7 +1598,7 @@ func TestDecodeHeadersWakeOnTrafficCacheFallbackNoAnnotation(t *testing.T) {
 		IP:            "10.0.0.1",
 		Namespace:     "default",
 		Name:          "no-annot-fallback",
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: false,
 	})
 
@@ -1538,7 +1744,7 @@ func TestWakeAndContinueSuccess(t *testing.T) {
 		Namespace:     "default",
 		Name:          "async-success",
 		UID:           types.UID("uid-async-success"),
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: true,
 	})
 
@@ -1598,7 +1804,7 @@ func TestWakeAndContinueSuccess(t *testing.T) {
 			IP:              "10.0.0.1",
 			Namespace:       "default",
 			Name:            "async-success",
-			State:           agentsv1alpha1.SandboxStateRunning,
+			State:           sandboxstate.Running,
 			ResourceVersion: "2",
 		})
 	})
@@ -1669,7 +1875,33 @@ func TestShouldWakeSandbox(t *testing.T) {
 			UID:       sbxUID,
 		},
 	}
-	cacheProvider, _, err := cachetest.NewTestCache(t, sbx)
+	// navOnly restricts wake to browser page navigations, plus requests from
+	// non-browser clients that send an explicit wake header.
+	navOnlyUID := types.UID("nav-only-uid")
+	navOnly := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nav-only",
+			Namespace: "default",
+			UID:       navOnlyUID,
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
+				Resume: &agentsv1alpha1.ResumePolicy{
+					OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{
+						RequestMatches: []agentsv1alpha1.IngressTrafficRequestMatch{
+							{Headers: []agentsv1alpha1.IngressTrafficHeaderMatch{
+								{Name: "Sec-Fetch-Mode", Values: []string{"navigate"}},
+							}},
+							{Headers: []agentsv1alpha1.IngressTrafficHeaderMatch{
+								{Name: "X-Sandbox-Wake", Values: []string{"true"}},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+	cacheProvider, _, err := cachetest.NewTestCache(t, sbx, navOnly)
 	require.NoError(t, err)
 	wake.InitWaker(cacheProvider)
 	t.Cleanup(func() { wake.InitWaker(nil) })
@@ -1678,7 +1910,14 @@ func TestShouldWakeSandbox(t *testing.T) {
 		Namespace:     "default",
 		Name:          "sbx",
 		UID:           sbxUID,
-		State:         agentsv1alpha1.SandboxStatePaused,
+		State:         sandboxstate.Paused,
+		WakeOnTraffic: true,
+	}
+	navOnlyRoute := sandboxroute.Route{
+		Namespace:     "default",
+		Name:          "nav-only",
+		UID:           navOnlyUID,
+		State:         sandboxstate.Paused,
 		WakeOnTraffic: true,
 	}
 
@@ -1687,6 +1926,7 @@ func TestShouldWakeSandbox(t *testing.T) {
 		route      sandboxroute.Route
 		enableWake bool
 		waker      *wake.Waker
+		headers    map[string]string
 		want       bool
 	}{
 		{
@@ -1694,7 +1934,7 @@ func TestShouldWakeSandbox(t *testing.T) {
 			route: sandboxroute.Route{
 				Namespace:     "default",
 				Name:          "sbx",
-				State:         agentsv1alpha1.SandboxStateCreating,
+				State:         sandboxstate.Creating,
 				WakeOnTraffic: true,
 			},
 			enableWake: true,
@@ -1718,7 +1958,7 @@ func TestShouldWakeSandbox(t *testing.T) {
 		{
 			name: "route without object key returns false",
 			route: sandboxroute.Route{
-				State:         agentsv1alpha1.SandboxStatePaused,
+				State:         sandboxstate.Paused,
 				WakeOnTraffic: true,
 			},
 			enableWake: true,
@@ -1742,7 +1982,7 @@ func TestShouldWakeSandbox(t *testing.T) {
 				Namespace:     "default",
 				Name:          "sbx",
 				UID:           types.UID("deleted-sandbox-uid"),
-				State:         agentsv1alpha1.SandboxStatePaused,
+				State:         sandboxstate.Paused,
 				WakeOnTraffic: true,
 			},
 			enableWake: true,
@@ -1755,7 +1995,7 @@ func TestShouldWakeSandbox(t *testing.T) {
 				Namespace:     "default",
 				Name:          "gone",
 				UID:           types.UID("gone-uid"),
-				State:         agentsv1alpha1.SandboxStatePaused,
+				State:         sandboxstate.Paused,
 				WakeOnTraffic: true,
 			},
 			enableWake: true,
@@ -1767,9 +2007,52 @@ func TestShouldWakeSandbox(t *testing.T) {
 			route: sandboxroute.Route{
 				Namespace:     "default",
 				Name:          "sbx",
-				State:         agentsv1alpha1.SandboxStatePaused,
+				State:         sandboxstate.Paused,
 				WakeOnTraffic: true,
 			},
+			enableWake: true,
+			waker:      waker,
+			want:       false,
+		},
+		{
+			name:       "rule without request matches wakes any request",
+			route:      pausedRoute,
+			enableWake: true,
+			waker:      waker,
+			headers:    map[string]string{"sec-fetch-mode": "websocket"},
+			want:       true,
+		},
+		{
+			name:       "matching request header returns true",
+			route:      navOnlyRoute,
+			enableWake: true,
+			waker:      waker,
+			headers:    map[string]string{"sec-fetch-mode": "navigate"},
+			want:       true,
+		},
+		{
+			// An SDK or webhook client has no Sec-Fetch-* headers and
+			// wakes the sandbox through the second match instead.
+			name:       "request satisfying another match returns true",
+			route:      navOnlyRoute,
+			enableWake: true,
+			waker:      waker,
+			headers:    map[string]string{"x-sandbox-wake": "true"},
+			want:       true,
+		},
+		{
+			// A page left open reconnects its WebSocket after the
+			// sandbox pauses; that reconnect must not wake it.
+			name:       "non-matching request header returns false",
+			route:      navOnlyRoute,
+			enableWake: true,
+			waker:      waker,
+			headers:    map[string]string{"sec-fetch-mode": "websocket"},
+			want:       false,
+		},
+		{
+			name:       "missing request header returns false",
+			route:      navOnlyRoute,
 			enableWake: true,
 			waker:      waker,
 			want:       false,
@@ -1781,7 +2064,11 @@ func TestShouldWakeSandbox(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.EnableWakeOnTraffic = tt.enableWake
 			f := &sandboxFilter{config: cfg}
-			got := f.shouldWakeSandbox(tt.route, tt.waker)
+			header := newMockRequestHeaderMap()
+			for k, v := range tt.headers {
+				header.Set(k, v)
+			}
+			got := f.shouldWakeSandbox(tt.route, tt.waker, header)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -1820,11 +2107,11 @@ func TestShouldWakeSandboxSpecFallback(t *testing.T) {
 			Namespace:     "default",
 			Name:          "with-rule",
 			UID:           types.UID("with-rule-uid"),
-			State:         agentsv1alpha1.SandboxStatePaused,
+			State:         sandboxstate.Paused,
 			WakeOnTraffic: false, // Force spec fallback
 		}
 		f := &sandboxFilter{config: cfg}
-		assert.True(t, f.shouldWakeSandbox(route, wake.GetWaker()))
+		assert.True(t, f.shouldWakeSandbox(route, wake.GetWaker(), newMockRequestHeaderMap()))
 	})
 
 	t.Run("rule absent returns false", func(t *testing.T) {
@@ -1845,11 +2132,11 @@ func TestShouldWakeSandboxSpecFallback(t *testing.T) {
 			Namespace:     "default",
 			Name:          "no-rule",
 			UID:           types.UID("no-rule-uid"),
-			State:         agentsv1alpha1.SandboxStatePaused,
+			State:         sandboxstate.Paused,
 			WakeOnTraffic: false, // Force spec fallback
 		}
 		f := &sandboxFilter{config: cfg}
-		assert.False(t, f.shouldWakeSandbox(route, wake.GetWaker()))
+		assert.False(t, f.shouldWakeSandbox(route, wake.GetWaker(), newMockRequestHeaderMap()))
 	})
 
 	t.Run("rule present but stale route UID returns false", func(t *testing.T) {
@@ -1874,10 +2161,60 @@ func TestShouldWakeSandboxSpecFallback(t *testing.T) {
 			Namespace:     "default",
 			Name:          "recreated",
 			UID:           types.UID("deleted-sandbox-uid"),
-			State:         agentsv1alpha1.SandboxStatePaused,
+			State:         sandboxstate.Paused,
 			WakeOnTraffic: false, // Force spec fallback
 		}
 		f := &sandboxFilter{config: cfg}
-		assert.False(t, f.shouldWakeSandbox(route, wake.GetWaker()))
+		assert.False(t, f.shouldWakeSandbox(route, wake.GetWaker(), newMockRequestHeaderMap()))
 	})
+}
+
+// Removing SessionService demultiplexing or flattening duplicate Session headers breaks these cases.
+func TestSessionServiceRawSessionHeaders(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		values [][2]string
+		want   int
+	}{
+		{"missing", nil, 503},
+		{"empty", [][2]string{{"x-kruise-agent-session-id", ""}}, 503},
+		{"duplicate", [][2]string{{"x-kruise-agent-session-id", "a"}, {"x-kruise-agent-session-id", "a"}}, 400},
+		{"duplicate empty", [][2]string{{"x-kruise-agent-session-id", ""}, {"x-kruise-agent-session-id", "a"}}, 400},
+		{"mixed case duplicate", [][2]string{{"X-Kruise-Agent-Session-ID", "a"}, {"x-kruise-agent-session-id", "a"}}, 400},
+		{"comma", [][2]string{{"x-kruise-agent-session-id", "a,b"}}, 400},
+		{"space", [][2]string{{"x-kruise-agent-session-id", " a"}}, 400},
+		{"unicode", [][2]string{{"x-kruise-agent-session-id", "中"}}, 400},
+		{"65", [][2]string{{"x-kruise-agent-session-id", strings.Repeat("a", 65)}}, 400},
+		{"1", [][2]string{{"x-kruise-agent-session-id", "A"}}, 400},
+		{"21", [][2]string{{"x-kruise-agent-session-id", strings.Repeat("Z", 21)}}, 400},
+		{"22", [][2]string{{"x-kruise-agent-session-id", strings.Repeat("Z", 22)}}, 503},
+		{"23", [][2]string{{"x-kruise-agent-session-id", strings.Repeat("Z", 23)}}, 400},
+		{"64", [][2]string{{"x-kruise-agent-session-id", strings.Repeat("Z", 64)}}, 400},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			activateTestRegistry(useTestRegistry(t))
+			cb := newMockFilterCallbackHandler()
+			cb.decoderCallbacks.done = make(chan struct{}, 1)
+			config := NewFilterConfig(DefaultConfig())
+			config.servingService = serving.NewService()
+			f := FilterFactory(config, cb)
+			h := newHostHeader("svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com")
+			for _, kv := range tt.values {
+				h.Add(kv[0], kv[1])
+			}
+			status := f.DecodeHeaders(h, true)
+			if tt.want == 503 {
+				require.Equal(t, api.Running, status)
+			} else {
+				require.Equal(t, api.LocalReply, status)
+			}
+			select {
+			case <-cb.decoderCallbacks.done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("no SessionService completion")
+			}
+			assert.Equal(t, tt.want, cb.decoderCallbacks.replyStatusCode)
+			assert.Empty(t, cb.streamInfo.dynamicMetadata.data)
+		})
+	}
 }

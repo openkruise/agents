@@ -17,16 +17,18 @@ limitations under the License.
 package claim
 
 import (
+	"time"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
-// Handle is the narrow, backend-neutral view of a sandbox that the claim
-// engine needs to stamp claim metadata onto a picked candidate. It is a subset
-// of the fat infra.Sandbox interface: a concrete backend sandbox satisfies it
-// implicitly, so the engine can operate on claims without depending on the
-// full lifecycle surface.
+// Handle is the narrow, backend-neutral view of a sandbox that a claim Modifier
+// may mutate. It is a subset of the fat infra.Sandbox interface: the concrete
+// sandbox the engine builds satisfies it, so caller-supplied modifiers can stamp
+// claim metadata, timeouts, and wake policy without depending on the full
+// lifecycle surface.
 type Handle interface {
 	metav1.Object
 	GetPodLabels() map[string]string
@@ -34,6 +36,13 @@ type Handle interface {
 	GetPodAnnotations() map[string]string
 	SetPodAnnotations(map[string]string)
 	SetTimeout(timeout.Options)
+	// EnableWakeOnIngressTraffic arms the wake-on-ingress-traffic resume rule. A
+	// positive pauseTimeout becomes the rule's PauseTimeout so a traffic wake
+	// re-arms auto-pause with it; a non-positive value leaves PauseTimeout unset.
+	EnableWakeOnIngressTraffic(pauseTimeout time.Duration)
+	// ClearWakeOnIngressTraffic removes the wake-on-ingress-traffic resume rule
+	// and prunes now-empty parent policy nodes.
+	ClearWakeOnIngressTraffic()
 }
 
 // MergePodLabels merges the given labels into the handle's pod template labels.

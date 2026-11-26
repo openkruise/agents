@@ -39,10 +39,7 @@ type SandboxTemplateSpec struct {
 	// +optional
 	Backend string `json:"backend,omitempty"`
 
-	// BuildOptions is the declarative snapshot of the Template Build request.
-	// It is populated by a build entry and consumed by the SandboxTemplate
-	// controller. Logical Template admission keeps it immutable after the
-	// build input is accepted.
+	// BuildOptions stores the accepted build recipe; admission freezes finalized Versions.
 	// +optional
 	BuildOptions *SandboxTemplateBuildOptions `json:"buildOptions,omitempty"`
 
@@ -92,6 +89,16 @@ type SandboxTemplateSpec struct {
 	// +optional
 	AutoPausePolicy *AutoPausePolicy `json:"autoPausePolicy,omitempty"`
 
+	// StartupMode controls whether sandboxes created from this template have
+	// their main container command wrapped by run_with_envs.sh (claim-time
+	// envVars/command + deferred main-process start). It is only informational
+	// when a SandboxSet uses spec.templateRef: SandboxSetSpec.StartupMode always
+	// takes precedence and is what actually reaches created Sandboxes.
+	// +kubebuilder:validation:Enum=Immediate;Deferred
+	// +kubebuilder:default="Immediate"
+	// +optional
+	StartupMode StartupMode `json:"startupMode,omitempty"`
+
 	// Lifecycle stores pause/resume hooks for direct checkpoint/clone use. When
 	// referenced by a SandboxSet, SandboxSetSpec.Lifecycle remains authoritative.
 	// Upgrade hooks remain instance policy and are not allowed here.
@@ -107,10 +114,10 @@ type SandboxTemplateBuildOptions struct {
 	// +optional
 	FromTemplate string `json:"fromTemplate,omitempty"`
 
-	// Steps is the ordered provisioning command sequence.
+	// Steps is the ordered provisioning sequence.
 	// +listType=atomic
 	// +optional
-	Steps []TemplateBuildCommand `json:"steps,omitempty"`
+	Steps []TemplateBuildStep `json:"steps,omitempty"`
 
 	// StartCommand starts the business process before capture.
 	// +optional
@@ -119,6 +126,60 @@ type SandboxTemplateBuildOptions struct {
 	// ReadyCommand checks business process readiness before capture.
 	// +optional
 	ReadyCommand *TemplateBuildCommand `json:"readyCommand,omitempty"`
+
+	// Checkpoint captures the completed build as a restorable artifact.
+	// +optional
+	Checkpoint *CheckpointStrategy `json:"checkpoint,omitempty"`
+
+	// ImageAcceleration requests best-effort image pre-warming.
+	// +optional
+	ImageAcceleration *ImageAccelerationStrategy `json:"imageAcceleration,omitempty"`
+}
+
+// CheckpointStrategy configures artifact capture. Future options such as
+// capture scope extend it without another type change.
+type CheckpointStrategy struct {
+	// Enable turns artifact capture on for the Build.
+	// +optional
+	Enable bool `json:"enable,omitempty"`
+}
+
+// ImageAccelerationStrategy configures best-effort image acceleration.
+// Future options such as provider hints extend it without another type
+// change.
+type ImageAccelerationStrategy struct {
+	// Enable turns best-effort image acceleration on for the Build.
+	// +optional
+	Enable bool `json:"enable,omitempty"`
+}
+
+// +kubebuilder:validation:XValidation:rule="has(self.command) != has(self.copy)",message="exactly one of command or copy is required"
+// TemplateBuildStep is a command or a COPY operation.
+type TemplateBuildStep struct {
+	// +optional
+	Command *TemplateBuildCommand `json:"command,omitempty"`
+	// +optional
+	Copy *TemplateBuildCopy `json:"copy,omitempty"`
+}
+
+// TemplateBuildCopy materializes an uploaded build-context file or directory.
+type TemplateBuildCopy struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="!self.startsWith('/')",message="src must be a relative path"
+	Src string `json:"src"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/')",message="dest must be an absolute path"
+	Dest string `json:"dest"`
+	// +optional
+	User string `json:"user,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=4095
+	// +optional
+	Mode *int32 `json:"mode,omitempty"`
+	// +optional
+	FilesHash string `json:"filesHash,omitempty"`
+	// +optional
+	ForceUpload bool `json:"forceUpload,omitempty"`
 }
 
 // TemplateBuildCommand is one self-contained shell command in a Template
@@ -172,6 +233,10 @@ type SandboxTemplateArtifact struct {
 	// +kubebuilder:validation:MinLength=1
 	// +required
 	Name string `json:"name"`
+	// Value is the backend identifier used to restore the artifact.
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	Value string `json:"value"`
 }
 
 // SandboxTemplateStatus defines the observed state of a Template Build. The

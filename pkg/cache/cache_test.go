@@ -17,10 +17,10 @@ limitations under the License.
 package cache_test
 
 import (
-	"context"
 	"reflect"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/openkruise/agents/pkg/cache/cachetest"
@@ -327,15 +327,17 @@ func TestCache_GetSandboxSet_MultipleTemplates(t *testing.T) {
 	c, _, err := cachetest.NewTestCache(t, sbs1, sbs2, sbs3)
 	require.NoError(t, err)
 
-	got, err := c.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{Name: "tmpl-3"})
+	got, err := c.Cache.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{Name: "tmpl-3"})
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "tmpl-3", got.Name)
 	assert.Equal(t, "team-b", got.Namespace)
 
-	_, err = c.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{Name: "nonexistent"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not found in cache")
+	synctest.Test(t, func(t *testing.T) {
+		_, err := c.Cache.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{Name: "nonexistent"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found in cache")
+	})
 }
 
 func TestCache_ListLiveSandboxesByOwner(t *testing.T) {
@@ -677,8 +679,42 @@ func TestCache_CountActiveSandboxes(t *testing.T) {
 			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.5"},
 		},
 	}
+	// Claimed but not ready (provisioning): does not fill a slot
+	sbx6 := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sbx-6", Namespace: "default",
+			Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-3"},
+			Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.6"},
+		},
+	}
 
-	c, _, err := cachetest.NewTestCache(t, sbx1, sbx2, sbx3, sbx4, sbx5)
+	// Past its shutdown deadline (expired): does not fill a slot
+	sbx7 := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sbx-7", Namespace: "default",
+			Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-4"},
+			Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			ShutdownTime: &metav1.Time{Time: time.Now().Add(-time.Minute)},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.7"},
+		},
+	}
+
+	c, _, err := cachetest.NewTestCache(t, sbx1, sbx2, sbx3, sbx4, sbx5, sbx6, sbx7)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -687,7 +723,7 @@ func TestCache_CountActiveSandboxes(t *testing.T) {
 		expectCount int32
 	}{
 		{
-			name:        "user-1 counts 2 non-dead sandboxes",
+			name:        "user-1 counts 2 sandboxes that hold a slot",
 			opts:        cache.ListSandboxesOptions{User: "user-1"},
 			expectCount: 2,
 		},
@@ -701,6 +737,16 @@ func TestCache_CountActiveSandboxes(t *testing.T) {
 			opts:        cache.ListSandboxesOptions{User: "user-nobody"},
 			expectCount: 0,
 		},
+		{
+			name:        "claimed but not ready sandbox is not counted",
+			opts:        cache.ListSandboxesOptions{User: "user-3"},
+			expectCount: 0,
+		},
+		{
+			name:        "sandbox past its shutdown deadline is not counted",
+			opts:        cache.ListSandboxesOptions{User: "user-4"},
+			expectCount: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -710,20 +756,6 @@ func TestCache_CountActiveSandboxes(t *testing.T) {
 			assert.Equal(t, tt.expectCount, cnt)
 		})
 	}
-
-	// Verify CountActiveSandboxes matches non-dead ListSandboxes count for user-1.
-	list, err := c.ListSandboxes(t.Context(), cache.ListSandboxesOptions{User: "user-1"})
-	require.NoError(t, err)
-	var listActive int32
-	for _, sbx := range list {
-		state, _ := utils.GetSandboxState(sbx)
-		if state != agentsv1alpha1.SandboxStateDead {
-			listActive++
-		}
-	}
-	cnt, err := c.CountActiveSandboxes(t.Context(), cache.ListSandboxesOptions{User: "user-1"})
-	require.NoError(t, err)
-	assert.Equal(t, listActive, cnt, "CountActiveSandboxes should match ListSandboxes active count")
 }
 
 func TestCache_ListCheckpointsWithOptions_UserScoped(t *testing.T) {
@@ -911,344 +943,6 @@ func TestCache_ListSandboxesInPoolWithOptions_NamespaceScoped(t *testing.T) {
 
 // --- Wait tests ---
 
-func TestCache_WaitForSandbox_AdHoc(t *testing.T) {
-	t.Run("already satisfied", func(t *testing.T) {
-		sbx := &agentsv1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "wait-sbx-satisfied", Namespace: "default",
-				Labels: map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
-			},
-			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
-		}
-		c, _, err := cachetest.NewTestCache(t, sbx)
-		require.NoError(t, err)
-		task := cachetest.NewAdHocTask[*agentsv1alpha1.Sandbox](
-			t.Context(), c.GetWaitHooks(), "", sbx,
-			c.SandboxUpdateFunc(t.Context()),
-			func(s *agentsv1alpha1.Sandbox) (bool, error) { return true, nil },
-		)
-		err = task.Wait(time.Second)
-		require.NoError(t, err)
-	})
-
-	t.Run("check function returns error immediately", func(t *testing.T) {
-		sbx := &agentsv1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "wait-sbx-err", Namespace: "default",
-				Labels: map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
-			},
-			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
-		}
-		c, _, err := cachetest.NewTestCache(t, sbx)
-		require.NoError(t, err)
-		task := cachetest.NewAdHocTask[*agentsv1alpha1.Sandbox](
-			t.Context(), c.GetWaitHooks(), "", sbx,
-			c.SandboxUpdateFunc(t.Context()),
-			func(s *agentsv1alpha1.Sandbox) (bool, error) { return false, assert.AnError },
-		)
-		err = task.Wait(time.Second)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), assert.AnError.Error())
-	})
-
-	t.Run("unsatisfied condition should timeout", func(t *testing.T) {
-		sbx := &agentsv1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "wait-sbx-timeout", Namespace: "default",
-				Labels: map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
-			},
-			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
-		}
-		c, _, err := cachetest.NewTestCache(t, sbx)
-		require.NoError(t, err)
-		task := cachetest.NewAdHocTask[*agentsv1alpha1.Sandbox](
-			t.Context(), c.GetWaitHooks(), "", sbx,
-			c.SandboxUpdateFunc(t.Context()),
-			func(s *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		)
-		err = task.Wait(100 * time.Millisecond)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not satisfied")
-	})
-
-	t.Run("wait task conflict", func(t *testing.T) {
-		sbx := &agentsv1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "wait-sbx-conflict", Namespace: "default",
-				Labels: map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
-			},
-			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
-		}
-		c, _, err := cachetest.NewTestCache(t, sbx)
-		require.NoError(t, err)
-
-		// Start a long-running wait with action "another"
-		go func() {
-			_ = cachetest.NewAdHocTask[*agentsv1alpha1.Sandbox](
-				t.Context(), c.GetWaitHooks(), "another", sbx,
-				c.SandboxUpdateFunc(t.Context()),
-				func(s *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-			).Wait(time.Hour)
-		}()
-		// Give the goroutine time to register the wait hook
-		time.Sleep(50 * time.Millisecond)
-
-		// Try a different action on same sandbox - should conflict
-		task := cachetest.NewAdHocTask[*agentsv1alpha1.Sandbox](
-			t.Context(), c.GetWaitHooks(), "", sbx,
-			c.SandboxUpdateFunc(t.Context()),
-			func(s *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		)
-		err = task.Wait(time.Second)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "already exists")
-	})
-
-	t.Run("sandbox satisfied after update", func(t *testing.T) {
-		sbx := &agentsv1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "wait-sbx-update", Namespace: "default",
-				Labels: map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
-			},
-			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
-		}
-		c, fc, err := cachetest.NewTestCache(t, sbx)
-		require.NoError(t, err)
-
-		// Update sandbox in background to satisfy condition, and close waitHook
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			// Update the sandbox to Running
-			fresh := &agentsv1alpha1.Sandbox{}
-			_ = fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sbx), fresh)
-			fresh.Status.Phase = agentsv1alpha1.SandboxRunning
-			_ = fc.Status().Update(t.Context(), fresh)
-
-			// Manually trigger waitHook (fake client has no informer)
-			key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-			if val, ok := c.GetWaitHooks().Load(key); ok {
-				entry := val.(*cacheutils.WaitEntry[*agentsv1alpha1.Sandbox])
-				entry.Close()
-			}
-		}()
-
-		task := cachetest.NewAdHocTask[*agentsv1alpha1.Sandbox](
-			t.Context(), c.GetWaitHooks(), "", sbx,
-			c.SandboxUpdateFunc(t.Context()),
-			func(s *agentsv1alpha1.Sandbox) (bool, error) {
-				return s.Status.Phase == agentsv1alpha1.SandboxRunning, nil
-			},
-		)
-		err = task.Wait(2 * time.Second)
-		require.NoError(t, err)
-	})
-
-	t.Run("check function returns error on update", func(t *testing.T) {
-		sbx := &agentsv1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "wait-sbx-check-err", Namespace: "default",
-				Labels: map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
-			},
-			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
-		}
-		c, fc, err := cachetest.NewTestCache(t, sbx)
-		require.NoError(t, err)
-
-		// Update and close waitHook so double-check runs
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			fresh := &agentsv1alpha1.Sandbox{}
-			_ = fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sbx), fresh)
-			fresh.Status.Phase = agentsv1alpha1.SandboxRunning
-			_ = fc.Status().Update(t.Context(), fresh)
-
-			key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-			if val, ok := c.GetWaitHooks().Load(key); ok {
-				entry := val.(*cacheutils.WaitEntry[*agentsv1alpha1.Sandbox])
-				entry.Close()
-			}
-		}()
-
-		task := cachetest.NewAdHocTask[*agentsv1alpha1.Sandbox](
-			t.Context(), c.GetWaitHooks(), "", sbx,
-			c.SandboxUpdateFunc(t.Context()),
-			func(s *agentsv1alpha1.Sandbox) (bool, error) {
-				if s.Status.Phase == agentsv1alpha1.SandboxRunning {
-					return false, assert.AnError
-				}
-				return false, nil
-			},
-		)
-		err = task.Wait(2 * time.Second)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), assert.AnError.Error())
-	})
-
-	t.Run("fallback to apiserver when sandbox not in cache index", func(t *testing.T) {
-		// Create sandbox with LabelSandboxIsClaimed = "false"
-		// This won't be indexed by IndexClaimedSandboxID, so GetClaimedSandbox fails,
-		// triggering apiserver fallback
-		sbx := &agentsv1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "wait-sbx-fallback", Namespace: "default",
-				Labels: map[string]string{
-					agentsv1alpha1.LabelSandboxIsClaimed: "false",
-				},
-			},
-			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
-		}
-		c, fc, err := cachetest.NewTestCache(t, sbx)
-		require.NoError(t, err)
-
-		// Update sandbox to Running via fake client after a short delay
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			fresh := &agentsv1alpha1.Sandbox{}
-			_ = fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sbx), fresh)
-			fresh.Status.Phase = agentsv1alpha1.SandboxRunning
-			fresh.Status.Conditions = []metav1.Condition{
-				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
-			}
-			_ = fc.Status().Update(t.Context(), fresh)
-
-			// Close waitHook to trigger double-check
-			key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-			if val, ok := c.GetWaitHooks().Load(key); ok {
-				entry := val.(*cacheutils.WaitEntry[*agentsv1alpha1.Sandbox])
-				entry.Close()
-			}
-		}()
-
-		task := cachetest.NewAdHocTask[*agentsv1alpha1.Sandbox](
-			t.Context(), c.GetWaitHooks(), "", sbx,
-			c.SandboxUpdateFunc(t.Context()),
-			func(s *agentsv1alpha1.Sandbox) (bool, error) {
-				return s.Status.Phase == agentsv1alpha1.SandboxRunning &&
-					utils.IsSandboxReady(s), nil
-			},
-		)
-		err = task.Wait(2 * time.Second)
-		require.NoError(t, err)
-	})
-}
-
-func TestCache_WaitForSandbox_Cancel(t *testing.T) {
-	sbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "wait-cancel-sbx", Namespace: "default",
-			Labels: map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
-		},
-		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
-	}
-
-	t.Run("context already canceled", func(t *testing.T) {
-		c, _, err := cachetest.NewTestCache(t, sbx)
-		require.NoError(t, err)
-		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
-		task := cachetest.NewAdHocTask[*agentsv1alpha1.Sandbox](
-			ctx, c.GetWaitHooks(), "", sbx,
-			c.SandboxUpdateFunc(ctx),
-			func(s *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		)
-		err = task.Wait(time.Hour)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not satisfied")
-	})
-
-	t.Run("context timeout", func(t *testing.T) {
-		c, _, err := cachetest.NewTestCache(t, sbx)
-		require.NoError(t, err)
-		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
-		defer cancel()
-		task := cachetest.NewAdHocTask[*agentsv1alpha1.Sandbox](
-			ctx, c.GetWaitHooks(), "", sbx,
-			c.SandboxUpdateFunc(ctx),
-			func(s *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
-		)
-		err = task.Wait(time.Hour)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not satisfied")
-	})
-}
-
-func TestCache_WaitForCheckpoint_AdHoc(t *testing.T) {
-	t.Run("already satisfied", func(t *testing.T) {
-		cp := &agentsv1alpha1.Checkpoint{
-			ObjectMeta: metav1.ObjectMeta{Name: "wait-cp-ok", Namespace: "default"},
-			Status:     agentsv1alpha1.CheckpointStatus{CheckpointId: "cp-done"},
-		}
-		c, _, err := cachetest.NewTestCache(t, cp)
-		require.NoError(t, err)
-		task := cachetest.NewAdHocTask[*agentsv1alpha1.Checkpoint](
-			t.Context(), c.GetWaitHooks(), "", cp,
-			c.CheckpointUpdateFunc(t.Context()),
-			func(cp *agentsv1alpha1.Checkpoint) (bool, error) { return true, nil },
-		)
-		err = task.Wait(time.Second)
-		require.NoError(t, err)
-		got := &agentsv1alpha1.Checkpoint{}
-		require.NoError(t, c.GetClient().Get(t.Context(), ctrlclient.ObjectKeyFromObject(cp), got))
-		require.NotNil(t, got)
-		assert.Equal(t, "wait-cp-ok", got.Name)
-	})
-
-	t.Run("satisfied after signal", func(t *testing.T) {
-		cp := &agentsv1alpha1.Checkpoint{
-			ObjectMeta: metav1.ObjectMeta{Name: "wait-cp-signal", Namespace: "default"},
-			Status:     agentsv1alpha1.CheckpointStatus{Phase: agentsv1alpha1.CheckpointPending},
-		}
-		c, fc, err := cachetest.NewTestCache(t, cp)
-		require.NoError(t, err)
-
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			fresh := &agentsv1alpha1.Checkpoint{}
-			_ = fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(cp), fresh)
-			fresh.Status.Phase = agentsv1alpha1.CheckpointSucceeded
-			fresh.Status.CheckpointId = "cp-ready-id"
-			_ = fc.Status().Update(t.Context(), fresh)
-
-			key := cacheutils.WaitHookKey[*agentsv1alpha1.Checkpoint](cp)
-			if val, ok := c.GetWaitHooks().Load(key); ok {
-				entry := val.(*cacheutils.WaitEntry[*agentsv1alpha1.Checkpoint])
-				entry.Close()
-			}
-		}()
-
-		task := cachetest.NewAdHocTask[*agentsv1alpha1.Checkpoint](
-			t.Context(), c.GetWaitHooks(), "", cp,
-			c.CheckpointUpdateFunc(t.Context()),
-			func(cp *agentsv1alpha1.Checkpoint) (bool, error) {
-				return cp.Status.Phase == agentsv1alpha1.CheckpointSucceeded, nil
-			},
-		)
-		err = task.Wait(2 * time.Second)
-		require.NoError(t, err)
-		got := &agentsv1alpha1.Checkpoint{}
-		require.NoError(t, c.GetClient().Get(t.Context(), ctrlclient.ObjectKeyFromObject(cp), got))
-		require.NotNil(t, got)
-		assert.Equal(t, agentsv1alpha1.CheckpointSucceeded, got.Status.Phase)
-	})
-
-	t.Run("timeout returns error", func(t *testing.T) {
-		cp := &agentsv1alpha1.Checkpoint{
-			ObjectMeta: metav1.ObjectMeta{Name: "wait-cp-timeout", Namespace: "default"},
-			Status:     agentsv1alpha1.CheckpointStatus{Phase: agentsv1alpha1.CheckpointPending},
-		}
-		c, _, err := cachetest.NewTestCache(t, cp)
-		require.NoError(t, err)
-		task := cachetest.NewAdHocTask[*agentsv1alpha1.Checkpoint](
-			t.Context(), c.GetWaitHooks(), "", cp,
-			c.CheckpointUpdateFunc(t.Context()),
-			func(cp *agentsv1alpha1.Checkpoint) (bool, error) { return false, nil },
-		)
-		err = task.Wait(100 * time.Millisecond)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not satisfied")
-	})
-}
-
 func TestRegression_SameActionConcurrentWaitsConverge(t *testing.T) {
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1299,7 +993,7 @@ func TestRegression_SameActionConcurrentWaitsConverge(t *testing.T) {
 
 	key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
 	if val, ok := c.GetWaitHooks().Load(key); ok {
-		val.(*cacheutils.WaitEntry[*agentsv1alpha1.Sandbox]).Close()
+		val.(*cacheutils.WaitEntry[*agentsv1alpha1.Sandbox]).Observe(fresh)
 	}
 
 	wg.Wait()

@@ -24,7 +24,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/openkruise/agents/pkg/utils"
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -36,7 +35,6 @@ import (
 	"k8s.io/client-go/rest"
 	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,6 +42,9 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/controllers"
+	"github.com/openkruise/agents/pkg/sandboxstate"
+	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 // CacheScope configures informer filtering scope for the cache's controller
@@ -259,13 +260,7 @@ func newControllerManager(cfg *rest.Config, scope CacheScope, health *InformerHe
 		return nil, err
 	}
 
-	cacheOpts := ctrlcache.Options{
-		ByObject:                     byObject,
-		DefaultUnsafeDisableDeepCopy: ptr.To(true),
-	}
-	if health != nil {
-		cacheOpts.DefaultWatchErrorHandler = health.RecordWatchError
-	}
+	cacheOpts := controllerManagerCacheOptions(byObject, health)
 
 	// Create manager with unnecessary features disabled
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
@@ -350,7 +345,7 @@ func (c *Cache) Run(ctx context.Context) error {
 	if c.health != nil {
 		c.health.MarkSynced()
 	}
-	log.V(utils.DebugLogLevel).Info("Cache started, caches synced")
+	log.V(logs.DebugLogLevel).Info("Cache started, caches synced")
 	return nil
 }
 
@@ -360,7 +355,7 @@ func (c *Cache) Stop(ctx context.Context) {
 	if c.cancelFunc != nil {
 		c.cancelFunc()
 	}
-	log.V(utils.DebugLogLevel).Info("Cache stopped")
+	log.V(logs.DebugLogLevel).Info("Cache stopped")
 }
 
 func (c *Cache) GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOptions) (*agentsv1alpha1.Sandbox, error) {
@@ -434,7 +429,7 @@ func (c *Cache) PickSandboxSet(ctx context.Context, opts PickSandboxSetOptions) 
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("sandboxset %s not found in cache", opts.Name)
+		return nil, fmt.Errorf("%w: %s", ErrSandboxSetNotFound, opts.Name)
 	}
 	return result, nil
 }
@@ -492,8 +487,14 @@ func (c *Cache) CountActiveSandboxes(ctx context.Context, opts ListSandboxesOpti
 		if utils.IsReservedFailedSandbox(list.Items[i].Labels) {
 			continue
 		}
-		state, _ := utils.GetSandboxState(&list.Items[i])
-		if state != agentsv1alpha1.SandboxStateDead {
+		// Count the instances the claim controller must not replace: one still
+		// coming up (creating), one already serving (running, paused) and the
+		// unclaimed pool stock (available) hold their slot; one past its shutdown
+		// deadline (expired) or a terminal one (dead) leaves it to be refilled.
+		// A claimed instance already running but not ready is provisioning and
+		// does not hold a slot, unlike a pending one, which is creating.
+		switch state, _ := utils.GetSandboxState(&list.Items[i]); state {
+		case sandboxstate.Creating, sandboxstate.Available, sandboxstate.Running, sandboxstate.Paused:
 			cnt++
 		}
 	}

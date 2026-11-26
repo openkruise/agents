@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -56,7 +57,6 @@ func TestNewSandboxPauseTask_BoundAction(t *testing.T) {
 	defer task.Release()
 
 	assert.Equal(t, cacheutils.WaitActionPause, task.Action())
-	assert.Same(t, sbx, task.Object())
 
 	key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
 	_, ok := c.GetWaitHooks().Load(key)
@@ -89,7 +89,6 @@ func TestNewSandboxResumeTask_BoundAction(t *testing.T) {
 	defer task.Release()
 
 	assert.Equal(t, cacheutils.WaitActionResume, task.Action())
-	assert.Same(t, sbx, task.Object())
 
 	key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
 	_, ok := c.GetWaitHooks().Load(key)
@@ -271,6 +270,18 @@ func TestNewCheckpointTask_Failed_ReturnsError(t *testing.T) {
 }
 
 // --- PVC Task tests ---
+func TestPVCUpdateFunc_MissingClaim(t *testing.T) {
+	c, _, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-missing"},
+	}
+
+	got, err := c.PVCUpdateFunc(t.Context(), pvc)
+	assert.True(t, apierrors.IsNotFound(err), "expected NotFound, got %v", err)
+	assert.Nil(t, got)
+}
+
 func TestNewPVCTask_BoundAction(t *testing.T) {
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-1"},
@@ -301,7 +312,7 @@ func TestNewPVCTask_PendingTimeout(t *testing.T) {
 	task := c.NewPVCTask(context.Background(), pvc)
 	err = task.Wait(100 * time.Millisecond)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "object is not satisfied")
+	assert.Contains(t, err.Error(), "timed out after 100ms")
 }
 
 func TestNewPVCTask_LostPhase_ReturnsError(t *testing.T) {
@@ -332,5 +343,5 @@ func TestNewPVCTask_BoundWithoutVolumeName_NotSatisfied(t *testing.T) {
 	task := c.NewPVCTask(context.Background(), pvc)
 	err = task.Wait(100 * time.Millisecond)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "object is not satisfied")
+	assert.Contains(t, err.Error(), "timed out after 100ms")
 }

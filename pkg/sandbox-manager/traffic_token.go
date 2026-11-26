@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"k8s.io/klog/v2"
 )
 
@@ -264,7 +264,7 @@ func validateTrafficTokenSandbox(sandbox infra.Sandbox, user string) error {
 		return managererrors.NewError(managererrors.ErrorNotAllowed, "sandbox %s is not owned", sandbox.GetSandboxID())
 	}
 	state, reason := sandbox.GetState()
-	if state != v1alpha1.SandboxStateRunning && state != v1alpha1.SandboxStatePaused {
+	if state != sandboxstate.Running && state != sandboxstate.Paused {
 		return managererrors.NewError(managererrors.ErrorConflict, "sandbox %s cannot refresh traffic access token in state %s (%s)", sandbox.GetSandboxID(), state, reason)
 	}
 	if !route.RequireTrafficAuth {

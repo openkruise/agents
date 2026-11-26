@@ -66,7 +66,7 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Setup Kind Cluster
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
         with:
           node_image: ${{ env.KIND_IMAGE }}
           cluster_name: ${{ env.KIND_CLUSTER_NAME }}
@@ -74,7 +74,7 @@ jobs:
           version: ${{ env.KIND_VERSION }}
 
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
         with:
           tool-cache: false
           android: true
@@ -267,6 +267,65 @@ jobs:
               -n sandbox-system --timeout=5m
           fi
 
+      - name: Run SessionService routing E2E Tests
+        if: matrix.profile == 'uuid-auth'
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/home/runner/.kube/config
+          export SESSION_SERVICE_GATEWAY_URL=http://127.0.0.1:17788
+          export SESSION_SERVICE_DOMAIN=example.test
+          export SESSION_SERVICE_ROUTING_RUN_ID="routing-${{ github.run_id }}-${{ github.run_attempt }}"
+          report_dir="${RUNNER_TEMP}/sessionservice-routing"
+          mkdir -p "${report_dir}"
+          kubectl set env deployment/sandbox-gateway -n sandbox-system ENABLE_SESSION_SERVICE=true
+          kubectl rollout status deployment/sandbox-gateway -n sandbox-system --timeout=5m
+          kubectl port-forward --address=127.0.0.1 -n sandbox-system \
+            svc/sandbox-gateway 17788:7788 >"${report_dir}/port-forward.log" 2>&1 &
+          forward_pid=$!
+          cleanup() {
+            kill "${forward_pid}" 2>/dev/null || true
+            wait "${forward_pid}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if grep -q 'Forwarding from' "${report_dir}/port-forward.log"; then
+              break
+            fi
+            if ! kill -0 "${forward_pid}" 2>/dev/null; then
+              cat "${report_dir}/port-forward.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          if ! grep -q 'Forwarding from' "${report_dir}/port-forward.log"; then
+            cat "${report_dir}/port-forward.log"
+            echo >&2 "SessionService Gateway port-forward did not become ready"
+            exit 1
+          fi
+          go test ./test/e2e -run '^TestE2E$' -count=1 -timeout=20m -v -args \
+            -ginkgo.label-filter=sessionservice-routing -ginkgo.no-color \
+            -ginkgo.json-report="${report_dir}/report.json"
+          python3 - "${report_dir}/report.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1]) as stream:
+              reports = json.load(stream)
+          passed = sum(spec["State"] == "passed" for report in reports for spec in report["SpecReports"])
+          assert reports and all(report["SuiteSucceeded"] for report in reports), "SessionService routing suite failed"
+          assert passed == 4, f"Expected 4 passed SessionService routing specs, got {passed}"
+          print("SessionService routing: 4/4 passed")
+          PY
+
+      - name: Upload SessionService routing E2E artifacts
+        if: always() && matrix.profile == 'uuid-auth'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sessionservice-routing-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sessionservice-routing/
+          if-no-files-found: warn
+
       - name: Run focused gateway security test
         run: |
           export KUBECONFIG=/home/runner/.kube/config
@@ -280,6 +339,10 @@ jobs:
             export TRAFFIC_ACCESS_TOKEN_JWT_E2E=true
             export JWT_E2E_TOKEN_COMMAND="kubectl exec -n sandbox-system deployment/jwt-e2e-oidc-provider -- /jwt-oidc-provider issue"
           fi
+          extra_test_args=()
+          if [ "${{ matrix.profile }}" = "uuid-auth" ]; then
+            extra_test_args+=(--test-file test/e2b/test_gateway_snapshot_auth.py)
+          fi
           # Temporarily pinned: e2b 2.38.0 removed the http2 kwarg of
           # get_transport() that e2b-code-interpreter 2.9.0 still passes.
           # 2.37.1 + 2.9.0 is the last verified working combination.
@@ -288,5 +351,6 @@ jobs:
             --auth-disabled \
             --e2b-version 2.37.1 --sdk-version 2.9.0 \
             --test-file "${{ matrix.test_file }}" \
+            "${extra_test_args[@]}" \
             -m "${{ matrix.marker }}" \
             --pytest-extra-args "-s -x"

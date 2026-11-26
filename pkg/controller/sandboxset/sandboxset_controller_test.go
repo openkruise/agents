@@ -39,7 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
@@ -138,7 +138,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 		sbx.Status.Phase = creatingPhases[int(i)%len(creatingPhases)]
 		sbx.Labels["type"] = "creating"
 		state, reason := utils.GetSandboxState(sbx)
-		assert.Equal(t, v1alpha1.SandboxStateCreating, state, reason)
+		assert.Equal(t, sandboxstate.Creating, state, reason)
 		toCreate = append(toCreate, sbx)
 		idx++
 	}
@@ -155,7 +155,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 		sbx.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
 		sbx.Labels["type"] = "available"
 		state, reason := utils.GetSandboxState(sbx)
-		assert.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
+		assert.Equal(t, sandboxstate.Available, state, reason)
 		toCreate = append(toCreate, sbx)
 		idx++
 	}
@@ -170,7 +170,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 			},
 		}
 		state, reason := utils.GetSandboxState(sbx)
-		assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+		assert.Equal(t, sandboxstate.Running, state, reason)
 		sbx.Labels["type"] = "running"
 		toCreate = append(toCreate, sbx)
 		idx++
@@ -180,7 +180,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 		sbx.Status.Phase = v1alpha1.SandboxPaused
 		sbx.Labels["type"] = "paused"
 		state, reason := utils.GetSandboxState(sbx)
-		assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+		assert.Equal(t, sandboxstate.Paused, state, reason)
 		toCreate = append(toCreate, sbx)
 		idx++
 	}
@@ -191,7 +191,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 		sbx.Status.Phase = failedPhases[int(idx)%len(failedPhases)]
 		sbx.Labels["type"] = "failed"
 		state, reason := utils.GetSandboxState(sbx)
-		assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
+		assert.Equal(t, sandboxstate.Dead, state, reason)
 		toCreate = append(toCreate, sbx)
 		idx++
 	}
@@ -210,7 +210,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 		sbx.Status.Phase = v1alpha1.SandboxTerminating
 		sbx.Labels["type"] = "terminating"
 		state, reason := utils.GetSandboxState(sbx)
-		assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
+		assert.Equal(t, sandboxstate.Dead, state, reason)
 		toCreate = append(toCreate, sbx)
 		idx++
 	}
@@ -225,7 +225,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 			deletedSbx := &v1alpha1.Sandbox{}
 			assert.NoError(t, k8sClient.Get(context.TODO(), types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, deletedSbx))
 			state, reason := utils.GetSandboxState(deletedSbx)
-			assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
+			assert.Equal(t, sandboxstate.Dead, state, reason)
 		}
 	}
 	return idx
@@ -781,7 +781,7 @@ func TestReconcile_ScaleDown(t *testing.T) {
 			replicas: 0,
 			request: createSandboxRequest{
 				createAvailableSandboxes: 1,
-				lockedOwner:              consts.OwnerManagerScaleDown,
+				lockedOwner:              ownerManagerScaleDown,
 			},
 			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
 				assert.Equal(t, 0, len(sandboxes))

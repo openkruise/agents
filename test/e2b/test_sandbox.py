@@ -253,6 +253,44 @@ def test_timeout(sandbox_context, config):
         connect_sandbox(sandbox)
 
 
+def test_set_timeout_preserves_managed_fields(sandbox_context, config):
+    sbx = sandbox_context.add(Sandbox.create(
+        template=config.templates.code_interpreter,
+        timeout=300,
+        headers={"x-request-id": sandbox_context.request_id},
+    ))
+    namespace, name = resolve_sandbox_cr(sbx.sandbox_id, sbx.get_info().metadata, config.test_namespace)
+    assert namespace and name, f"could not resolve Sandbox CR for {sbx.sandbox_id}"
+
+    owner = "e2e-field-owner"
+    label = "e2e-owned-label"
+    resource = ["sandbox", name, "-n", namespace]
+    subprocess.run(["kubectl", "label", *resource, f"{label}=keep", f"--field-manager={owner}"],
+                   check=True, timeout=30)
+
+    def read_deadline_and_check_owner():
+        cr = json.loads(subprocess.check_output(
+            ["kubectl", "get", *resource, "-o", "json", "--show-managed-fields"], timeout=30,
+        ))
+        entries = cr["metadata"].get("managedFields", [])
+        assert any(
+            entry["manager"] == owner
+            and f"f:{label}" in entry["fieldsV1"].get("f:metadata", {}).get("f:labels", {})
+            for entry in entries
+        ), f"{namespace}/{name}: {owner} lost ownership of {label}"
+        return _parse_rfc3339_utc(cr["spec"]["shutdownTime"])
+
+    before = read_deadline_and_check_owner()
+    # Let the manager observe the label before its cache-backed read and full Update.
+    deadline = time.monotonic() + 30
+    while (sbx.get_info().metadata or {}).get(label) != "keep":
+        assert time.monotonic() < deadline, f"sandbox-manager did not observe {label}"
+        time.sleep(0.2)
+
+    sbx.set_timeout(600)
+    assert read_deadline_and_check_owner() > before
+
+
 def test_connect_shorter_timeout(sandbox_context, config):
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
         template=config.templates.code_interpreter,

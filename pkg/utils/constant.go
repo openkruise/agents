@@ -26,10 +26,6 @@ import (
 )
 
 const (
-	// DebugLogLevel is the klog V-level used for debug messages throughout the
-	// project.  Previously defined in pkg/sandbox-manager/consts; moved here to
-	// break the utils → business-layer dependency.
-	DebugLogLevel = 5
 	// RuntimePort is the well-known port for the agent-runtime sidecar.
 	// Previously defined in pkg/sandbox-manager/consts; moved here to break the
 	// utils → business-layer dependency.
@@ -54,6 +50,27 @@ const (
 	CreatedByExternal = "external"
 	CreatedBySandbox  = "sandbox"
 	CreatedByCommit   = "commit"
+)
+
+// Deferred-start wrapper contract (spec.startupMode=Deferred). The wrapper holds
+// the sandbox main process until the claim-time startup files and readiness
+// signal are delivered, then exec's the claim or template command.
+const (
+	// RunWithEnvsScript is the PID-1 wrapper script path inside the sandbox,
+	// staged into the per-pod envd volume by the agent-runtime image.
+	RunWithEnvsScript = "/mnt/envd/run_with_envs.sh"
+
+	// SandboxEnvClaimDir is the claim directory inside the envd volume that holds
+	// env.sh, cmd.sh and the .env_ready readiness signal.
+	SandboxEnvClaimDir = "/mnt/envd/claim"
+
+	// EnvSandboxEnvDir is the wrapper environment variable carrying the claim
+	// directory.
+	EnvSandboxEnvDir = "SANDBOX_ENV_DIR"
+
+	// EnvSandboxPodUID is the wrapper environment variable carrying the pod UID
+	// (downward API, metadata.uid) used for the readiness-signal generation check.
+	EnvSandboxPodUID = "SANDBOX_POD_UID"
 )
 
 var (

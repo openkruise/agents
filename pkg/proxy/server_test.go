@@ -36,10 +36,10 @@ import (
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 )
 
 func TestHealthServer(t *testing.T) {
@@ -74,7 +74,7 @@ func TestNewServeMuxRefresh(t *testing.T) {
 		Name:            "a",
 		UID:             types.UID("uid-a"),
 		ResourceVersion: "1",
-		State:           v1alpha1.SandboxStatePaused,
+		State:           sandboxstate.Paused,
 		IP:              "10.0.0.1",
 	}
 	invalid := valid
@@ -153,7 +153,6 @@ func TestRunWrapsPeerTLSListener(t *testing.T) {
 	require.NoError(t, server.Run())
 	require.Same(t, tlsConfig, server.peerServerTLS)
 	require.NotNil(t, server.peerOutbound)
-	assert.Equal(t, "https", server.peerOutbound.scheme)
 
 	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(refresh.DefaultPort)))
 	require.NoError(t, err)

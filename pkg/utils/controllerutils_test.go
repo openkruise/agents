@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -432,5 +433,30 @@ func TestDoItSlowlyWithInputs(t *testing.T) {
 			}
 			assert.Equal(t, tt.wantSuccesses, successes)
 		})
+	}
+}
+
+func TestSessionServiceMaxSurge(t *testing.T) {
+	for _, tt := range []struct {
+		desired int32
+		text    string
+		want    int32
+		wantErr bool
+	}{
+		{3, "025%", 1, false},
+		{0, "25%", 0, false},
+		{2147483647, "100%", 2147483647, false},
+		{2147483647, "101%", 0, true},
+		{1, "214748364700%", 2147483647, false},
+		{1, "214748364701%", 0, true},
+	} {
+		parent := &agentsv1alpha1.SessionService{}
+		parent.Spec.Replicas = &tt.desired
+		value := intstr.FromString(tt.text)
+		parent.Spec.UpdateStrategy.MaxSurge = &value
+		got, err := SessionServiceMaxSurge(parent)
+		if (err != nil) != tt.wantErr || got != tt.want {
+			t.Fatalf("desired=%d value=%s got=%d err=%v", tt.desired, tt.text, got, err)
+		}
 	}
 }

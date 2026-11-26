@@ -14,12 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-//go:build tools
-// +build tools
-
-// This package imports things required by build scripts, to force `go mod` to see them as dependencies
-package hack
+package sandboxtemplate
 
 import (
-	_ "k8s.io/code-generator"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	api "github.com/openkruise/agents/api/v1alpha1"
 )
+
+func VersionOwnerReference(obj metav1.Object) *metav1.OwnerReference {
+	owner := metav1.GetControllerOfNoCopy(obj)
+	if owner == nil || owner.APIVersion != api.GroupVersion.String() || owner.Kind != "SandboxTemplate" || owner.Name == "" || owner.UID == "" {
+		return nil
+	}
+	return owner
+}

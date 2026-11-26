@@ -14,23 +14,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package proxy
+package refresh
 
 import (
 	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/klog/v2"
+
+	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
 const (
@@ -53,6 +60,8 @@ var errPeerRedirect = errors.New("peer refresh does not follow redirects")
 type PeerOutbound struct {
 	scheme string
 	client *http.Client
+
+	lastNoTargetsLog atomic.Int64
 }
 
 // NewPeerOutbound builds the outbound peer client. A nil clientTLS keeps
@@ -103,6 +112,67 @@ func (o *PeerOutbound) CloseIdleConnections() {
 	o.client.CloseIdleConnections()
 }
 
+// SyncRouteWithPeers sends a route update to all peer gateways via HTTP POST /refresh.
+// outbound is this process's peer-owner client. Callers must not construct a
+// second client with an independent security decision.
+func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route sandboxroute.Route, outbound *PeerOutbound) error {
+	body, err := json.Marshal(route) // #nosec G117 -- AccessToken is serialized for peer /refresh authentication sync, never logged; the peer owner configures transport security.
+	if err != nil {
+		return err
+	}
+
+	// Get peers from Peers - no manual locking needed
+	var peerList []peers.Peer
+	if peersManager != nil {
+		peerList = peersManager.GetPeers()
+	}
+	// The controller only sends routes and serves no /refresh; filter into a separate snapshot without modifying the caller's list.
+	targets := make([]peers.Peer, 0, len(peerList))
+	for _, peer := range peerList {
+		if !strings.HasPrefix(peer.Name, peers.NodePrefixSandboxController) {
+			targets = append(targets, peer)
+		}
+	}
+	peerList = targets
+	peerCount.Set(float64(len(peerList)))
+
+	if len(peerList) == 0 {
+		if outbound != nil {
+			now := time.Now().UnixNano()
+			last := outbound.lastNoTargetsLog.Load()
+			if (last == 0 || now-last >= int64(30*time.Second)) &&
+				outbound.lastNoTargetsLog.CompareAndSwap(last, now) {
+				klog.FromContext(ctx).Info("route sync skipped: no refresh targets")
+			}
+		}
+		return nil
+	}
+	if outbound == nil {
+		return fmt.Errorf("peer outbound client is not configured")
+	}
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		peerErrs []error
+	)
+
+	for _, peer := range peerList {
+		wg.Add(1)
+		go func(peerIP string) {
+			defer wg.Done()
+			if requestErr := outbound.requestWithRetry(ctx, http.MethodPost, peerIP, Path, body); requestErr != nil {
+				mu.Lock()
+				peerErrs = append(peerErrs, requestErr)
+				mu.Unlock()
+			}
+		}(peer.IP)
+	}
+	wg.Wait()
+
+	return errors.Join(peerErrs...)
+}
+
 func (o *PeerOutbound) request(ctx context.Context, method, ip, path string, body []byte) error {
 	if o == nil || o.client == nil {
 		return fmt.Errorf("peer outbound client is not configured")
@@ -115,7 +185,7 @@ func (o *PeerOutbound) request(ctx context.Context, method, ip, path string, bod
 	if len(body) > 0 {
 		buf = bytes.NewReader(body)
 	}
-	url := o.scheme + "://" + net.JoinHostPort(parsed.String(), strconv.Itoa(refresh.DefaultPort)) + path
+	url := o.scheme + "://" + net.JoinHostPort(parsed.String(), strconv.Itoa(DefaultPort)) + path
 	request, err := http.NewRequestWithContext(ctx, method, url, buf)
 	if err != nil {
 		return err

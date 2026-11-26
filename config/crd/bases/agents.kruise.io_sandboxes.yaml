@@ -136,6 +136,80 @@ spec:
                               the floor are raised to it so the fresh PauseTime cannot expire while
                               the sandbox is still resuming.
                             type: string
+                          requestMatches:
+                            description: |-
+                              RequestMatches restricts which inbound requests may wake the paused
+                              sandbox. When empty, every authenticated request addressed to the
+                              sandbox wakes it. When set, a request wakes the sandbox if it
+                              satisfies any entry; a request that satisfies none is rejected the
+                              same way as for a sandbox without wake-on-traffic, and the sandbox
+                              stays paused. Requests to a Running sandbox are never filtered.
+
+                              For example, one entry matching sec-fetch-mode=navigate limits wake
+                              from browsers to page navigations, so script-initiated reconnects from
+                              a page left open in the background do not keep waking the sandbox; a
+                              second entry matching a custom header lets SDK or webhook clients that
+                              send it still wake the sandbox.
+                            items:
+                              description: |-
+                                IngressTrafficRequestMatch describes one kind of request allowed to wake a
+                                paused sandbox. A request satisfies it when every condition matches.
+                              properties:
+                                headers:
+                                  description: Headers lists header conditions that
+                                    must all match.
+                                  items:
+                                    description: IngressTrafficHeaderMatch matches
+                                      a request header against Values using Operator.
+                                    properties:
+                                      name:
+                                        description: |-
+                                          Name is the header name, matched case-insensitively. Pseudo-headers
+                                          are not supported.
+                                        maxLength: 256
+                                        minLength: 1
+                                        pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                        type: string
+                                      operator:
+                                        default: In
+                                        description: |-
+                                          Operator selects the matching operation and defaults to In when omitted.
+                                          In requires at least one header value to be in Values; an absent header
+                                          does not match. NotIn requires every header value to be outside Values;
+                                          an absent header matches. Unknown operators do not match.
+                                          This condition applies only to its RequestMatches entry and does not
+                                          veto other OR entries.
+                                        enum:
+                                        - In
+                                        - NotIn
+                                        type: string
+                                      values:
+                                        description: |-
+                                          Values is the set of exact, case-sensitive header values to compare against.
+                                          In and NotIn both require at least one value; all values of a repeated
+                                          header are checked.
+                                        items:
+                                          maxLength: 512
+                                          type: string
+                                        maxItems: 16
+                                        minItems: 1
+                                        type: array
+                                    required:
+                                    - name
+                                    - values
+                                    type: object
+                                  maxItems: 8
+                                  minItems: 1
+                                  type: array
+                                  x-kubernetes-list-map-keys:
+                                  - name
+                                  x-kubernetes-list-type: map
+                              required:
+                              - headers
+                              type: object
+                            maxItems: 8
+                            type: array
+                            x-kubernetes-list-type: atomic
                         type: object
                       whenProbedScheduleTime:
                         description: |-
@@ -313,6 +387,39 @@ spec:
                         type: integer
                     type: object
                 type: object
+              ondemandVolumesMount:
+                description: |-
+                  OndemandVolumesMount specifies the volumes to be mounted into the sandbox
+                  on demand via CSI NodePublishVolume.
+                items:
+                  properties:
+                    attributes:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        Attributes contains provider-specific values copied into the CSI
+                        NodePublishVolumeRequest VolumeContext for this mount. Values are persisted
+                        in Sandbox and Checkpoint annotations, so callers must not include credentials.
+                        The keys path, authType, and the csi.storage.k8s.io/ prefix are reserved.
+                      type: object
+                    mountID:
+                      type: string
+                    mountPath:
+                      type: string
+                    pvName:
+                      type: string
+                    readOnly:
+                      type: boolean
+                    subPath:
+                      type: string
+                  required:
+                  - mountPath
+                  - pvName
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - mountPath
+                x-kubernetes-list-type: map
               pauseStrategy:
                 description: PauseStrategy configures how a sandbox is paused when
                   spec.paused is true.
@@ -565,6 +672,20 @@ spec:
                   ShutdownTime - Absolute time when the sandbox is deleted.
                   If a time in the past is provided, the sandbox will be deleted immediately.
                 format: date-time
+                type: string
+              startupMode:
+                default: Immediate
+                description: |-
+                  StartupMode controls whether the sandbox main container command is
+                  wrapped by run_with_envs.sh. When Deferred, the main process is held
+                  until the claim-time envVars, the optional claim command, and a readiness
+                  signal are in place, then executed with those inputs. When Immediate
+                  (default), the main process starts immediately, exactly as before. It is
+                  copied verbatim from the owning SandboxSet and is read-only for the
+                  sandbox controller.
+                enum:
+                - Immediate
+                - Deferred
                 type: string
               template:
                 description: |-

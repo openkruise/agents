@@ -36,7 +36,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/tracing"
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 func (sc *Controller) registerRoutes() {
@@ -48,26 +48,26 @@ func (sc *Controller) registerRoutes() {
 	// Sandbox management endpoints.
 	// e2b SDK 2.51.0 creates through POST /v2/sandboxes. The v1 handler already
 	// applies the API default timeout when the field is omitted and ignores secure.
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/v2/sandboxes", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/v2/sandboxes", sc.ListSandboxes, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/sandboxes/{sandboxID}", sc.DescribeSandbox, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodDelete, "/sandboxes/{sandboxID}", sc.DeleteSandbox, traceOperation(traceOpKill), sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPut, "/sandboxes/{sandboxID}/network", sc.UpdateSandboxNetwork, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/pause", sc.PauseSandbox, traceOperation(traceOpPause), sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/resume", sc.ResumeSandbox, traceOperation(traceOpResume), sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/v2/sandboxes", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/v2/sandboxes", sc.ListSandboxes, sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/sandboxes/{sandboxID}", sc.DescribeSandbox, sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodDelete, "/sandboxes/{sandboxID}", sc.DeleteSandbox, traceOperation(traceOpKill), sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPut, "/sandboxes/{sandboxID}/network", sc.UpdateSandboxNetwork, sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/pause", sc.PauseSandbox, traceOperation(traceOpPause), sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/resume", sc.ResumeSandbox, traceOperation(traceOpResume), sc.CheckBusinessReady, sc.CheckApiKey)
 	// e2b SDK 2.51.0 connects through POST /v2/sandboxes/{sandboxID}/connect.
 	// ConnectSandboxV2 accepts an omitted body and applies the 300-second default.
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/connect", sc.ConnectSandbox, traceOperation(traceOpResume), sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/v2/sandboxes/{sandboxID}/connect", sc.ConnectSandboxV2, traceOperation(traceOpResume), sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, http.MethodPost, adapters.CustomPrefix+"/api/sandboxes/{sandboxID}/traffic-access-token", sc.RefreshTrafficAccessToken, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/timeout", sc.SetSandboxTimeout, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/snapshots", sc.CreateSnapshot, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/snapshots", sc.ListSnapshots, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates", sc.ListTemplates, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates/{templateID}", sc.GetTemplate, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodDelete, "/templates/{templateID}", sc.DeleteTemplate, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/browser/{sandboxID}/json/version", sc.BrowserUse, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/connect", sc.ConnectSandbox, traceOperation(traceOpResume), sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/v2/sandboxes/{sandboxID}/connect", sc.ConnectSandboxV2, traceOperation(traceOpResume), sc.CheckBusinessReady, sc.CheckApiKey)
+	web.RegisterRoute(sc.mux, http.MethodPost, adapters.CustomPrefix+"/api/sandboxes/{sandboxID}/traffic-access-token", sc.RefreshTrafficAccessToken, sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/timeout", sc.SetSandboxTimeout, sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/snapshots", sc.CreateSnapshot, sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/snapshots", sc.ListSnapshots, sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates", sc.ListTemplates, sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates/{templateID}", sc.GetTemplate, sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodDelete, "/templates/{templateID}", sc.DeleteTemplate, sc.CheckBusinessReady, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/browser/{sandboxID}/json/version", sc.BrowserUse, sc.CheckBusinessReady, sc.CheckApiKey)
 
 	// Volume management endpoints
 	// Temporarily disabled.
@@ -78,11 +78,11 @@ func (sc *Controller) registerRoutes() {
 
 	// API Keys management endpoints
 	if sc.keyCfg != nil {
-		RegisterE2BRoute(sc.mux, http.MethodGet, "/teams", sc.ListTeams, sc.CheckApiKey)
-		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys/compatible", sc.GetCompatibleAPIKey, sc.CheckApiKey)
-		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckApiKey)
-		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckApiKey, sc.CheckCreateAPIKeyPermission)
-		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey, sc.CheckDeleteAPIKeyPermission)
+		RegisterE2BRoute(sc.mux, http.MethodGet, "/teams", sc.ListTeams, sc.CheckBusinessReady, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys/compatible", sc.GetCompatibleAPIKey, sc.CheckBusinessReady, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckBusinessReady, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckBusinessReady, sc.CheckApiKey, sc.CheckCreateAPIKeyPermission)
+		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckBusinessReady, sc.CheckApiKey, sc.CheckDeleteAPIKeyPermission)
 	}
 }
 
@@ -91,6 +91,17 @@ func RegisterE2BRoute[T any](mux *http.ServeMux, method, path string, handler we
 	web.RegisterRoute(mux, method, path, handler, middlewares...)
 	// Customized E2B API
 	web.RegisterRoute(mux, method, adapters.CustomPrefix+"/api"+path, handler, middlewares...)
+}
+
+// CheckBusinessReady rejects requests before authentication, including in auth-disabled mode.
+// While waiting for the config Secret, any HTTP error satisfies the contract if
+// the request does not reach business handling. Earlier validation may return 400.
+func (sc *Controller) CheckBusinessReady(ctx context.Context, _ *http.Request) (context.Context, *web.ApiError) {
+	if !sc.businessReady() {
+		klog.FromContext(ctx).Info("Control API request rejected while business admission is closed", "status", http.StatusServiceUnavailable)
+		return ctx, &web.ApiError{Code: http.StatusServiceUnavailable, Message: "service initialization incomplete"}
+	}
+	return ctx, nil
 }
 
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
@@ -158,7 +169,7 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 			user, ok = sc.keys.LoadByKey(ctx, rawAPIKey)
 		}
 		if !ok {
-			middleWareLog.V(utils.DebugLogLevel).Info("failed to load key by API-KEY")
+			middleWareLog.V(logs.DebugLogLevel).Info("failed to load key by API-KEY")
 			return ctx, &web.ApiError{
 				Code:    http.StatusUnauthorized,
 				Message: "Invalid API Key",
@@ -169,7 +180,7 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 		middleWareLog = middleWareLog.WithValues("sandboxID", sandboxID)
 		owner, ok := sc.manager.GetOwnerOfSandbox(sandboxID)
 		if !ok {
-			middleWareLog.V(utils.DebugLogLevel).Info("failed to get owner of sandbox")
+			middleWareLog.V(logs.DebugLogLevel).Info("failed to get owner of sandbox")
 			return ctx, &web.ApiError{
 				Code:    http.StatusNotFound,
 				Message: fmt.Sprintf("Sandbox route not found, maybe it is crashed or killed: %s", sandboxID),
@@ -194,7 +205,7 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 		}
 		owner, ok := sc.manager.GetOwnerOfVolume(ctx, namespace, volumeID)
 		if !ok {
-			middleWareLog.V(utils.DebugLogLevel).Info("failed to get owner of volume")
+			middleWareLog.V(logs.DebugLogLevel).Info("failed to get owner of volume")
 			return ctx, &web.ApiError{
 				Code:    http.StatusNotFound,
 				Message: fmt.Sprintf("Volume not found: %s", volumeID),
@@ -226,7 +237,7 @@ const (
 )
 
 func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
-	log := klog.FromContext(ctx).WithValues("middleware", "CheckCreateAPIKeyPermission").V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("middleware", "CheckCreateAPIKeyPermission").V(logs.DebugLogLevel)
 	user := GetUserFromContext(ctx)
 	if user == nil {
 		log.Info("failed to get user from context")
@@ -291,7 +302,7 @@ func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.R
 
 func (sc *Controller) CheckDeleteAPIKeyPermission(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
 	logger := klog.FromContext(ctx)
-	middleWareLog := logger.WithValues("middleware", "CheckDeleteAPIKeyPermission").V(utils.DebugLogLevel)
+	middleWareLog := logger.WithValues("middleware", "CheckDeleteAPIKeyPermission").V(logs.DebugLogLevel)
 	user := GetUserFromContext(ctx)
 	if user == nil {
 		middleWareLog.Info("failed to get user from context")

@@ -17,4 +17,6 @@ extend-ignore-re = [
 ]
 
 [files]
-extend-exclude = ["vendor/", "go.mod", "CHANGELOG.md"]
+# "*.sum": go.sum/tools.sum hashes are random base64 that can trip the
+# spell checker (e.g. "Daa" inside an h1 hash).
+extend-exclude = ["vendor/", "go.mod", "CHANGELOG.md", "*.sum"]

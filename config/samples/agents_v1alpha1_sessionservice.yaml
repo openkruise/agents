@@ -1,0 +1,31 @@
+apiVersion: agents.kruise.io/v1alpha1
+kind: SessionService
+metadata:
+  name: session-service-sample
+spec:
+  replicas: 2
+  backend: k8s
+  template:
+    metadata:
+      labels:
+        app: sample
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: app
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+  pauseStrategy:
+    type: Stop
+  ports: [80]
+  sessionPolicy:
+    affinity: BestEffort
+    maxSessionsPerSandbox: 4
+    expireAfterCreation: 6h
+  updateStrategy:
+    maxSurge: 25%

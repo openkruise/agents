@@ -1,44 +1,81 @@
 #!/bin/bash
 set -e  # Enable exit on error for the entire script
 
-# Parse arguments. Supported flags:
-#   --nolog              Suppress envd stdout/stderr (do not redirect to /proc/1/fd/1).
-#                        Default behaviour pipes envd output to PID 1's stdout so that
-#                        container log collectors pick it up.
-#   -- <cmd> [args...]   Everything after "--" is collected as a command array and
-#                        executed directly (no shell interpretation). This follows the
-#                        kubectl exec pattern and avoids double-interpretation pitfalls.
-#                        Examples:
-#                        /bin/bash envd-run.sh -- /path/to/script arg1 arg2
-#                        /bin/bash envd-run.sh -- echo hello world
-#   --help               Show usage information and exit.
+# Usage: envd-run.sh [OPTIONS] [HELPER_FLAGS...] [-- <cmd> [args...]]
+#
+# Injected postStart hook of the business container: it creates the E2B-style
+# "user" account when running as root, launches the data plane (envd,
+# agent-helper, or agent-runtime) in the background, then runs an optional
+# user-init command. Run `envd-run.sh --help` for the authoritative flag
+# reference.
 NOLOG=false
+HELPER_MODE=false
+LOCAL_MODE=false
 USER_INIT_ARGS=()
+FORWARD_ARGS=()
+PASSTHROUGH_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
+        --helper)
+            HELPER_MODE=true
+            shift
+            ;;
+        --local)
+            LOCAL_MODE=true
+            shift
+            ;;
         --nolog)
             NOLOG=true
             shift
             ;;
         --)
-            # Everything after -- becomes the init command (no shell interpretation)
+            # Everything after -- becomes the user-init command (no shell interpretation)
             shift
             USER_INIT_ARGS=("$@")
-            shift $#
+            break
             ;;
         --help|-h)
-            echo "Usage: envd-run.sh [OPTIONS] [-- <cmd> [args...]]"
-            echo "  --nolog              Suppress envd stdout/stderr (redirect to /dev/null)"
-            echo "  -- <cmd> [args...]   Run command directly without shell interpretation"
+            echo "Usage: envd-run.sh [OPTIONS] [HELPER_FLAGS...] [-- <cmd> [args...]]"
+            echo "  --helper             Launch agent-helper (helper mode data plane) instead of envd;"
+            echo "                       skips default user creation"
+            echo "  --local              Launch agent-runtime in local mode (--runtime-mode=local) instead of envd"
+            echo "  --nolog              Suppress runtime stdout/stderr (redirect to /dev/null)"
+            echo "  FLAGS...             In --helper/--local mode, other flags before -- are forwarded to the"
+            echo "                       launched binary (e.g. --helper-socket, --allowed-peer-uid, --port)"
+            echo "  -- <cmd> [args...]   Run user-init command directly without shell interpretation"
             echo "  --help               Show this help message"
+            echo ""
+            echo "Runtime output is piped to PID 1's stdout so container log collectors pick it up."
+            echo "When that is not writable (non-root business container), output goes to a bounded"
+            echo "per-binary log file under \$ENVD_DIR instead."
             exit 0
             ;;
         *)
-            echo "Error: unknown argument '$1'" >&2
-            exit 1
+            # Not a recognized script flag. In helper/local mode these are forwarded
+            # to the launched binary; in envd mode they remain errors. Ordering
+            # relative to --helper/--local does not matter because validation
+            # happens after parsing.
+            PASSTHROUGH_ARGS+=("$1")
+            shift
             ;;
     esac
 done
+
+# --helper and --local select mutually exclusive deployment modes.
+if [ "$HELPER_MODE" = "true" ] && [ "$LOCAL_MODE" = "true" ]; then
+    echo "Error: --helper and --local are mutually exclusive" >&2
+    exit 1
+fi
+
+# Resolve pass-through flags. In helper/local mode they are forwarded verbatim to
+# the launched binary (agent-helper / agent-runtime). In the default envd mode any
+# unrecognized flag stays an error, preserving the previous strict behaviour.
+if [ "$HELPER_MODE" = "true" ] || [ "$LOCAL_MODE" = "true" ]; then
+    FORWARD_ARGS=("${PASSTHROUGH_ARGS[@]}")
+elif [ ${#PASSTHROUGH_ARGS[@]} -gt 0 ]; then
+    echo "Error: unknown argument '${PASSTHROUGH_ARGS[0]}'" >&2
+    exit 1
+fi
 
 # Check if ENVD_DIR environment variable is defined
 if [ -z "$ENVD_DIR" ]; then
@@ -80,44 +117,29 @@ create_user() {
         fi
     fi
 
-    # Method 2: adduser (Alpine, BusyBox style)
+    # Method 2: adduser. BusyBox and Debian adduser have incompatible flag
+    # sets: -D/-h mean "no password"/"home" in BusyBox, but in Debian adduser
+    # -D is invalid and -h is an alias of --help, which prints usage and exits
+    # 0 without creating anything, falsely reporting success. Detect the
+    # binary identity (BusyBox adduser is an applet symlink to the busybox
+    # binary; Debian's is a standalone script) instead of matching help prose.
     if ! $user_created && command -v adduser &>/dev/null; then
-        # Alpine/BusyBox adduser syntax
-        if adduser -D -s "$default_shell" -h "$home_dir" "$username" 2>/dev/null; then
-            user_created=true
-            echo "User created using adduser."
-        fi
-    fi
-
-    # Method 3: Direct manipulation of /etc/passwd (fallback)
-    if ! $user_created; then
-        echo "Falling back to direct /etc/passwd manipulation..."
-        # Find next available UID (starting from 1000)
-        local uid=1000
-        while grep -q ":$uid:" /etc/passwd 2>/dev/null; do
-            uid=$((uid + 1))
-        done
-        local gid=$uid
-
-        # Create group if /etc/group exists
-        if [ -f /etc/group ]; then
-            if ! grep -q "^$username:" /etc/group 2>/dev/null; then
-                echo "$username:x:$gid:" >> /etc/group
-            else
-                gid=$(grep "^$username:" /etc/group | cut -d: -f3)
-            fi
-        fi
-
-        # Add user to /etc/passwd
-        echo "$username:x:$uid:$gid:$username:$home_dir:$default_shell" >> /etc/passwd
-
-        # Add entry to /etc/shadow if it exists
-        if [ -f /etc/shadow ]; then
-            echo "$username:!::::::" >> /etc/shadow 2>/dev/null || true
-        fi
-
-        user_created=true
-        echo "User created via direct file manipulation."
+        case "$(readlink -f "$(command -v adduser)" 2>/dev/null)" in
+            */busybox)
+                # BusyBox / Alpine adduser syntax
+                if adduser -D -s "$default_shell" -h "$home_dir" "$username" 2>/dev/null; then
+                    user_created=true
+                    echo "User created using BusyBox adduser."
+                fi
+                ;;
+            *)
+                # Debian adduser syntax
+                if adduser --disabled-password --gecos "" --shell "$default_shell" --home "$home_dir" "$username" 2>/dev/null; then
+                    user_created=true
+                    echo "User created using Debian adduser."
+                fi
+                ;;
+        esac
     fi
 
     if ! $user_created; then
@@ -130,24 +152,33 @@ create_user() {
 
     # Try to add user to sudo/wheel group (optional, don't fail if not possible)
     local sudo_group=""
-    if getent group sudo &>/dev/null 2>&1 || grep -q "^sudo:" /etc/group 2>/dev/null; then
+    if getent group sudo &>/dev/null || grep -q "^sudo:" /etc/group 2>/dev/null; then
         sudo_group="sudo"
-    elif getent group wheel &>/dev/null 2>&1 || grep -q "^wheel:" /etc/group 2>/dev/null; then
+    elif getent group wheel &>/dev/null || grep -q "^wheel:" /etc/group 2>/dev/null; then
         sudo_group="wheel"
     fi
 
     if [ -n "$sudo_group" ]; then
+        local group_added=false
         if command -v usermod &>/dev/null; then
-            usermod -aG "$sudo_group" "$username" 2>/dev/null || true
+            usermod -aG "$sudo_group" "$username" 2>/dev/null && group_added=true
         elif command -v addgroup &>/dev/null; then
-            addgroup "$username" "$sudo_group" 2>/dev/null || true
+            addgroup "$username" "$sudo_group" 2>/dev/null && group_added=true
         else
-            # Direct manipulation: add user to group in /etc/group
+            # Direct manipulation: add user to group in /etc/group. sed -i
+            # exits 0 even when the substitution matches nothing, so verify
+            # membership afterwards instead of trusting sed's exit code.
             if [ -f /etc/group ]; then
-                sed -i "s/^\($sudo_group:.*\)/\1,$username/" /etc/group 2>/dev/null || true
+                sed -i "s/^\($sudo_group:.*\)/\1,$username/" /etc/group 2>/dev/null \
+                    && grep "^$sudo_group:" /etc/group 2>/dev/null | grep -qw "$username" \
+                    && group_added=true
             fi
         fi
-        echo "Added user to '$sudo_group' group."
+        if $group_added; then
+            echo "Added user to '$sudo_group' group."
+        else
+            echo "Warning: Failed to add user to '$sudo_group' group." >&2
+        fi
     else
         echo "No sudo/wheel group found, skipping group assignment."
     fi
@@ -164,14 +195,20 @@ create_user() {
     if [ -f /etc/sudoers ]; then
         local sudoers_line="$username ALL=(ALL:ALL) NOPASSWD: ALL"
         if ! grep -qF "$sudoers_line" /etc/sudoers 2>/dev/null; then
-            echo "$sudoers_line" >> /etc/sudoers 2>/dev/null || true
-            echo "Added user to sudoers."
+            if echo "$sudoers_line" >> /etc/sudoers 2>/dev/null; then
+                echo "Added user to sudoers."
+            else
+                echo "Warning: Failed to add user to sudoers." >&2
+            fi
         fi
     elif [ -d /etc/sudoers.d ]; then
         # Some systems use sudoers.d directory
-        echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/$username 2>/dev/null || true
-        chmod 440 /etc/sudoers.d/$username 2>/dev/null || true
-        echo "Added user to sudoers.d."
+        if echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/$username 2>/dev/null; then
+            chmod 440 /etc/sudoers.d/$username 2>/dev/null || true
+            echo "Added user to sudoers.d."
+        else
+            echo "Warning: Failed to add user to sudoers.d." >&2
+        fi
     else
         echo "No sudoers configuration found, skipping sudo setup."
     fi
@@ -184,34 +221,94 @@ create_user() {
     return 0
 }
 
-# Execute user creation (don't let it fail the entire script)
-create_user || echo "Warning: User creation encountered issues, but continuing..." >&2
-
-# Start Envd
-export GODEBUG=multipathtcp=0
-if [ "$NOLOG" = "true" ]; then
-    # Suppress envd stdout/stderr entirely when invoked with --nolog.
-    nohup $ENVD_DIR/envd -isnotfc >/dev/null 2>&1 &
+# Execute user creation (don't let it fail the entire script).
+# Skipped in helper mode: agent-helper derives its identity from its own runtime
+# uid (see resolveDefaultUser) and does not need the E2B-style "user" account, so
+# creating it in the business container is unnecessary and would only emit noise
+# on non-root containers.
+# Also skipped when not running as root: every step of create_user (useradd/
+# adduser, mkdir /home, usermod, sudoers writes, chown) requires root and fails
+# noisily in non-root business containers (e.g. OpenClaw runs as 'node'), where
+# the E2B-style "user" account is not needed either.
+if [ "$HELPER_MODE" = "true" ]; then
+    echo "[helper] Skipping default user creation (not required in helper mode)."
+elif [ "$(id -u)" -ne 0 ]; then
+    echo "Skipping default user creation (not running as root)."
 else
-    nohup $ENVD_DIR/envd -isnotfc > /proc/1/fd/1 2>&1 &
+    create_user || echo "Warning: User creation encountered issues, but continuing..." >&2
 fi
 
-# ---------------------------------------------------------------------------
-# User init hook: "--" separator (direct exec, no shell interpretation)
-#
-# Follows the kubectl exec pattern. Everything after "--" is collected as an
-# argument array and executed directly, bypassing any shell interpretation.
-# This avoids double-quoting issues present with "sh -c" and is the preferred
-# method for commands with arguments. Example:
-#   lifecycle:
-#     postStart:
-#       exec:
-#         command: ["/bin/bash", "envd-run.sh", "--", "/mnt/init/setup.sh", "arg1", "arg2"]
-#   or:
-#         command: ["/bin/bash", "envd-run.sh", "--", "echo", "hello", "world"]
-#
-# A non-zero exit code aborts startup to surface postStart hook failures.
-# ---------------------------------------------------------------------------
+# Start the runtime process. Select the binary by mode:
+#   helper -> in-container agent-helper (helper mode data plane)
+#   local  -> agent-runtime with --runtime-mode=local (native execution)
+#   envd   -> the default envd runtime
+# It is backgrounded so the user-init hook below can still run afterwards.
+export GODEBUG=multipathtcp=0
+if [ "$HELPER_MODE" = "true" ]; then
+    RUN_CMD=("$ENVD_DIR/agent-helper" "${FORWARD_ARGS[@]}")
+elif [ "$LOCAL_MODE" = "true" ]; then
+    RUN_CMD=("$ENVD_DIR/agent-runtime" --runtime-mode=local --isnotfc "${FORWARD_ARGS[@]}")
+else
+    RUN_CMD=("$ENVD_DIR/envd" --isnotfc)
+fi
+
+# Bounds for the non-root log-file fallback (env-overridable for tuning/tests):
+#   MAX_RUNTIME_LOG_BYTES      truncate once the log grows past this (default 50 MiB)
+#   KEEP_RUNTIME_LOG_BYTES     keep the tail of this size after truncation (default 10 MiB)
+#   RUNTIME_LOG_CHECK_INTERVAL seconds between size checks (default 60)
+MAX_RUNTIME_LOG_BYTES=${MAX_RUNTIME_LOG_BYTES:-52428800}
+KEEP_RUNTIME_LOG_BYTES=${KEEP_RUNTIME_LOG_BYTES:-10485760}
+RUNTIME_LOG_CHECK_INTERVAL=${RUNTIME_LOG_CHECK_INTERVAL:-60}
+
+# Truncate the fallback log to its tail in place. Rewriting through the same
+# inode keeps the runtime's O_APPEND fd valid, whereas swapping in a new file
+# would strand the writer on the old inode. The caller must redirect this
+# function's output: a backgrounded child that keeps the postStart hook's IO
+# pipe open would hang containerd's ExecSync drain and fail the hook.
+rotate_runtime_log() {
+    local runtime_pid=$1
+    local runtime_log=$2
+    while kill -0 "$runtime_pid" 2>/dev/null; do
+        sleep "$RUNTIME_LOG_CHECK_INTERVAL"
+        local size
+        size=$(wc -c < "$runtime_log" 2>/dev/null || echo 0)
+        [ "$size" -gt "$MAX_RUNTIME_LOG_BYTES" ] || continue
+        if tail -c "$KEEP_RUNTIME_LOG_BYTES" "$runtime_log" > "$runtime_log.tmp" 2>/dev/null; then
+            cat "$runtime_log.tmp" > "$runtime_log" 2>/dev/null || true
+            rm -f "$runtime_log.tmp"
+        fi
+    done
+}
+
+# Select the output target once and launch once. The default pipes runtime
+# output to PID 1's stdout so container log collectors pick it up; /proc/1/fd/1
+# only opens for processes sharing PID 1's uid (root), and in non-root business
+# containers a failed redirect would abort the launch silently. Fall back to a
+# bounded per-binary log file under $ENVD_DIR (writable by the business
+# container, readable by the root sidecar). Every backgrounded child redirects
+# stdout+stderr so the postStart hook's IO pipe reaches EOF when the hook exits.
+rotate=false
+if [ "$NOLOG" = "true" ]; then
+    # Suppress runtime stdout/stderr entirely when invoked with --nolog.
+    log_target=/dev/null
+elif (exec 3>>/proc/1/fd/1) 2>/dev/null; then
+    log_target=/proc/1/fd/1
+elif [ -w "$ENVD_DIR" ]; then
+    log_target="${ENVD_DIR}/$(basename "${RUN_CMD[0]}").log"
+    rotate=true
+    echo "Warning: /proc/1/fd/1 is not writable; runtime output goes to $log_target" >&2
+else
+    log_target=/dev/null
+    echo "Warning: /proc/1/fd/1 and $ENVD_DIR are not writable; runtime output goes to /dev/null" >&2
+fi
+nohup "${RUN_CMD[@]}" >>"$log_target" 2>&1 &
+if $rotate; then
+    rotate_runtime_log "$!" "$log_target" >>"$log_target" 2>&1 &
+fi
+
+# User init hook: everything after "--" runs directly (no shell interpretation,
+# kubectl exec style). A non-zero exit code aborts startup to surface hook
+# failures.
 if [ ${#USER_INIT_ARGS[@]} -gt 0 ]; then
     echo "[user-init] Running direct exec: ${USER_INIT_ARGS[*]}"
     "${USER_INIT_ARGS[@]}"

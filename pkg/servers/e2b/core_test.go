@@ -931,7 +931,7 @@ func GetSandbox(t *testing.T, sandboxID string, c ctrlclient.Client) *agentsv1al
 }
 
 func EnableWaitSim(t *testing.T, controller *Controller, sandboxID string) {
-	mgr := controller.manager.GetInfra().GetCache().(*infracache.Cache).GetMockManager()
+	mgr := controller.manager.GetInfra().GetCache().(*cachetest.Cache).GetMockManager()
 	mgr.AddWaitReconcileKey(GetSandbox(t, sandboxID, mgr.GetClient()))
 }
 

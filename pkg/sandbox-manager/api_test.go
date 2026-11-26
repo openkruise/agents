@@ -42,7 +42,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
-	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -55,6 +55,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/pagination"
@@ -205,8 +206,23 @@ func simulateInplaceUpdateControllerForApiTest(ctx context.Context, c ctrlclient
 	}()
 }
 
+// erroringTemplateLookupCache makes PickSandboxSet fail so table rows can
+// exercise an inconclusive template lookup instead of a definitive miss.
+type erroringTemplateLookupCache struct {
+	infracache.Provider
+	err error
+}
+
+func (c *erroringTemplateLookupCache) PickSandboxSet(context.Context, infracache.PickSandboxSetOptions) (*agentsv1alpha1.SandboxSet, error) {
+	return nil, c.err
+}
+
 func TestSandboxManager_ClaimSandbox(t *testing.T) {
 	testutils.InitLogOutput()
+	// The deprecated request-result metric only increments while its gate is on.
+	// Keep it enabled here so this table continues to protect that wiring.
+	deprecatedEnabled := deprecatedResponseMetricsEnabled.Swap(true)
+	t.Cleanup(func() { deprecatedResponseMetricsEnabled.Store(deprecatedEnabled) })
 	now := time.Now()
 	username := "test-user"
 	tests := []struct {
@@ -216,6 +232,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		templateSetup     map[string]int
 		prepareSandbox    func(*agentsv1alpha1.Sandbox)
 		generatorError    error
+		templateLookupErr error
 		expectError       string
 		expectedErrorCode errors.ErrorCode
 		postCheck         func(t *testing.T, manager *SandboxManager, client ctrlclient.Client, sbx infra.Sandbox)
@@ -236,6 +253,17 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			expectedErrorCode: errors.ErrorNotFound,
 		},
 		{
+			name: "Template lookup failure should return internal error without claiming",
+			opts: infra.ClaimSandboxOptions{
+				User:      username,
+				Namespace: "team-a",
+				Template:  "lookup-error-template",
+			},
+			templateLookupErr: apierrors.NewServiceUnavailable("injected template cache failure"),
+			expectError:       "failed to check template",
+			expectedErrorCode: errors.ErrorInternal,
+		},
+		{
 			name: "No user",
 			opts: infra.ClaimSandboxOptions{
 				Template: "exist-1",
@@ -251,7 +279,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "exist-1",
-				Modifier: func(sandbox infra.Sandbox) error {
+				Modifier: func(sandbox claim.Handle) error {
 					sandbox.SetTimeout(timeout.Options{
 						ShutdownTime: now.Add(time.Second),
 						PauseTime:    now.Add(time.Second),
@@ -297,6 +325,24 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			},
 		},
 		{
+			name: "Inplace resize request exceeding limit is BadRequest",
+			opts: infra.ClaimSandboxOptions{
+				User:     username,
+				Template: "exist-1",
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Resources: &config.InplaceUpdateResourcesOptions{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+				},
+			},
+			templateSetup: map[string]int{
+				"exist-1": 1,
+			},
+			expectError:       "must not exceed limit",
+			expectedErrorCode: errors.ErrorBadRequest,
+		},
+		{
 			// Metadata-only change: labels are propagated via Modifier (MergePodLabels),
 			// without InplaceUpdate. The controller patches pod metadata directly
 			// without setting the InplaceUpdate condition, so no simulation goroutine
@@ -305,8 +351,8 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "exist-1",
-				Modifier: func(sbx infra.Sandbox) error {
-					claimengine.MergePodLabels(sbx, map[string]string{
+				Modifier: func(sbx claim.Handle) error {
+					claim.MergePodLabels(sbx, map[string]string{
 						"app": "test-app",
 						"env": "prod",
 					})
@@ -370,7 +416,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "short-id-pool",
-				Modifier: func(sandbox infra.Sandbox) error {
+				Modifier: func(sandbox claim.Handle) error {
 					labels := sandbox.GetLabels()
 					labels["test.example/modifier"] = "applied-before-assignment"
 					sandbox.SetLabels(labels)
@@ -432,8 +478,8 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				manager.generateSandboxID = func() (string, error) { return "", tt.generatorError }
 			}
 			if tt.opts.CreateOnNoStock {
-				originalCreate := sandboxcr.DefaultCreateSandbox
-				sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
+				originalCreate := claim.DefaultCreateSandbox
+				claim.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
 					sbx.Name = "cold-start-" + uuid.NewString()
 					sbx.UID = types.UID(uuid.NewString())
 					created, err := originalCreate(ctx, sbx, c)
@@ -446,7 +492,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 					}
 					return created, nil
 				}
-				t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = originalCreate })
+				t.Cleanup(func() { claim.DefaultCreateSandbox = originalCreate })
 			}
 			testIP := "1.2.3.4"
 			createAt := metav1.Now()
@@ -547,6 +593,13 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			} else {
 				tt.opts.ClaimTimeout = 100 * time.Millisecond
 			}
+			if tt.templateLookupErr != nil {
+				infraInstance, ok := manager.GetInfra().(*sandboxcr.Infra)
+				require.True(t, ok)
+				original := infraInstance.Cache
+				infraInstance.Cache = &erroringTemplateLookupCache{Provider: original, err: tt.templateLookupErr}
+				t.Cleanup(func() { infraInstance.Cache = original })
+			}
 			var claimed infra.Sandbox
 			var claimErr error
 			namespace := tt.opts.Namespace
@@ -568,6 +621,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 					claimType = agentsv1alpha1.ClaimMethodColdStart
 				}
 				histogramBefore := managerHistogram(t, sandboxClaimDuration, namespace, "success", claimType).GetSampleCount()
+				wantRequestCounts := resultCounterSums(t, sandboxClaimCreationResponses)
 				got, err := manager.ClaimSandbox(t.Context(), ClaimSandboxOptions{Infra: tt.opts})
 				wantSuccess, wantFailure, wantCreation := successBefore, failureBefore, creationBefore
 				if err == nil {
@@ -579,6 +633,13 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				assert.Equal(t, wantSuccess, resultCounterSum(t, sandboxClaimTotal, namespace, "success"))
 				assert.Equal(t, wantFailure, resultCounterSum(t, sandboxClaimTotal, namespace, "failure"), "every error in this table happens before an instance is bound")
 				assert.Equal(t, wantCreation, resultCounterSum(t, sandboxCreateTotal, namespace, "success"))
+				// Successful calls use the Sandbox namespace; failed calls use the request namespace.
+				if err != nil {
+					wantRequestCounts[resultCounterLabels{namespace: tt.opts.Namespace, result: "failure"}]++
+				} else {
+					wantRequestCounts[resultCounterLabels{namespace: namespace, result: "success"}]++
+				}
+				assert.Equal(t, wantRequestCounts, resultCounterSums(t, sandboxClaimCreationResponses), "each call increments only its expected request counter")
 				wantHistogram := histogramBefore
 				if err == nil {
 					wantHistogram++
@@ -600,6 +661,9 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				require.Error(t, err)
 				assert.Equal(t, tt.expectedErrorCode, errors.GetErrCode(err))
 				assert.Contains(t, err.Error(), tt.expectError)
+				if tt.templateLookupErr != nil {
+					assert.ErrorIs(t, err, tt.templateLookupErr)
+				}
 				if tt.errorCheck != nil {
 					tt.errorCheck(t, client)
 				}
@@ -669,7 +733,7 @@ func TestSandboxManager_NamespaceAwareSandboxOptions(t *testing.T) {
 	assert.Equal(t, "team-a", list[0].GetNamespace())
 	assert.Equal(t, "sandbox-a", list[0].GetName())
 
-	got, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+	got, err := manager.GetSandbox(t.Context(), testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 		Namespace: "team-b",
 		SandboxID: sandboxid.Resolve(sandboxes[1]),
 	})
@@ -679,7 +743,7 @@ func TestSandboxManager_NamespaceAwareSandboxOptions(t *testing.T) {
 
 	getCtx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 	defer cancel()
-	_, err = manager.GetSandbox(getCtx, testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+	_, err = manager.GetSandbox(getCtx, testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 		Namespace: "team-a",
 		SandboxID: sandboxid.Resolve(sandboxes[1]),
 	})
@@ -813,14 +877,14 @@ func TestSandboxManager_GetSandbox(t *testing.T) {
 			sandboxID:         "default--running-pod",
 			expectError:       false,
 			expectedErrorCode: "",
-			expectedState:     agentsv1alpha1.SandboxStateRunning,
+			expectedState:     sandboxstate.Running,
 		},
 		{
 			name:              "Get paused pod",
 			sandboxID:         "default--paused-pod",
 			expectError:       false,
 			expectedErrorCode: "",
-			expectedState:     agentsv1alpha1.SandboxStatePaused,
+			expectedState:     sandboxstate.Paused,
 		},
 		{
 			name:              "Get available pod should return error",
@@ -859,7 +923,7 @@ func TestSandboxManager_GetSandbox(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
-			sbx, err := manager.GetSandbox(ctx, testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+			sbx, err := manager.GetSandbox(ctx, testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 				SandboxID: tt.sandboxID,
 			})
 
@@ -935,7 +999,7 @@ func TestSandboxManager_GetSandboxExpectedStates(t *testing.T) {
 			name:           "owned not-ready running sandbox is returned",
 			user:           testUser,
 			sandboxID:      sandboxid.Resolve(notReadySbx),
-			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedState:  sandboxstate.Provisioning,
 			expectedReason: "RunningResourceClaimedButNotReady",
 		},
 		{
@@ -1027,7 +1091,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 				sbx.Status.PodInfo.PodIP = "10.0.0.1"
 			},
 			expectError:   false,
-			expectedState: agentsv1alpha1.SandboxStatePaused,
+			expectedState: sandboxstate.Paused,
 			expectedIP:    "10.0.0.1",
 		},
 		{
@@ -1044,7 +1108,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 				sbx.Status.PodInfo.PodIP = "10.0.0.2"
 			},
 			expectError:   false,
-			expectedState: agentsv1alpha1.SandboxStatePaused,
+			expectedState: sandboxstate.Paused,
 			expectedIP:    "10.0.0.2",
 		},
 	}
@@ -1052,7 +1116,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			manager, client := setupTestManager(t)
-			mgr := manager.GetInfra().GetCache().(*infracache.Cache).GetMockManager()
+			mgr := manager.GetInfra().GetCache().(*cachetest.Cache).GetMockManager()
 
 			sandbox := getSandboxForApiTest(tt.name)
 			tt.initSandbox(sandbox)
@@ -1061,7 +1125,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 			CreateSandboxWithStatus(t, client, sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 				SandboxID: sandboxid.Resolve(sandbox),
 			})
 			if err != nil {
@@ -1101,7 +1165,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 			assert.Equal(t, testUser, route.Owner)
 			// Verify sandbox state matches expected
 			if tt.expectedState != "" {
-				actualSbx, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+				actualSbx, err := manager.GetSandbox(t.Context(), testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 					SandboxID: sandboxid.Resolve(sandbox),
 				})
 				if err == nil {
@@ -1138,7 +1202,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 				sbx.Status.PodInfo.PodIP = "10.0.0.1"
 			},
 			expectError:   false,
-			expectedState: agentsv1alpha1.SandboxStateRunning,
+			expectedState: sandboxstate.Running,
 			expectedIP:    "10.0.0.1",
 			ipChanged:     false,
 		},
@@ -1156,7 +1220,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 				sbx.Status.PodInfo.PodIP = "10.0.0.1"
 			},
 			expectError:   false,
-			expectedState: agentsv1alpha1.SandboxStateRunning,
+			expectedState: sandboxstate.Running,
 			expectedIP:    "10.0.0.2", // IP changed after resume
 			ipChanged:     true,
 		},
@@ -1174,7 +1238,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 				sbx.Status.PodInfo.PodIP = "10.0.0.1"
 			},
 			expectError:   false,
-			expectedState: agentsv1alpha1.SandboxStateRunning,
+			expectedState: sandboxstate.Running,
 			expectedIP:    "10.0.0.1",
 			ipChanged:     false,
 		},
@@ -1183,7 +1247,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			manager, client := setupTestManager(t)
-			mgr := manager.GetInfra().GetCache().(*infracache.Cache).GetMockManager()
+			mgr := manager.GetInfra().GetCache().(*cachetest.Cache).GetMockManager()
 
 			sandbox := getSandboxForApiTest(tt.name)
 			tt.initSandbox(sandbox)
@@ -1192,7 +1256,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 			mgr.AddWaitReconcileKey(sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 				SandboxID: sandboxid.Resolve(sandbox),
 			})
 			if err != nil {
@@ -1559,7 +1623,7 @@ func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 					Name:            sandbox.GetName(),
 					UID:             sandbox.GetUID(),
 					Owner:           testUser,
-					State:           agentsv1alpha1.SandboxStateRunning,
+					State:           sandboxstate.Running,
 					ResourceVersion: sandbox.GetResourceVersion(),
 				})
 			}
@@ -1725,7 +1789,7 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			CreateSandboxWithStatus(t, client, sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 				SandboxID: sandboxid.Resolve(sandbox),
 			})
 			if err != nil {
@@ -1739,11 +1803,11 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 
 			// Decorator: DefaultDeleteSandbox - control delete result (set after getting sandbox)
 			if tt.mockDeleteErr != nil {
-				origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-				sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, s *agentsv1alpha1.Sandbox, c ctrlclient.Client) error {
+				origDeleteSandbox := claim.DefaultDeleteSandbox
+				claim.DefaultDeleteSandbox = func(ctx context.Context, s *agentsv1alpha1.Sandbox, c ctrlclient.Client) error {
 					return tt.mockDeleteErr
 				}
-				t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+				t.Cleanup(func() { claim.DefaultDeleteSandbox = origDeleteSandbox })
 			}
 
 			// Delete sandbox
@@ -1771,7 +1835,7 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 				// Use a short timeout context to avoid long retry in GetSandbox
 				ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 				defer cancel()
-				_, getErr := manager.GetSandbox(ctx, testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+				_, getErr := manager.GetSandbox(ctx, testUser, []string{sandboxstate.Running, sandboxstate.Paused}, infra.GetSandboxOptions{
 					SandboxID: sandboxid.Resolve(sandbox),
 				})
 				assert.Error(t, getErr, "sandbox should not be found after deletion")
@@ -2100,9 +2164,11 @@ func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
 
 				// Wait for informer sync
 				require.Eventually(t, func() bool {
-					return manager.GetInfra().HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
+					ok, err := manager.HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
 						CheckpointID: tt.checkpointID,
 					})
+					assert.NoError(t, err)
+					return ok
 				}, time.Second, 10*time.Millisecond)
 
 				// Cleanup

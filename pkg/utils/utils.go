@@ -23,19 +23,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/google/uuid"
-
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
@@ -243,52 +244,68 @@ func SetNowFuncForTesting(fn func() time.Time) func() {
 	return func() { nowFunc = prev }
 }
 
-// GetSandboxState the state of agentsv1alpha1 Sandbox.
+// GetSandboxState returns these reasons to identify the branch that produced
+// each state. Callers outside this package treat the reason as opaque text.
+const (
+	sandboxStateReasonResourceDeleted     = "ResourceDeleted"
+	sandboxStateReasonShutdownTimeReached = "ShutdownTimeReached"
+	sandboxStateReasonResourcePending     = "ResourcePending"
+	sandboxStateReasonResourceSucceeded   = "ResourceSucceeded"
+	sandboxStateReasonResourceFailed      = "ResourceFailed"
+	sandboxStateReasonResourceTerminating = "ResourceTerminating"
+	sandboxStateReasonSbsReady            = "ResourceControlledBySbsAndReady"
+	sandboxStateReasonSbsNotReady         = "ResourceControlledBySbsButNotReady"
+	sandboxStateReasonClaimedAndPaused    = "RunningResourceClaimedAndPaused"
+	sandboxStateReasonClaimedAndReady     = "RunningResourceClaimedAndReady"
+	sandboxStateReasonClaimedButNotReady  = "RunningResourceClaimedButNotReady"
+	sandboxStateReasonNotRunningClaimed   = "NotRunningResourceClaimed"
+)
+
+// GetSandboxState maps one Sandbox observation to the neutral lifecycle state
+// and the backend diagnostic reason that produced it. The mapping from CR
+// phases, conditions and reasons to the neutral vocabulary stays here; callers
+// classify on the state only.
 // NOTE: the reason is unique and hard-coded, so we can easily search the conditions of some reason when debugging.
 func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) {
 	if sbx.DeletionTimestamp != nil {
-		return agentsv1alpha1.SandboxStateDead, "ResourceDeleted"
+		return sandboxstate.Dead, sandboxStateReasonResourceDeleted
 	}
 	if sbx.Spec.ShutdownTime != nil && nowFunc().After(sbx.Spec.ShutdownTime.Time) {
-		return agentsv1alpha1.SandboxStateDead, "ShutdownTimeReached"
+		return sandboxstate.Expired, sandboxStateReasonShutdownTimeReached
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxPending {
-		return agentsv1alpha1.SandboxStateCreating, agentsv1alpha1.SandboxStateReasonResourcePending
+		return sandboxstate.Creating, sandboxStateReasonResourcePending
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxSucceeded {
-		return agentsv1alpha1.SandboxStateDead, "ResourceSucceeded"
+		return sandboxstate.Dead, sandboxStateReasonResourceSucceeded
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxFailed {
-		return agentsv1alpha1.SandboxStateDead, "ResourceFailed"
+		return sandboxstate.Dead, sandboxStateReasonResourceFailed
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxTerminating {
-		return agentsv1alpha1.SandboxStateDead, "ResourceTerminating"
+		return sandboxstate.Dead, sandboxStateReasonResourceTerminating
 	}
 
 	sandboxReady := IsSandboxReady(sbx)
 	if IsControlledBySandboxSet(sbx) {
 		if sandboxReady {
-			return agentsv1alpha1.SandboxStateAvailable, "ResourceControlledBySbsAndReady"
-		} else {
-			return agentsv1alpha1.SandboxStateCreating, "ResourceControlledBySbsButNotReady"
+			return sandboxstate.Available, sandboxStateReasonSbsReady
 		}
-	} else {
-		if sbx.Status.Phase == agentsv1alpha1.SandboxRunning {
-			if sbx.Spec.Paused {
-				return agentsv1alpha1.SandboxStatePaused, "RunningResourceClaimedAndPaused"
-			} else {
-				if sandboxReady {
-					return agentsv1alpha1.SandboxStateRunning, "RunningResourceClaimedAndReady"
-				} else {
-					return agentsv1alpha1.SandboxStateDead, "RunningResourceClaimedButNotReady"
-				}
-			}
-		} else {
-			// Paused and Resuming phases are both treated as paused state
-			return agentsv1alpha1.SandboxStatePaused, "NotRunningResourceClaimed"
-		}
+		return sandboxstate.Creating, sandboxStateReasonSbsNotReady
 	}
+	if sbx.Status.Phase != agentsv1alpha1.SandboxRunning {
+		// Paused and Resuming phases are both treated as paused state
+		return sandboxstate.Paused, sandboxStateReasonNotRunningClaimed
+	}
+	if sbx.Spec.Paused {
+		return sandboxstate.Paused, sandboxStateReasonClaimedAndPaused
+	}
+	if sandboxReady {
+		return sandboxstate.Running, sandboxStateReasonClaimedAndReady
+	}
+	return sandboxstate.Provisioning, sandboxStateReasonClaimedButNotReady
 }
+
 func IsControlledBySandboxSet(sbx *agentsv1alpha1.Sandbox) bool {
 	controller := metav1.GetControllerOfNoCopy(sbx)
 	if controller == nil {
@@ -332,12 +349,26 @@ func IsLiveForQuota(sbx *agentsv1alpha1.Sandbox) bool {
 	return sbx.GetDeletionTimestamp() == nil && sbx.Status.Phase != agentsv1alpha1.SandboxTerminating
 }
 
+// pauseResumeConflict reports lifecycle conditions that rule out either transition.
+func pauseResumeConflict(sbx *agentsv1alpha1.Sandbox) string {
+	if sbx.DeletionTimestamp != nil {
+		return "SandboxIsTerminating"
+	}
+	if sbx.Spec.ShutdownTime != nil && nowFunc().After(sbx.Spec.ShutdownTime.Time) {
+		return sandboxStateReasonShutdownTimeReached
+	}
+	return ""
+}
+
 // IsSandboxPausable returns true when the pausing operation will not cause any conflict.
 func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
+	if reason := pauseResumeConflict(sbx); reason != "" {
+		return false, reason
+	}
 	if IsControlledBySandboxSet(sbx) {
 		state, _ := GetSandboxState(sbx)
 		switch state {
-		case agentsv1alpha1.SandboxStateAvailable, agentsv1alpha1.SandboxStateCreating:
+		case sandboxstate.Available, sandboxstate.Creating:
 			return false, "SandboxStateNotAllowed"
 		}
 	}
@@ -348,8 +379,8 @@ func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 		if IsSandboxReady(sbx) {
 			return true, "SandboxIsRunningAndReady"
 		}
-		// Running-but-not-ready claimed sandboxes are reported as dead by
-		// GetSandboxState, so pause must not accept them as live sandboxes.
+		// Running-but-not-ready claimed sandboxes are reported as provisioning by
+		// GetSandboxState; pause only accepts a ready instance.
 		return false, "SandboxIsRunningButNotReady"
 	default:
 		return false, "SandboxPhaseNotAllowed"
@@ -358,13 +389,8 @@ func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 
 // IsSandboxResumable returns true when the resuming operation will not cause any conflict.
 func IsSandboxResumable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
-	// Reject resume on sandboxes that are being deleted or have exceeded their shutdown time.
-	// These are the same pre-checks GetSandboxState performs before evaluating phase-based states.
-	if sbx.DeletionTimestamp != nil {
-		return false, "SandboxIsTerminating"
-	}
-	if sbx.Spec.ShutdownTime != nil && nowFunc().After(sbx.Spec.ShutdownTime.Time) {
-		return false, "ShutdownTimeReached"
+	if reason := pauseResumeConflict(sbx); reason != "" {
+		return false, reason
 	}
 
 	switch sbx.Status.Phase {
@@ -407,6 +433,64 @@ func WakeOnIngressTrafficPauseTimeout(sbx *agentsv1alpha1.Sandbox) time.Duration
 		return 0
 	}
 	return rule.PauseTimeout.Duration
+}
+
+// WakeOnIngressTrafficRequestMatches reports whether a request satisfies the
+// request matches of the sandbox's wake-on-ingress-traffic rule: any entry
+// must match, and an entry matches when all of its header conditions do.
+// headerValues returns every value of the named (lower-cased) request header.
+// A sandbox without the rule or without matches accepts every request;
+// enablement is checked separately by WakeOnIngressTrafficEnabled.
+func WakeOnIngressTrafficRequestMatches(sbx *agentsv1alpha1.Sandbox, headerValues func(name string) []string) bool {
+	if sbx == nil || sbx.Spec.AutoPausePolicy == nil || sbx.Spec.AutoPausePolicy.Resume == nil {
+		return true
+	}
+	rule := sbx.Spec.AutoPausePolicy.Resume.OnIngressTraffic
+	if rule == nil || len(rule.RequestMatches) == 0 {
+		return true
+	}
+	return slices.ContainsFunc(rule.RequestMatches, func(match agentsv1alpha1.IngressTrafficRequestMatch) bool {
+		return requestHeadersMatch(match.Headers, headerValues)
+	})
+}
+
+// requestHeadersMatch reports whether every header condition matches. An
+// entry without conditions is rejected by validation and never matches here,
+// so it cannot open wake to every request.
+func requestHeadersMatch(headers []agentsv1alpha1.IngressTrafficHeaderMatch, headerValues func(name string) []string) bool {
+	if len(headers) == 0 {
+		return false
+	}
+	for _, header := range headers {
+		// Empty Values is invalid and must not allow wake through NotIn inversion.
+		if len(header.Values) == 0 {
+			return false
+		}
+		matched := headerValueAccepted(headerValues(strings.ToLower(header.Name)), header.Values)
+		switch header.Operator {
+		case "", agentsv1alpha1.IngressTrafficHeaderMatchIn:
+			if !matched {
+				return false
+			}
+		case agentsv1alpha1.IngressTrafficHeaderMatchNotIn:
+			if matched {
+				return false
+			}
+		default:
+			// Unknown operators do not match, rather than being interpreted as In.
+			return false
+		}
+	}
+	return true
+}
+
+func headerValueAccepted(got, accepted []string) bool {
+	for _, value := range got {
+		if slices.Contains(accepted, value) {
+			return true
+		}
+	}
+	return false
 }
 
 // GetTemplateSpec resolves and returns the PodTemplateSpec from the EmbeddedSandboxTemplate.

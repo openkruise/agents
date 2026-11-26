@@ -37,6 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 )
@@ -138,7 +139,13 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	// sandbox-manager handles every instance it claims, so it owns their metrics.
 	infraOpts.ControlPlaneSource = v1alpha1.SandboxSourceE2B
 
-	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
+	hasTemplate, err := m.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template})
+	if err != nil {
+		log.Error(err, "failed to check template existence", "template", infraOpts.Template)
+		incClaimRequestResult(infraOpts.Namespace, metricResultFailure)
+		return nil, managererrors.WrapError(managererrors.ErrorInternal, err, "failed to check template %s", infraOpts.Template)
+	}
+	if !hasTemplate {
 		// A failure before binding only feeds the legacy request metric; it produces no
 		// instance claim event.
 		incClaimRequestResult(infraOpts.Namespace, metricResultFailure)
@@ -295,6 +302,14 @@ func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
 	return route.Owner, ok
 }
 
+func (m *SandboxManager) HasTemplate(ctx context.Context, opts infra.HasTemplateOptions) (bool, error) {
+	return m.infra.HasTemplate(ctx, opts)
+}
+
+func (m *SandboxManager) HasCheckpoint(ctx context.Context, opts infra.HasCheckpointOptions) (bool, error) {
+	return m.infra.HasCheckpoint(ctx, opts)
+}
+
 // GetOwnerOfVolume returns the owner (UserID) of the volume identified by volumeID (PV Name)
 // in the given namespace. Returns ("", false) if the volume is not found.
 func (m *SandboxManager) GetOwnerOfVolume(ctx context.Context, namespace, volumeID string) (string, bool) {
@@ -431,7 +446,7 @@ func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandb
 		log.Error(err, "failed to project deleted sandbox route")
 		return
 	}
-	route.State = v1alpha1.SandboxStateDead
+	route.State = sandboxstate.Dead
 	// Peer fanout is detached from the request ctx so client cancellation does
 	// not abort this bounded, best-effort dead-route push.
 	if err := m.proxy.SyncRouteWithPeers(context.WithoutCancel(ctx), route); err != nil {

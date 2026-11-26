@@ -66,21 +66,6 @@ type UpdatedMetadataInClaim struct {
 	Annotations []string `json:"annotations,omitempty"`
 }
 
-const (
-	SandboxStateCreating  = "creating"
-	SandboxStateAvailable = "available"
-	SandboxStateRunning   = "running"
-	SandboxStatePaused    = "paused"
-	SandboxStateDead      = "dead"
-)
-
-// Reason values reported alongside SandboxState* by utils.GetSandboxState.
-// Exported so downstream controllers can match on them without repeating the
-// hard-coded string literal.
-const (
-	SandboxStateReasonResourcePending = "ResourcePending"
-)
-
 var SandboxSetControllerKind = GroupVersion.WithKind("SandboxSet")
 
 // SandboxSetSpec defines the desired state of SandboxSet
@@ -103,6 +88,17 @@ type SandboxSetSpec struct {
 	// +optional
 	// +listType=atomic
 	Runtimes []RuntimeConfig `json:"runtimes,omitempty"`
+
+	// StartupMode controls whether sandboxes created from this SandboxSet have
+	// their main container command wrapped by run_with_envs.sh, so the main
+	// process starts only after the claim-time envVars, the optional claim
+	// command, and a readiness signal are delivered. It is copied verbatim onto
+	// each created Sandbox and is part of the update revision hash, so changing
+	// it triggers a rolling update of already-created pool sandboxes.
+	// +kubebuilder:validation:Enum=Immediate;Deferred
+	// +kubebuilder:default="Immediate"
+	// +optional
+	StartupMode StartupMode `json:"startupMode,omitempty"`
 
 	// Probes defines the named probes that sandboxes created from this SandboxSet
 	// run while they are Running. It is copied verbatim onto each created Sandbox
