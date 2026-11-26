@@ -135,7 +135,7 @@ Add a protected endpoint:
 GET /api-keys/compatible
 ```
 
-Like other E2B routes, it is registered through `RegisterE2BRoute`, so both the
+Like other E2B routes, it is registered through `registerE2BRoute`, so both the
 native path and customized `/api` prefixed path are available.
 
 Middleware:

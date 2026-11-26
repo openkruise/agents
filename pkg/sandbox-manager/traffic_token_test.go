@@ -127,6 +127,7 @@ func TestSandboxManagerRefreshTrafficAccessToken(t *testing.T) {
 		user          string
 		providerError error
 		retryOnError  bool
+		stopped       bool
 		expectCode    managererrors.ErrorCode
 		expectCalls   int32
 	}{
@@ -136,6 +137,7 @@ func TestSandboxManagerRefreshTrafficAccessToken(t *testing.T) {
 		{name: "JWT disabled", mutate: func(s *v1alpha1.Sandbox) { delete(s.Annotations, identity.AnnotationEnableJwtAuth) }, expectCode: managererrors.ErrorConflict},
 		{name: "unsupported state", mutate: func(s *v1alpha1.Sandbox) { s.Status.Phase = v1alpha1.SandboxFailed }, expectCode: managererrors.ErrorConflict},
 		{name: "provider unavailable", providerError: providerErr, retryOnError: true, expectCode: managererrors.ErrorUnavailable, expectCalls: 2},
+		{name: "issuance lifecycle stopped", stopped: true, expectCode: managererrors.ErrorUnavailable},
 	}
 
 	for _, tt := range tests {
@@ -164,9 +166,17 @@ func TestSandboxManagerRefreshTrafficAccessToken(t *testing.T) {
 			if user == "" {
 				user = testUser
 			}
+			if tt.stopped {
+				require.NoError(t, manager.trafficTokenIssues.stop(t.Context()))
+			}
+			var registered atomic.Int32
 			opts := RefreshTrafficAccessTokenOptions{
 				SandboxID: sandboxID,
 				User:      user,
+				RegisterTask: func() func() {
+					registered.Add(1)
+					return nil
+				},
 			}
 			result, err := manager.RefreshTrafficAccessToken(t.Context(), opts)
 			if tt.expectCode != "" {
@@ -185,6 +195,7 @@ func TestSandboxManagerRefreshTrafficAccessToken(t *testing.T) {
 				assert.Equal(t, "refreshed-token", result.Token)
 			}
 			assert.Equal(t, tt.expectCalls, provider.calls.Load())
+			assert.Equal(t, tt.expectCalls, registered.Load())
 		})
 	}
 }
@@ -275,7 +286,16 @@ func TestSandboxManagerTrafficAccessTokenLeaderCancellationDoesNotFailWaiter(t *
 	provider := &blockingTrafficTokenTestProvider{started: make(chan struct{}), unblock: make(chan struct{})}
 	identity.RegisterProvider(provider)
 	t.Cleanup(func() { identity.RegisterProvider(identity.NewDefaultIdentityProvider()) })
-	opts := RefreshTrafficAccessTokenOptions{SandboxID: sandboxID, User: testUser}
+	var registered atomic.Int32
+	taskDone := make(chan struct{}, 2)
+	opts := RefreshTrafficAccessTokenOptions{
+		SandboxID: sandboxID,
+		User:      testUser,
+		RegisterTask: func() func() {
+			registered.Add(1)
+			return func() { taskDone <- struct{}{} }
+		},
+	}
 	type refreshResult struct {
 		result infra.TrafficAccessToken
 		err    error
@@ -283,12 +303,25 @@ func TestSandboxManagerTrafficAccessTokenLeaderCancellationDoesNotFailWaiter(t *
 	leaderDone := make(chan refreshResult, 1)
 	waiterDone := make(chan refreshResult, 1)
 	leaderCtx, cancelLeader := context.WithCancel(t.Context())
+	defer cancelLeader()
 	go func() {
 		result, err := manager.RefreshTrafficAccessToken(leaderCtx, opts)
 		leaderDone <- refreshResult{result: result, err: err}
 	}()
 	<-provider.started
+	assert.Equal(t, int32(1), registered.Load(), "register before issuing the token")
 	cancelLeader()
+	leader := <-leaderDone
+	require.Error(t, leader.err)
+	assert.Equal(t, managererrors.ErrorUnavailable, managererrors.GetErrCode(leader.err))
+	assert.ErrorIs(t, leader.err, context.Canceled)
+	assert.Empty(t, leader.result)
+	select {
+	case <-taskDone:
+		t.Fatal("detached issuance completed when the only caller canceled")
+	default:
+	}
+
 	go func() {
 		result, err := manager.RefreshTrafficAccessToken(t.Context(), opts)
 		waiterDone <- refreshResult{result: result, err: err}
@@ -296,15 +329,16 @@ func TestSandboxManagerTrafficAccessTokenLeaderCancellationDoesNotFailWaiter(t *
 	time.Sleep(50 * time.Millisecond)
 	close(provider.unblock)
 
-	leader := <-leaderDone
 	waiter := <-waiterDone
-	require.Error(t, leader.err)
-	assert.Equal(t, managererrors.ErrorUnavailable, managererrors.GetErrCode(leader.err))
-	assert.ErrorIs(t, leader.err, context.Canceled)
-	assert.Empty(t, leader.result)
 	require.NoError(t, waiter.err)
 	assert.Equal(t, "coalesced-token", waiter.result.Token)
 	assert.Equal(t, int32(1), provider.calls.Load())
+	assert.Equal(t, int32(1), registered.Load(), "only the leader registers the shared issuance")
+	select {
+	case <-taskDone:
+	case <-time.After(time.Second):
+		t.Fatal("detached issuance did not report completion")
+	}
 }
 
 func TestSandboxManagerTrafficAccessTokenIssueTimeoutFailsAllWaiters(t *testing.T) {
@@ -368,11 +402,19 @@ func TestSandboxManagerTrafficAccessTokenProviderPanicCleansFlightAndAllowsRetry
 	identity.RegisterProvider(provider)
 	t.Cleanup(func() { identity.RegisterProvider(identity.NewDefaultIdentityProvider()) })
 	opts := RefreshTrafficAccessTokenOptions{SandboxID: sandboxID, User: testUser}
-	_, err := manager.RefreshTrafficAccessToken(t.Context(), opts)
+	taskDone := make(chan struct{})
+	panicOpts := opts
+	panicOpts.RegisterTask = func() func() { return func() { close(taskDone) } }
+	_, err := manager.RefreshTrafficAccessToken(t.Context(), panicOpts)
 	require.Error(t, err)
 	assert.Equal(t, managererrors.ErrorInternal, managererrors.GetErrCode(err))
 	assert.Equal(t, int32(1), provider.calls.Load())
 	assert.Empty(t, manager.trafficTokenSingleflight.flights)
+	select {
+	case <-taskDone:
+	case <-time.After(time.Second):
+		t.Fatal("panicked issuance did not report completion")
+	}
 
 	healthyProvider := &trafficTokenTestProvider{}
 	identity.RegisterProvider(healthyProvider)

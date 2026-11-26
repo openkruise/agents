@@ -48,49 +48,53 @@ func (sc *Controller) registerRoutes() {
 	// Sandbox management endpoints.
 	// e2b SDK 2.51.0 creates through POST /v2/sandboxes. The v1 handler already
 	// applies the API default timeout when the field is omitted and ignores secure.
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/v2/sandboxes", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/v2/sandboxes", sc.ListSandboxes, sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/sandboxes/{sandboxID}", sc.DescribeSandbox, sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodDelete, "/sandboxes/{sandboxID}", sc.DeleteSandbox, traceOperation(traceOpKill), sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPut, "/sandboxes/{sandboxID}/network", sc.UpdateSandboxNetwork, sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/pause", sc.PauseSandbox, traceOperation(traceOpPause), sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/resume", sc.ResumeSandbox, traceOperation(traceOpResume), sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodPost, "/sandboxes", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodPost, "/v2/sandboxes", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodGet, "/v2/sandboxes", sc.ListSandboxes, sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodGet, "/sandboxes/{sandboxID}", sc.DescribeSandbox, sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodDelete, "/sandboxes/{sandboxID}", sc.DeleteSandbox, traceOperation(traceOpKill), sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodPut, "/sandboxes/{sandboxID}/network", sc.UpdateSandboxNetwork, sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodPost, "/sandboxes/{sandboxID}/pause", sc.PauseSandbox, traceOperation(traceOpPause), sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodPost, "/sandboxes/{sandboxID}/resume", sc.ResumeSandbox, traceOperation(traceOpResume), sc.CheckBusinessReady, sc.CheckApiKey)
 	// e2b SDK 2.51.0 connects through POST /v2/sandboxes/{sandboxID}/connect.
 	// ConnectSandboxV2 accepts an omitted body and applies the 300-second default.
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/connect", sc.ConnectSandbox, traceOperation(traceOpResume), sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/v2/sandboxes/{sandboxID}/connect", sc.ConnectSandboxV2, traceOperation(traceOpResume), sc.CheckBusinessReady, sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, http.MethodPost, adapters.CustomPrefix+"/api/sandboxes/{sandboxID}/traffic-access-token", sc.RefreshTrafficAccessToken, sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/timeout", sc.SetSandboxTimeout, sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/snapshots", sc.CreateSnapshot, sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/snapshots", sc.ListSnapshots, sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates", sc.ListTemplates, sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates/{templateID}", sc.GetTemplate, sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodDelete, "/templates/{templateID}", sc.DeleteTemplate, sc.CheckBusinessReady, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/browser/{sandboxID}/json/version", sc.BrowserUse, sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodPost, "/sandboxes/{sandboxID}/connect", sc.ConnectSandbox, traceOperation(traceOpResume), sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodPost, "/v2/sandboxes/{sandboxID}/connect", sc.ConnectSandboxV2, traceOperation(traceOpResume), sc.CheckBusinessReady, sc.CheckApiKey)
+	web.RegisterRoute(sc.handleBusiness, http.MethodPost, adapters.CustomPrefix+"/api/sandboxes/{sandboxID}/traffic-access-token", sc.RefreshTrafficAccessToken, sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodPost, "/sandboxes/{sandboxID}/timeout", sc.SetSandboxTimeout, sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodPost, "/sandboxes/{sandboxID}/snapshots", sc.CreateSnapshot, sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodGet, "/snapshots", sc.ListSnapshots, sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodGet, "/templates", sc.ListTemplates, sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodGet, "/templates/{templateID}", sc.GetTemplate, sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodDelete, "/templates/{templateID}", sc.DeleteTemplate, sc.CheckBusinessReady, sc.CheckApiKey)
+	registerE2BRoute(sc, http.MethodGet, "/browser/{sandboxID}/json/version", sc.BrowserUse, sc.CheckBusinessReady, sc.CheckApiKey)
 
 	// Volume management endpoints
 	// Temporarily disabled.
-	// RegisterE2BRoute(sc.mux, http.MethodPost, "/volumes", sc.CreateVolume, sc.CheckApiKey)
-	// RegisterE2BRoute(sc.mux, http.MethodGet, "/volumes", sc.ListVolumes, sc.CheckApiKey)
-	// RegisterE2BRoute(sc.mux, http.MethodGet, "/volumes/{volumeID}", sc.GetVolume, sc.CheckApiKey)
-	// RegisterE2BRoute(sc.mux, http.MethodDelete, "/volumes/{volumeID}", sc.DeleteVolume, sc.CheckApiKey)
+	// registerE2BRoute(sc, http.MethodPost, "/volumes", sc.CreateVolume, sc.CheckApiKey)
+	// registerE2BRoute(sc, http.MethodGet, "/volumes", sc.ListVolumes, sc.CheckApiKey)
+	// registerE2BRoute(sc, http.MethodGet, "/volumes/{volumeID}", sc.GetVolume, sc.CheckApiKey)
+	// registerE2BRoute(sc, http.MethodDelete, "/volumes/{volumeID}", sc.DeleteVolume, sc.CheckApiKey)
 
 	// API Keys management endpoints
 	if sc.keyCfg != nil {
-		RegisterE2BRoute(sc.mux, http.MethodGet, "/teams", sc.ListTeams, sc.CheckBusinessReady, sc.CheckApiKey)
-		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys/compatible", sc.GetCompatibleAPIKey, sc.CheckBusinessReady, sc.CheckApiKey)
-		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckBusinessReady, sc.CheckApiKey)
-		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckBusinessReady, sc.CheckApiKey, sc.CheckCreateAPIKeyPermission)
-		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckBusinessReady, sc.CheckApiKey, sc.CheckDeleteAPIKeyPermission)
+		registerE2BRoute(sc, http.MethodGet, "/teams", sc.ListTeams, sc.CheckBusinessReady, sc.CheckApiKey)
+		registerE2BRoute(sc, http.MethodGet, "/api-keys/compatible", sc.GetCompatibleAPIKey, sc.CheckBusinessReady, sc.CheckApiKey)
+		registerE2BRoute(sc, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckBusinessReady, sc.CheckApiKey)
+		registerE2BRoute(sc, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckBusinessReady, sc.CheckApiKey, sc.CheckCreateAPIKeyPermission)
+		registerE2BRoute(sc, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckBusinessReady, sc.CheckApiKey, sc.CheckDeleteAPIKeyPermission)
 	}
 }
 
-func RegisterE2BRoute[T any](mux *http.ServeMux, method, path string, handler web.Handler[T], middlewares ...web.MiddleWare) {
+func (sc *Controller) handleBusiness(pattern string, handler http.Handler) {
+	sc.mux.Handle(pattern, sc.activity.wrap(handler))
+}
+
+func registerE2BRoute[T any](sc *Controller, method, path string, handler web.Handler[T], middlewares ...web.MiddleWare) {
 	// Native E2B API
-	web.RegisterRoute(mux, method, path, handler, middlewares...)
+	web.RegisterRoute(sc.handleBusiness, method, path, handler, middlewares...)
 	// Customized E2B API
-	web.RegisterRoute(mux, method, adapters.CustomPrefix+"/api"+path, handler, middlewares...)
+	web.RegisterRoute(sc.handleBusiness, method, adapters.CustomPrefix+"/api"+path, handler, middlewares...)
 }
 
 // CheckBusinessReady rejects requests before authentication, including in auth-disabled mode.

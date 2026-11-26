@@ -79,6 +79,7 @@ type Controller struct {
 	configReady       <-chan struct{}
 	readyBeforeConfig bool
 	active            atomic.Bool
+	activity          requestActivity
 }
 
 // ControllerOptions carries everything NewController needs. Passing a struct
@@ -269,17 +270,18 @@ func (sc *Controller) initKeyStorage(ctx context.Context) error {
 // Early-listener mode instead waits for startup to release its partial state before cleanup.
 func (sc *Controller) Run(stop <-chan os.Signal) (context.Context, error) {
 	ctx, cancel := context.WithCancel(logs.NewContext())
+	startupDone := make(chan startupResult)
+	go sc.start(ctx, startupDone)
+	return ctx, sc.run(ctx, cancel, stop, startupDone)
+}
 
-	startupDone := make(chan error, 1)
-	go func() {
-		defer close(startupDone)
-		startupDone <- sc.startComponents(ctx)
-	}()
-
-	outcome, err := awaitStartup(startupDone, stop)
-	if outcome == startupInterrupted || outcome == startupFailed {
+func (sc *Controller) run(ctx context.Context, cancel context.CancelFunc, stop <-chan os.Signal, startupDone <-chan startupResult) error {
+	result, stopReceived := awaitStartup(startupDone, stop)
+	if result == nil || result.err != nil {
 		cancel()
-		if err != nil {
+		var err error
+		if result != nil {
+			err = result.err
 			klog.FromContext(ctx).Error(err, "startup failed, exiting")
 		} else if !sc.readyBeforeConfig {
 			klog.FromContext(ctx).Info("termination signal during startup, exiting without graceful cleanup")
@@ -287,25 +289,27 @@ func (sc *Controller) Run(stop <-chan os.Signal) (context.Context, error) {
 		if sc.readyBeforeConfig {
 			sc.shutdownAfterStartup(startupDone)
 		}
-		return ctx, err
+		return err
 	}
-	sc.active.Store(outcome == startupCompleted)
+	sc.active.Store(true)
+	if result.listener != nil {
+		sc.serveHTTPServers(result.listener)
+	}
 
-	// Steady state: a signal triggers the graceful shutdown chain. A signal
-	// that awaitStartup already consumed alongside a completed startup starts
-	// the chain right away.
 	go func() {
-		if outcome != startupSignaled {
+		if !stopReceived {
 			<-stop
 		}
+		klog.FromContext(ctx).Info("Waiting for E2B business traffic to become idle")
+		sc.activity.waitAndSeal()
 		shutdownCtx, shutdownCancel := context.WithTimeout(logs.NewContext("action", "shutdown"), consts.ShutdownTimeout)
 		defer shutdownCancel()
 		sc.shutdown(shutdownCtx, cancel)
 	}()
-	return ctx, nil
+	return nil
 }
 
-func (sc *Controller) shutdownAfterStartup(startupDone <-chan error) {
+func (sc *Controller) shutdownAfterStartup(startupDone <-chan startupResult) {
 	ctx, cancel := context.WithTimeout(logs.NewContext("action", "shutdown"), consts.ShutdownTimeout)
 	defer cancel()
 	go func() {
@@ -315,39 +319,73 @@ func (sc *Controller) shutdownAfterStartup(startupDone <-chan error) {
 	<-ctx.Done()
 }
 
-func (sc *Controller) startComponents(ctx context.Context) error {
+type startupResult struct {
+	listener net.Listener // Only default startup has a listener waiting to be served.
+	err      error
+}
+
+func (sc *Controller) start(ctx context.Context, done chan<- startupResult) {
+	defer close(done)
+	listener, err := sc.startComponents(ctx)
+	result := startupResult{listener: listener, err: err}
+	select {
+	case done <- result: // The receiver now owns the pending listener.
+	case <-ctx.Done():
+		// Default startup was interrupted before the handoff. Early listeners
+		// and their dependencies are already owned by shutdownAfterStartup.
+		if listener != nil {
+			if err := listener.Close(); err != nil {
+				klog.FromContext(ctx).Error(err, "Failed to close unused E2B listener")
+			}
+			if sc.keys != nil {
+				sc.keys.Stop()
+			}
+		}
+	}
+}
+
+func (sc *Controller) startComponents(ctx context.Context) (net.Listener, error) {
 	if sc.manager == nil {
 		if err := sc.Init(ctx); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if sc.readyBeforeConfig {
 		if err := sc.manager.StartTransports(ctx); err != nil {
-			return err
+			return nil, err
 		}
-		if err := sc.startHTTPServers(); err != nil {
-			return err
-		}
+	} else if err := sc.startManager(ctx); err != nil {
+		return nil, err
+	}
+
+	var lc net.ListenConfig
+	listener, err := lc.Listen(ctx, "tcp", sc.server.Addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen for E2B API on %s: %w", sc.server.Addr, err)
+	}
+
+	if sc.readyBeforeConfig {
+		sc.serveHTTPServers(listener)
+		listener = nil // The HTTP server now owns the listener.
 		if err := sc.awaitConfiguration(ctx); err != nil {
-			return err
+			return nil, err
+		}
+		if err := sc.startManager(ctx); err != nil {
+			return nil, err
 		}
 	}
+	if sc.keys != nil {
+		sc.keys.Run()
+	}
+	return listener, ctx.Err()
+}
+
+func (sc *Controller) startManager(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := sc.manager.Run(ctx); err != nil {
 		return fmt.Errorf("sandbox manager failed to start: %w", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if !sc.readyBeforeConfig {
-		if err := sc.startHTTPServers(); err != nil {
-			return err
-		}
-	}
-	if sc.keys != nil {
-		sc.keys.Run()
 	}
 	return ctx.Err()
 }
@@ -356,54 +394,23 @@ func (sc *Controller) businessReady() bool {
 	return !sc.readyBeforeConfig || sc.active.Load()
 }
 
-// startupOutcome classifies how controller startup ended.
-type startupOutcome int
-
-const (
-	// startupCompleted: startup succeeded and no termination signal was seen.
-	startupCompleted startupOutcome = iota
-	// startupSignaled: startup succeeded and a termination signal was
-	// consumed alongside it; the caller must start graceful shutdown itself.
-	startupSignaled
-	startupFailed
-	// startupInterrupted: a termination signal preempted an unfinished startup.
-	startupInterrupted
-)
-
-// When both channels are ready, retain the startup result for cleanup and
-// consume the pending stop so a successful startup never opens admission.
-func awaitStartup(startupDone <-chan error, stop <-chan os.Signal) (startupOutcome, error) {
-	var err error
+// Prefer an available startup result. Report a consumed signal so steady-state
+// shutdown can drain immediately without waiting for a second signal.
+func awaitStartup(startupDone <-chan startupResult, stop <-chan os.Signal) (result *startupResult, stopReceived bool) {
 	select {
-	case err = <-startupDone:
-		select {
-		case <-stop:
-		default:
-			return classifyStartup(err, startupCompleted)
-		}
+	case ready := <-startupDone:
+		return &ready, false
 	case <-stop:
 		select {
-		case err = <-startupDone:
+		case ready := <-startupDone:
+			return &ready, true
 		default:
-			return startupInterrupted, nil
+			return nil, true
 		}
 	}
-	return classifyStartup(err, startupSignaled)
 }
 
-func classifyStartup(err error, success startupOutcome) (startupOutcome, error) {
-	if err != nil {
-		return startupFailed, err
-	}
-	return success, nil
-}
-
-func (sc *Controller) startHTTPServers() error {
-	listener, err := net.Listen("tcp", sc.server.Addr)
-	if err != nil {
-		return fmt.Errorf("listen for E2B API on %s: %w", sc.server.Addr, err)
-	}
-
+func (sc *Controller) serveHTTPServers(listener net.Listener) {
 	go func() {
 		klog.InfoS("Starting Server", "address", listener.Addr().String())
 		if err := sc.server.Serve(listener); err != nil &&
@@ -414,7 +421,6 @@ func (sc *Controller) startHTTPServers() error {
 	if sc.metricsServer != nil {
 		go serveMetrics(sc.metricsServer)
 	}
-	return nil
 }
 
 func serveMetrics(server *http.Server) {

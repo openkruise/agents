@@ -1,5 +1,9 @@
 # Config
 
+## Code Review Scope
+
+- Skip the entire `config/` directory during code reviews.
+
 ## Deployment Configuration Scope
 
 - Deployment manifests and Kustomize deployment configuration in this subtree

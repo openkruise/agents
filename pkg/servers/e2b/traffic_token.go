@@ -35,9 +35,10 @@ func (sc *Controller) RefreshTrafficAccessToken(r *http.Request) (web.ApiRespons
 		)
 	}
 	result, err := sc.manager.RefreshTrafficAccessToken(r.Context(), sandboxmanager.RefreshTrafficAccessTokenOptions{
-		Namespace: sc.getNamespaceOfUser(user),
-		SandboxID: r.PathValue("sandboxID"),
-		User:      user.ID.String(),
+		Namespace:    sc.getNamespaceOfUser(user),
+		SandboxID:    r.PathValue("sandboxID"),
+		User:         user.ID.String(),
+		RegisterTask: sc.activity.beginTask,
 	})
 	if err != nil {
 		return web.ApiResponse[*models.TrafficAccessToken]{}, trafficTokenAPIError(err)

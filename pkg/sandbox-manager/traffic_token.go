@@ -41,6 +41,10 @@ type RefreshTrafficAccessTokenOptions struct {
 	Namespace string
 	SandboxID string
 	User      string
+
+	// RegisterTask is called by the singleflight leader before launching an
+	// admitted issuance. Its returned function, if non-nil, runs when the worker exits.
+	RegisterTask func() func()
 }
 
 // RefreshTrafficAccessToken issues a new token without mutating the Sandbox.
@@ -83,7 +87,14 @@ func (m *SandboxManager) issueTrafficAccessToken(ctx context.Context, opts Refre
 		if !ok {
 			m.trafficTokenSingleflight.complete(flightKey, flight, infra.TrafficAccessToken{}, managererrors.NewError(managererrors.ErrorUnavailable, "sandbox manager is stopping"))
 		} else {
+			var finishTask func()
+			if opts.RegisterTask != nil {
+				finishTask = opts.RegisterTask()
+			}
 			go func() {
+				if finishTask != nil {
+					defer finishTask()
+				}
 				var result infra.TrafficAccessToken
 				var issueErr error
 				defer func() {

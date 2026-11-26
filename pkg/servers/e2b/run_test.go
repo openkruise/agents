@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -50,6 +51,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
+	"github.com/openkruise/agents/pkg/servers/web"
 )
 
 func TestControllerStartupWaitsForInitialSandboxRoutes(t *testing.T) {
@@ -129,7 +131,13 @@ func TestControllerStartupWaitsForInitialSandboxRoutes(t *testing.T) {
 				watcher.Stop()
 			})
 			startupDone := make(chan error, 1)
-			go func() { startupDone <- controller.startComponents(ctx) }()
+			go func() {
+				listener, err := controller.startComponents(ctx)
+				if listener != nil {
+					controller.serveHTTPServers(listener)
+				}
+				startupDone <- err
+			}()
 			select {
 			case <-informer.entered:
 			case err := <-startupDone:
@@ -340,64 +348,101 @@ func TestControllerRunPropagatesStartupFailure(t *testing.T) {
 	assert.ErrorContains(t, err, "sandbox manager failed to start")
 }
 
-func TestAwaitStartup(t *testing.T) {
-	tests := []struct {
-		name     string
-		startup  func(startupDone chan error, stop chan os.Signal)
-		expected startupOutcome
-		errMsg   string
-	}{
-		{
-			name:     "startup succeeds",
-			startup:  func(startupDone chan error, _ chan os.Signal) { startupDone <- nil },
-			expected: startupCompleted,
-		},
-		{
-			name:     "startup fails",
-			startup:  func(startupDone chan error, _ chan os.Signal) { startupDone <- errors.New("boom") },
-			expected: startupFailed,
-			errMsg:   "boom",
-		},
-		{
-			name:     "signal interrupts startup",
-			startup:  func(_ chan error, stop chan os.Signal) { stop <- syscall.SIGTERM },
-			expected: startupInterrupted,
-		},
-		{
-			name: "signal pending at startup completion prevents activation",
-			startup: func(startupDone chan error, stop chan os.Signal) {
-				stop <- syscall.SIGTERM
-				startupDone <- nil
-			},
-			expected: startupSignaled,
-		},
-		{
-			name: "signal pending with failed startup reports the failure",
-			startup: func(startupDone chan error, stop chan os.Signal) {
-				startupDone <- errors.New("boom")
-				stop <- syscall.SIGTERM
-			},
-			expected: startupFailed,
-			errMsg:   "boom",
-		},
+func TestControllerStartupFailureWithPendingSignal(t *testing.T) {
+	startupErr := errors.New("startup failed")
+	// With both channels ready, either select branch must report the failure.
+	for range 32 {
+		controller := NewController(ControllerOptions{})
+		ctx, cancel := context.WithCancel(t.Context())
+		startupDone := make(chan startupResult, 1)
+		startupDone <- startupResult{err: startupErr}
+		stop := make(chan os.Signal, 1)
+		stop <- syscall.SIGTERM
+		err := controller.run(ctx, cancel, stop, startupDone)
+		assert.ErrorIs(t, ctx.Err(), context.Canceled)
+		cancel()
+		require.ErrorIs(t, err, startupErr)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Repeat so rows with two ready channels exercise both select
-			// branches in practice.
-			for range 32 {
-				startupDone := make(chan error, 1)
-				stop := make(chan os.Signal, 1)
-				tt.startup(startupDone, stop)
+}
 
-				outcome, err := awaitStartup(startupDone, stop)
-				assert.Equal(t, tt.expected, outcome)
-				if tt.errMsg != "" {
-					assert.ErrorContains(t, err, tt.errMsg)
-				} else {
+type startupKeyStorage struct {
+	lookupKeyStorage
+	run     func()
+	stopped chan struct{}
+}
+
+func (s *startupKeyStorage) Run()  { s.run() }
+func (s *startupKeyStorage) Stop() { close(s.stopped) }
+
+func TestControllerDrainsAfterSignalAtStartupCompletion(t *testing.T) {
+	for _, scenario := range []struct {
+		name  string
+		early bool
+	}{{name: "default"}, {name: "early listeners", early: true}} {
+		t.Run(scenario.name, func(t *testing.T) {
+			controller := NewController(ControllerOptions{ReadyBeforeConfig: scenario.early})
+			registerE2BRoute(controller, http.MethodGet, "/work", func(_ *http.Request) (web.ApiResponse[any], *web.ApiError) {
+				return web.ApiResponse[any]{Code: http.StatusNoContent}, nil
+			}, controller.CheckBusinessReady)
+			store := &startupKeyStorage{stopped: make(chan struct{})}
+			controller.keys = store
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			defer func() {
+				if err := listener.Close(); !errors.Is(err, net.ErrClosed) {
 					assert.NoError(t, err)
 				}
+			}()
+			addr := listener.Addr().String()
+			client := &http.Client{Timeout: time.Second, Transport: &http.Transport{}}
+			defer client.CloseIdleConnections()
+			fetch := func(want int) *http.Response {
+				t.Helper()
+				response, err := client.Get("http://" + addr + "/work")
+				require.NoError(t, err)
+				require.NoError(t, response.Body.Close())
+				require.Equal(t, want, response.StatusCode)
+				return response
 			}
+			startup := startupResult{listener: listener}
+			if scenario.early {
+				controller.serveHTTPServers(listener)
+				fetch(http.StatusServiceUnavailable)
+				startup.listener = nil
+			}
+
+			// Keep the drain open until a business request has gone through it.
+			finishTask := sync.OnceFunc(controller.activity.beginTask())
+			defer finishTask()
+			stop := make(chan os.Signal, 1)
+			defer close(stop)
+			startupDone := make(chan startupResult, 1)
+			startupDone <- startup
+			stop <- syscall.SIGTERM
+			require.NoError(t, controller.run(ctx, cancel, stop, startupDone))
+			require.Eventually(t, func() bool {
+				controller.activity.mu.Lock()
+				defer controller.activity.mu.Unlock()
+				return controller.activity.draining
+			}, time.Second, time.Millisecond, "the pending signal must start the drain")
+			require.True(t, fetch(http.StatusNoContent).Close, "a drain response must retire the connection")
+			finishTask()
+			select {
+			case <-ctx.Done():
+			case <-time.After(3 * time.Second):
+				t.Fatal("shutdown did not finish after one signal and an idle window")
+			}
+			select {
+			case <-store.stopped:
+			default:
+				t.Fatal("startup shutdown did not stop key storage")
+			}
+			rebound, err := net.Listen("tcp", addr)
+			require.NoError(t, err, "shutdown must release the port")
+			require.NoError(t, rebound.Close())
 		})
 	}
 }
@@ -405,12 +450,100 @@ func TestAwaitStartup(t *testing.T) {
 func TestControllerStartHTTPServerReportsBindFailure(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer listener.Close()
+	defer func() { assert.NoError(t, listener.Close()) }()
 
-	controller := &Controller{server: &http.Server{Addr: listener.Addr().String()}}
-	err = controller.startHTTPServers()
+	controller := newStartupController(t, func(context.Context) error { return nil })
+	defer controller.manager.Stop(context.Background())
+	controller.server.Addr = listener.Addr().String()
+	keysStarted := false
+	controller.keys = &startupKeyStorage{run: func() { keysStarted = true }, stopped: make(chan struct{})}
+	_, err = controller.Run(nil)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "listen for E2B API")
+	assert.False(t, keysStarted, "key storage must not start when the API port cannot bind")
+}
+
+func TestControllerSignalAfterAPIBindInterruptsStartup(t *testing.T) {
+	controller := newStartupController(t, func(context.Context) error { return nil })
+	defer controller.manager.Stop(context.Background())
+	defer func() { assert.NoError(t, controller.server.Close()) }()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := listener.Addr().String()
+	require.NoError(t, listener.Close())
+	controller.server.Addr = addr
+	controller.server.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	keysStarted := make(chan struct{})
+	releaseKeys := make(chan struct{})
+	stopped := make(chan struct{})
+	controller.keys = &startupKeyStorage{stopped: stopped, run: func() {
+		close(keysStarted)
+		<-releaseKeys
+	}}
+	stop := make(chan os.Signal, 1)
+	defer func() {
+		select {
+		case stop <- syscall.SIGTERM:
+		default:
+		}
+		select {
+		case <-releaseKeys:
+		default:
+			close(releaseKeys)
+		}
+	}()
+	type runResult struct {
+		ctx context.Context
+		err error
+	}
+	result := make(chan runResult, 1)
+	go func() {
+		ctx, err := controller.Run(stop)
+		result <- runResult{ctx: ctx, err: err}
+	}()
+	select {
+	case <-keysStarted:
+	case got := <-result:
+		t.Fatalf("Run returned before key storage started: %v", got.err)
+	case <-time.After(time.Second):
+		t.Fatal("key storage did not start")
+	}
+
+	conn, err := net.DialTimeout("tcp", addr, time.Second)
+	require.NoError(t, err, "the API port must already be bound")
+	defer func() { assert.NoError(t, conn.Close()) }()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(150*time.Millisecond)))
+	_, err = conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	require.NoError(t, err)
+	var response [1]byte
+	_, err = conn.Read(response[:])
+	require.ErrorIs(t, err, os.ErrDeadlineExceeded, "the API must wait for startup before serving")
+
+	stop <- syscall.SIGTERM
+	select {
+	case got := <-result:
+		require.NoError(t, got.err)
+		require.ErrorIs(t, got.ctx.Err(), context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after SIGTERM with key storage still starting")
+	}
+
+	close(releaseKeys)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("interrupted startup did not stop key storage")
+	}
+	require.Eventually(t, func() bool {
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			return false
+		}
+		return listener.Close() == nil
+	}, time.Second, time.Millisecond, "interrupted startup must release the API port")
 }
 
 func TestReadyBeforeConfig(t *testing.T) {
