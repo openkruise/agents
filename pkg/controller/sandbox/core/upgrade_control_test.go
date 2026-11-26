@@ -2300,6 +2300,33 @@ func TestNextInstallerContainerName(t *testing.T) {
 			},
 			wantNext: base + "-1",
 		},
+		{
+			name:     "plain container occupying the base name bumps to suffix 1",
+			ecs:      []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: base}}},
+			wantNext: base + "-1",
+		},
+		{
+			name: "plain containers occupying base and suffix 1 bump to suffix 2",
+			ecs: []corev1.EphemeralContainer{
+				{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: base}},
+				{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: base + "-1"}},
+			},
+			wantNext: base + "-2",
+		},
+		{
+			name: "numbering skips a suffix occupied by a plain container",
+			ecs: []corev1.EphemeralContainer{
+				installerEC(base, "ops-uid-1"),
+				newerEC,
+				{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: base + "-1"}},
+			},
+			wantNext: base + "-2",
+		},
+		{
+			name:     "an unoccupied higher suffix does not bump the base name",
+			ecs:      []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: base + "-5"}}},
+			wantNext: base,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

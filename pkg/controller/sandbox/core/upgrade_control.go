@@ -619,7 +619,9 @@ func installerContainerName(patchVersion string) string {
 // the version is already injected and only its status needs evaluation.
 // Otherwise the first injection of the version uses the base name, and a
 // re-install over existing entries of the same version takes the next sequence
-// number after them: base-1, base-2, ...
+// number after them: base-1, base-2, ... If a plain ephemeral container already
+// occupies the candidate name, the sequence number is bumped until the name is
+// free.
 func nextInstallerContainerName(pod *corev1.Pod, patchVersion string) (string, string) {
 	base := installerContainerName(patchVersion)
 	maxSeq := -1
@@ -651,10 +653,18 @@ func nextInstallerContainerName(pod *corev1.Pod, patchVersion string) (string, s
 			maxSeq = seq
 		}
 	}
-	if maxSeq < 0 {
-		return base, ""
+	seq := maxSeq + 1
+	name := base
+	if seq > 0 {
+		name = fmt.Sprintf("%s-%d", base, seq)
 	}
-	return fmt.Sprintf("%s-%d", base, maxSeq+1), ""
+	for slices.ContainsFunc(pod.Spec.EphemeralContainers, func(ec corev1.EphemeralContainer) bool {
+		return ec.Name == name
+	}) {
+		seq++
+		name = fmt.Sprintf("%s-%d", base, seq)
+	}
+	return name, ""
 }
 
 // performInstallerUpgrade drives the Installing step of an InstallerUpdate
