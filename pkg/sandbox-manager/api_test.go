@@ -255,8 +255,9 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		{
 			name: "Template lookup failure should return internal error without claiming",
 			opts: infra.ClaimSandboxOptions{
-				User:     username,
-				Template: "lookup-error-template",
+				User:      username,
+				Namespace: "team-a",
+				Template:  "lookup-error-template",
 			},
 			templateLookupErr: apierrors.NewServiceUnavailable("injected template cache failure"),
 			expectError:       "failed to check template",
@@ -602,7 +603,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 					claimType = agentsv1alpha1.ClaimMethodColdStart
 				}
 				histogramBefore := managerHistogram(t, sandboxClaimDuration, namespace, "success", claimType).GetSampleCount()
-				requestFailureBefore := resultCounterSum(t, sandboxClaimCreationResponses, tt.opts.Namespace, "failure")
+				wantRequestCounts := resultCounterSums(t, sandboxClaimCreationResponses)
 				got, err := manager.ClaimSandbox(t.Context(), ClaimSandboxOptions{Infra: tt.opts})
 				wantSuccess, wantFailure, wantCreation := successBefore, failureBefore, creationBefore
 				if err == nil {
@@ -614,11 +615,13 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				assert.Equal(t, wantSuccess, resultCounterSum(t, sandboxClaimTotal, namespace, "success"))
 				assert.Equal(t, wantFailure, resultCounterSum(t, sandboxClaimTotal, namespace, "failure"), "every error in this table happens before an instance is bound")
 				assert.Equal(t, wantCreation, resultCounterSum(t, sandboxCreateTotal, namespace, "success"))
-				wantRequestFailure := requestFailureBefore
+				// Successful calls use the Sandbox namespace; failed calls use the request namespace.
 				if err != nil {
-					wantRequestFailure++
+					wantRequestCounts[resultCounterLabels{namespace: tt.opts.Namespace, result: "failure"}]++
+				} else {
+					wantRequestCounts[resultCounterLabels{namespace: namespace, result: "success"}]++
 				}
-				assert.Equal(t, wantRequestFailure, resultCounterSum(t, sandboxClaimCreationResponses, tt.opts.Namespace, "failure"), "every call reports its final request result exactly once")
+				assert.Equal(t, wantRequestCounts, resultCounterSums(t, sandboxClaimCreationResponses), "each call increments only its expected request counter")
 				wantHistogram := histogramBefore
 				if err == nil {
 					wantHistogram++
