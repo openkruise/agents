@@ -85,6 +85,15 @@ type SandboxSpec struct {
 	// +listType=atomic
 	Runtimes []RuntimeConfig `json:"runtimes,omitempty"`
 
+	// OndemandVolumesMount specifies the volumes to be mounted into the sandbox
+	// on demand via CSI NodePublishVolume.
+	// +optional
+	// +patchMergeKey=mountPath
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=mountPath
+	OndemandVolumesMount []CSIMountConfig `json:"ondemandVolumesMount,omitempty" patchMergeKey:"mountPath" patchStrategy:"merge"`
+
 	// StartupMode controls whether the sandbox main container command is
 	// wrapped by run_with_envs.sh. When Deferred, the main process is held
 	// until the claim-time envVars, the optional claim command, and a readiness
