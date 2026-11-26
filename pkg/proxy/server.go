@@ -195,12 +195,29 @@ func (s *Server) newServeMux() *http.ServeMux {
 func (s *Server) Stop(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.grpcSrv != nil {
-		s.grpcSrv.Stop()
+	// Drain ext-proc streams while the HTTP server shuts down, so that both
+	// share the time that ctx allows.
+	grpcStopped := make(chan struct{})
+	if grpcSrv := s.grpcSrv; grpcSrv != nil {
+		go func() {
+			grpcSrv.GracefulStop()
+			close(grpcStopped)
+		}()
+	} else {
+		close(grpcStopped)
 	}
 	if s.httpSrv != nil {
 		if err := s.httpSrv.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			klog.ErrorS(err, "Failed to shut down proxy system server")
+		}
+	}
+	select {
+	case <-grpcStopped:
+	case <-ctx.Done():
+		if s.grpcSrv != nil {
+			klog.InfoS("Closing ext-proc streams which are still open")
+			s.grpcSrv.Stop()
+			<-grpcStopped
 		}
 	}
 	s.peerOutbound.CloseIdleConnections()
