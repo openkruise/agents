@@ -99,7 +99,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 	namespace := sc.getNamespaceOfUser(user)
-	log.Info("create sandbox request received", "request", request)
+	log.Info("create sandbox request received", "templateID", request.TemplateID, "namespace", namespace)
 	if sc.manager.GetInfra().HasTemplate(ctx, infra.HasTemplateOptions{
 		Namespace: namespace,
 		Name:      request.TemplateID,
@@ -141,7 +141,9 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		MemoryPersistence: request.AutoPauseMemory,
 		AccessToken:       config.NewDefaultAccessToken(),
 		Modifier: func(sbx infra.Sandbox) error {
-			sc.basicSandboxCreateModifier(ctx, sbx, request)
+			if err := sc.basicSandboxCreateModifier(ctx, sbx, request); err != nil {
+				return err
+			}
 			sc.csiMountOptionsConfigRecord(ctx, sbx, request)
 			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
 			return nil
@@ -205,8 +207,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	log.Info("sandbox created", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(claimStart))
 
-	// Create network CRs (TrafficPolicy) if network config is provided.
-	// Network policy creation failure must fail the sandbox creation and killed the sandbox.
+	// Legacy network policies are installed after delivery and failures roll back the sandbox.
 	if apiErr := sc.createNetworkPolicyForSandbox(ctx, sbx, user, request, log); apiErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
@@ -239,7 +240,9 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		CloneTimeout:      resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		MemoryPersistence: request.AutoPauseMemory,
 		Modifier: func(sbx infra.Sandbox) error {
-			sc.basicSandboxCreateModifier(ctx, sbx, request)
+			if err := sc.basicSandboxCreateModifier(ctx, sbx, request); err != nil {
+				return err
+			}
 			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
 			return nil
 		},
@@ -299,8 +302,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	log.Info("sandbox cloned", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
 
-	// Create network CRs (TrafficPolicy) if network config is provided.
-	// Network policy creation failure must fail the sandbox creation and killed the sandbox.
+	// Legacy network policies are installed after delivery and failures roll back the sandbox.
 	if apiErr := sc.createNetworkPolicyForSandbox(ctx, sbx, user, request, log); apiErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
@@ -343,6 +345,21 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 		}
 	}
 
+	if raw, found := request.Metadata[securityProfileMetadataKey]; found {
+		if len(request.Extensions.SecurityRules) > 0 {
+			return request, &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: fmt.Sprintf("metadata keys %q and %q are mutually exclusive", securityProfileMetadataKey, models.ExtensionKeySecurityRules),
+			}
+		}
+		profile, err := parseInlineSecurityProfile(raw)
+		if err != nil {
+			return request, &web.ApiError{Code: http.StatusBadRequest, Message: fmt.Sprintf("metadata %q: %v", securityProfileMetadataKey, err)}
+		}
+		request.SecurityProfileJSON = profile
+		delete(request.Metadata, securityProfileMetadataKey)
+	}
+
 	for k := range request.Metadata {
 		if errLists := validation.IsQualifiedName(k); len(errLists) > 0 {
 			return request, &web.ApiError{
@@ -380,10 +397,7 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 	}
 	request.Network = networkConfig
 
-	// Resolve security rules from either the native network.rules input or the
-	// e2b.agents.kruise.io/security-rules metadata JSON. The two inputs are
-	// mutually exclusive and normalize to one annotation value.
-	securityRulesJSON, err := resolveSecurityRules(&request)
+	securityRulesJSON, err := resolveSecurityRules(&request, sc.networkAnnotation)
 	if err != nil {
 		return request, &web.ApiError{
 			Code:    http.StatusBadRequest,
@@ -391,12 +405,37 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 		}
 	}
 	request.SecurityRulesJSON = securityRulesJSON
+	if request.SecurityProfileJSON != "" && securityRulesJSON != "" {
+		return request, badRequest(legacyNetworkRulesConflict)
+	}
 
+	if sc.networkAnnotation {
+		config := e2bNetworkPolicy{AllowInternetAccess: request.AllowInternetAccess}
+		if request.Network != nil {
+			config.Network = *request.Network
+			config.Network.Rules, err = normalizeNetworkAnnotationRules(request.Network.Rules)
+			if err != nil {
+				return request, &web.ApiError{Code: http.StatusBadRequest, Message: err.Error()}
+			}
+		}
+		raw, err := json.Marshal(config)
+		if err != nil {
+			return request, &web.ApiError{Code: http.StatusInternalServerError, Message: "Failed to encode sandbox network configuration"}
+		}
+		request.E2BNetworkAnnotation = string(raw)
+	}
 	return request, nil
 }
 
-func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
+func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) error {
 	log := klog.FromContext(ctx)
+	annotations := sbx.GetAnnotations()
+	if request.SecurityRulesJSON != "" && annotations[securityProfileAnnotation] != "" {
+		if len(request.Extensions.SecurityRules) > 0 {
+			return managererrors.NewError(managererrors.ErrorBadRequest, "metadata %q conflicts with the sandbox's %q annotation", models.ExtensionKeySecurityRules, securityProfileAnnotation)
+		}
+		return managererrors.NewError(managererrors.ErrorBadRequest, legacyNetworkRulesConflict)
+	}
 	// E2B-managed sandboxes persist paused-retention preference so later timeout
 	// writes and controller auto-pause use the same policy. never-timeout keeps
 	// deadline fields empty; the annotation is only policy state.
@@ -410,7 +449,6 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	log.Info("timeout options calculated", "options", timeoutOptions)
 
 	// propagate annotations to sandbox
-	annotations := sbx.GetAnnotations()
 	if annotations == nil {
 		annotations = make(map[string]string)
 	}
@@ -418,11 +456,19 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	for k, v := range request.Metadata {
 		annotations[k] = v
 	}
+	if request.E2BNetworkAnnotation != "" {
+		annotations[e2bNetworkAnnotation] = request.E2BNetworkAnnotation
+	} else {
+		delete(annotations, e2bNetworkAnnotation)
+	}
 	if request.SecurityRulesJSON != "" {
 		annotations[agentsv1alpha1.AnnotationSecurityRules] = request.SecurityRulesJSON
 	} else {
 		// This delivery's security rules come only from the request.
 		delete(annotations, agentsv1alpha1.AnnotationSecurityRules)
+	}
+	if request.SecurityProfileJSON != "" {
+		annotations[securityProfileAnnotation] = request.SecurityProfileJSON
 	}
 	if request.Extensions.ReturnPodIP {
 		annotations[models.ExtensionKeyReturnPodIP] = agentsv1alpha1.True
@@ -452,11 +498,9 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 		labels[k] = v
 	}
 
-	// Inject allow-internet-access label. Default is "true"; when network config
-	// is provided and allowInternetAccess is explicitly false, set to "false".
-	// GlobalTrafficPolicy selects pods by this label to enforce egress rules.
+	// Apply the legacy GlobalTrafficPolicy selector only for legacy deliveries.
 	allowInternetAccess := agentsv1alpha1.True
-	if request.AllowInternetAccess != nil && !*request.AllowInternetAccess {
+	if request.E2BNetworkAnnotation == "" && request.AllowInternetAccess != nil && !*request.AllowInternetAccess {
 		allowInternetAccess = agentsv1alpha1.False
 	}
 	labels[agentsv1alpha1.LabelAllowInternetAccess] = allowInternetAccess
@@ -474,6 +518,7 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	// directly for metadata-only changes (no image/resources) without setting the
 	// InplaceUpdate condition.
 	claimengine.MergePodLabels(sbx, podLabels)
+	return nil
 }
 
 func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
@@ -541,7 +586,7 @@ func (sc *Controller) injectStorageAuthAnnotation(sbx infra.Sandbox, key, value 
 // prevent it from running without network policies, and an ApiError is returned.
 // Returns nil if no network config is provided or creation succeeds.
 func (sc *Controller) createNetworkPolicyForSandbox(ctx context.Context, sbx infra.Sandbox, user *models.CreatedTeamAPIKey, request models.NewSandboxRequest, log klog.Logger) *web.ApiError {
-	if request.Network == nil {
+	if request.E2BNetworkAnnotation != "" || request.Network == nil {
 		return nil
 	}
 	if netErr := sbx.CreateNetworkPolicy(ctx, infra.SandboxNetworkConfig{

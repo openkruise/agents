@@ -93,6 +93,10 @@ type NewSandboxRequest struct {
 	// annotation value produced by the server from either input entry. It is
 	// never decoded from the request body.
 	SecurityRulesJSON string `json:"-"`
+	// SecurityProfileJSON is the validated inline profile for this delivery.
+	SecurityProfileJSON string `json:"-"`
+	// E2BNetworkAnnotation is the JSON value for the agents.kruise.io/e2b-network annotation.
+	E2BNetworkAnnotation string `json:"-"`
 }
 
 type SandboxNetworkConfig struct {
@@ -106,10 +110,8 @@ type SandboxNetworkConfig struct {
 	// MaskRequestHost mirrors the upstream E2B top-level field. It is not
 	// supported and must be absent.
 	MaskRequestHost *string `json:"maskRequestHost,omitempty"`
-	// Rules maps a target domain to its egress rules. It is the native E2B
-	// network.rules field; header transforms are normalized into the
-	// agents.kruise.io/security-rules annotation. L4 allowOut/denyOut keep
-	// their existing TrafficPolicy behavior.
+	// Rules maps target domains to E2B header transforms. The server writes
+	// them to e2b-network in annotation mode and to security-rules by default.
 	Rules map[string][]SandboxNetworkRule `json:"rules,omitempty"`
 }
 

@@ -19,6 +19,7 @@ package sandboxcr
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -279,28 +280,33 @@ func (s *Sandbox) UpdateNetworkPolicy(ctx context.Context, netConfig infra.Sandb
 // annotation. An empty value removes the annotation. The write goes through
 // retryUpdate so a concurrent controller write cannot drop it.
 func (s *Sandbox) UpdateSecurityRules(ctx context.Context, rulesJSON string) error {
-	_, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
-		current, exists := sbx.Annotations[agentsv1alpha1.AnnotationSecurityRules]
+	err := s.UpdateAnnotations(ctx, func(annotations map[string]string) error {
 		if rulesJSON == "" {
-			if !exists {
-				return false, nil
-			}
-			delete(sbx.Annotations, agentsv1alpha1.AnnotationSecurityRules)
-			return true, nil
+			delete(annotations, agentsv1alpha1.AnnotationSecurityRules)
+		} else {
+			annotations[agentsv1alpha1.AnnotationSecurityRules] = rulesJSON
 		}
-		if current == rulesJSON {
-			return false, nil
-		}
-		if sbx.Annotations == nil {
-			sbx.Annotations = map[string]string{}
-		}
-		sbx.Annotations[agentsv1alpha1.AnnotationSecurityRules] = rulesJSON
-		return true, nil
+		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("failed to update security-rules annotation: %w", err)
 	}
 	return nil
+}
+
+// UpdateAnnotations reapplies edit to the current annotations on a conflict.
+func (s *Sandbox) UpdateAnnotations(ctx context.Context, edit func(map[string]string) error) error {
+	_, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+		annotations := make(map[string]string, len(sbx.Annotations))
+		maps.Copy(annotations, sbx.Annotations)
+		if err := edit(annotations); err != nil {
+			return false, err
+		}
+		changed := !maps.Equal(annotations, sbx.Annotations)
+		sbx.Annotations = annotations
+		return changed, nil
+	})
+	return err
 }
 
 // SelectNetworkPolicy queries the existing TrafficPolicy CR and returns the

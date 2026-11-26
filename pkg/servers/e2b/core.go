@@ -46,9 +46,10 @@ import (
 // Controller handles sandbox-related operations
 type Controller struct {
 	// E2B API surface
-	maxTimeout int
-	domain     string
-	keyCfg     *keys.Config
+	maxTimeout        int
+	domain            string
+	keyCfg            *keys.Config
+	networkAnnotation bool
 
 	// mgrOpts is handed to the sandbox-manager builder unchanged. It also carries
 	// the system namespace the API handlers fall back to, so it is the single
@@ -99,6 +100,8 @@ type ControllerOptions struct {
 	MaxTimeout int
 	// KeyConfig configures API key storage. Nil disables E2B authentication.
 	KeyConfig *keys.Config
+	// NetworkAnnotation controls whether new sandboxes store E2B network settings in an annotation.
+	NetworkAnnotation bool
 
 	// Manager is passed to the sandbox-manager builder unchanged.
 	Manager config.SandboxManagerOptions
@@ -123,6 +126,7 @@ func NewController(opts ControllerOptions) *Controller {
 		adapter:           adapters.DefaultAdapterFactory(opts.Port, opts.Manager.BindAddress),
 		maxTimeout:        opts.MaxTimeout,
 		keyCfg:            opts.KeyConfig,
+		networkAnnotation: opts.NetworkAnnotation,
 		mgrOpts:           opts.Manager,
 		runtimeTLSBundle:  opts.RuntimeTLSBundle,
 		peerSecurity:      opts.PeerSecurity,

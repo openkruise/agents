@@ -1,0 +1,142 @@
+---
+title: E2B network and inline SecurityProfile annotations for sandboxes
+creation-date: 2026-11-21
+last-updated: 2026-11-24
+status: provisional
+---
+
+# E2B network and inline SecurityProfile annotations for sandboxes
+
+## E2B network annotation
+
+Clients send E2B network settings in the create request body.
+By default, sandbox-manager uses a per-Sandbox `TrafficPolicy` for `allowOut` and `denyOut` and the `agents.kruise.io/security-rules` annotation for `network.rules`.
+With `--e2b-network-annotation=true`, sandbox-manager stores those settings in the `agents.kruise.io/e2b-network` annotation when claiming a Sandbox from a pool or cloning one from a snapshot.
+An explicit native SecurityProfile uses `agents.kruise.io/security-profile` with either flag setting.
+Agentio enforces E2B network policy when Sandbox policy discovery is enabled and outbound traffic is routed through its egress gateway.
+
+For example, a client sends this body to `POST /sandboxes`.
+
+```json
+{
+  "templateID": "my-template",
+  "allow_internet_access": false,
+  "network": {
+    "allowOut": ["api.example.com"],
+    "denyOut": ["10.0.0.0/8"],
+    "rules": {
+      "API.Example.COM": [{"transform": {"headers": {"X-Environment": "test"}}}]
+    }
+  }
+}
+```
+
+In annotation mode, the delivered Sandbox has the following metadata.
+The annotation value is a JSON string, formatted here for readability.
+
+```yaml
+metadata:
+  annotations:
+    agents.kruise.io/e2b-network: |-
+      {
+        "allowInternetAccess": false,
+        "network": {
+          "allowOut": ["api.example.com"],
+          "denyOut": ["10.0.0.0/8"],
+          "rules": {
+            "api.example.com": [{"transform": {"headers": {"x-environment": "test"}}}]
+          }
+        }
+      }
+```
+
+| E2B create field | Default mode | With `--e2b-network-annotation=true` |
+| --- | --- | --- |
+| `allow_internet_access` | Sets the `agents.kruise.io/allow-internet-access` label on the Sandbox and its Pod to `"false"` only for an explicit `false`, so a matching `GlobalTrafficPolicy` can enforce it. | Stores the value as `allowInternetAccess` in `e2b-network` and keeps the legacy label `"true"`. An explicit `false` adds a final TCP deny for gateway-routed traffic. |
+| `network.allowOut` and `network.denyOut` | Writes the destinations to a per-Sandbox `TrafficPolicy`. | Stores both lists in `e2b-network`. Agentio evaluates E2B allow entries before deny entries. |
+| `network.rules` | Translates HTTP header transforms into `headerManipulation.set` entries in `security-rules`. | Stores the transforms in `e2b-network`, lowercasing domain and header names and combining assignments for each domain. |
+
+Omitting `allow_internet_access` or setting it to `true` keeps the E2B default allow behavior even when `allowOut` has entries.
+Both lists accept IP addresses and CIDRs, and `allowOut` also accepts individual domain names.
+Each list accepts up to 100 entries at the E2B API.
+Writing an annotation bypasses the `TrafficPolicy` CRD's limit of 20 destinations per rule.
+HTTPS header transforms require the client to trust the gateway CA.
+Domain entries in `allowOut` also enable Agentio's default TCP allowance for `8.8.8.8`.
+Sandbox-manager omits `network.dnsServers` from the annotation even if the client sends it. [Agentio gateway policy evaluation](https://github.com/openkruise/agentio/blob/32261ca3ca76d8b84094ff6613e9dd2bfabeaf44/docs/reference/security-profile.md#sandbox-policy-annotations)
+
+### Reading and updating the network policy
+
+When the client omits all network settings, sandbox-manager writes `{"network":{}}` in annotation mode.
+Reads and updates select the backend by the presence of the annotation, so switching the flag affects future deliveries.
+`GET /sandboxes/{sandboxID}` returns `network.allowOut` and `network.denyOut` when present and omits `network` when both lists are empty.
+Read the Sandbox annotations in Kubernetes to inspect HTTP header transforms and the native profile.
+
+`PUT /sandboxes/{sandboxID}/network` takes the network fields at the top level.
+For an annotation-backed sandbox, this body replaces `allowOut`, clears the omitted `denyOut`, keeps the final TCP deny, and preserves the existing header transforms.
+
+```json
+{"allow_internet_access": false, "allowOut": ["api.example.com", "192.0.2.10"]}
+```
+
+In either mode, send each allow or deny list you want to keep and omit `rules` to preserve the current header transforms.
+Send `"rules": {}` to clear the E2B header transforms in annotation mode or the legacy `security-rules` chain in default mode.
+In annotation mode, omitting `allow_internet_access` restores the E2B default allow behavior.
+In default mode, the Sandbox and Pod keep the internet-access label set at creation regardless of the value sent in the update.
+A successful update returns HTTP 204 with an empty body.
+
+## Inline SecurityProfile for E2B sandboxes
+
+E2B clients can set the `e2b.agents.kruise.io/security-profile` metadata key when creating a sandbox through Kruise Agents.
+The value is a JSON string with four optional fields, `rules`, `tcpRules`, `inputs`, and `audit`.
+Each uses the corresponding SecurityProfile API type.
+This metadata key works with either setting of `--e2b-network-annotation`.
+The deployment needs an Agentio gateway with support for inline Sandbox SecurityProfiles to enforce the rules.
+
+This example uses annotation mode to allow the management subnet and add a header to HTTPS requests to the API domain.
+For direct TCP connections to the subnet, the native profile denies port 22 before the E2B subnet allow rule runs.
+
+```python
+import json
+
+from e2b import Sandbox
+
+sandbox = Sandbox.create(
+    template="my-template",
+    allow_internet_access=False,
+    network={
+        "allow_out": ["api.example.com", "10.23.0.0/16"],
+        "rules": {"api.example.com": [{"transform": {"headers": {"X-Environment": "test"}}}]},
+    },
+    metadata={
+        "e2b.agents.kruise.io/security-profile": json.dumps({
+            "tcpRules": [
+                {
+                    "name": "deny-management-ssh",
+                    "match": [{"cidrs": ["10.23.0.0/16"], "ports": [22]}],
+                    "action": "Deny",
+                },
+            ],
+        }),
+    },
+)
+```
+
+Sandbox Manager validates the value and writes the `agents.kruise.io/security-profile` annotation on the delivered Sandbox.
+`rules` accepts native SecurityProfile actions.
+`inputs` supplies named values to the profile.
+Top-level `audit` supplies default HTTP audit actions, and a rule can override them with its own `actions.audit`.
+TCP rules support `Allow` and `Deny` and keep their declared order.
+The maximum JSON size is 32 KiB, with up to 64 HTTP rules and 64 TCP rules.
+Use unique names within each rule list and reserve the `agentio-e2b-` prefix for Agentio.
+
+The create endpoint returns HTTP 400 for malformed profile JSON or a request that sets both `e2b.agents.kruise.io/security-profile` and `e2b.agents.kruise.io/security-rules`.
+In annotation mode, either metadata key can be combined with E2B header transforms because the transforms are stored in `e2b-network`.
+Use a shared SecurityProfile resource for administrator-managed policy.
+
+Agentio evaluates native HTTP rules, E2B HTTP rules, native TCP rules, and E2B TCP rules in that order until a rule makes a terminal decision. [Sandbox policy evaluation](https://github.com/openkruise/agentio/blob/32261ca3ca76d8b84094ff6613e9dd2bfabeaf44/docs/reference/security-profile.md#sandbox-policy-annotations)
+For annotation-backed sandboxes, `PUT /sandboxes/{sandboxID}/network` updates only `e2b-network` and preserves the native profile or any separately supplied legacy `security-rules`.
+
+In the default mode, a native profile can be combined with `network.allowOut`, `network.denyOut`, and `allow_internet_access` at creation.
+Creating or updating a sandbox with a native profile returns HTTP 400 if E2B `network.rules` would write header transforms to the legacy `security-rules` annotation.
+To use header transforms alongside the profile, enable `--e2b-network-annotation` and create a new sandbox.
+A default-mode create request with both the legacy `security-rules` metadata key and a nonempty `network.rules` map also returns HTTP 400 because both inputs target the same annotation.

@@ -306,7 +306,8 @@ Cold creation requests a proxy runtime when needed. Pool and snapshot retain sou
 
 Native SecurityProfile/Secret token injection and plaintext header transforms retain their platform roles. Inline security rules reject tokenTransformation. Endpoint credentials do not add the reference secureAccess token, transparent HTTPS interception or credential management.
 
-Management requests use the control-plane API key. Outbound allow/deny, endpoint access credentials and outbound credential injection have separate contracts. Native inline SecurityRule validation, defaulting and serialization use `pkg/servers/validation.NormalizeSecurityRules`. E2B retains `network.rules` translation.
+Management requests use the control-plane API key. Outbound allow/deny, endpoint access credentials and outbound credential injection have separate contracts. Native inline SecurityRule validation, defaulting and serialization use `pkg/servers/validation.NormalizeSecurityRules`.
+E2B stores `network.rules` header transforms in `security-rules` by default and in `e2b-network` when annotation mode is enabled. [E2B network annotation](20261121-e2b-inline-security-profile.md#e2b-network-annotation)
 
 <a id="runtime-network-policy-interfaces"></a>
 

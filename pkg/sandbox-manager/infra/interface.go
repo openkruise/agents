@@ -353,6 +353,7 @@ type Sandbox interface {
 	// security-rules annotation with rulesJSON; an empty value removes the
 	// annotation. The write is conflict-retried.
 	UpdateSecurityRules(ctx context.Context, rulesJSON string) error
+	UpdateAnnotations(ctx context.Context, edit func(map[string]string) error) error
 }
 
 type CheckpointInfo struct {
