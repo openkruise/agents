@@ -267,13 +267,15 @@ undeploy-all: undeploy-sandbox-manager undeploy-agent-sandbox-controller
 KUBECTL ?= kubectl
 KIND ?= kind
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
-CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
+# controller-gen is declared as a tool directive in tools.mod (see the comment
+# near the "deps" target for the tools.mod sync mechanism) and runs through
+# the main module toolchain instead of a go-install-tool download.
+CONTROLLER_GEN ?= go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
-CONTROLLER_TOOLS_VERSION ?= v0.23.0
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
@@ -325,9 +327,8 @@ deploy-crd: manifests kustomize ## Deploy controller to the K8s cluster specifie
 	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
 
 .PHONY: controller-gen
-controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
-$(CONTROLLER_GEN): $(LOCALBIN)
-	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
+controller-gen: ## Tidy tools.mod, which pins the code generation tools as tool directives.
+	go mod tidy -modfile=tools.mod
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
@@ -340,9 +341,17 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 # $3 - specific version of package
 
 # Install dependencies
+#
+# tools.mod mirrors go.mod (same module path, same dependency versions) and adds
+# tool directives for the code generation tools: controller-gen
+# (sigs.k8s.io/controller-tools) and the client generators
+# (k8s.io/code-generator). Whenever dependencies are upgraded in go.mod, apply
+# the same upgrades to tools.mod and re-run tidy so both files and tools.sum
+# stay in sync; `make deps` tidies both module files.
 .PHONY: deps
 deps:
 	go mod tidy
+	go mod tidy -modfile=tools.mod
 
 define go-install-tool
 @[ -f "$(1)-$(3)" ] && [ "$$(readlink -- "$(1)" 2>/dev/null)" = "$(1)-$(3)" ] || { \
