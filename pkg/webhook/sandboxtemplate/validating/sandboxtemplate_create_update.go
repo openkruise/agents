@@ -41,6 +41,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/autopause"
 	"github.com/openkruise/agents/pkg/sandboxtemplate"
+	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
 )
 
@@ -74,7 +75,18 @@ func (h *ValidatingHandler) Handle(ctx context.Context, req admission.Request) a
 		if len(errs) > 0 {
 			return admission.Errored(http.StatusUnprocessableEntity, errs.ToAggregate())
 		}
-		if !sandboxtemplate.IsBuildVersion(old) || req.SubResource == "status" || sandboxtemplate.IsSubmitted(old) || equality.Semantic.DeepEqual(old.Spec, obj.Spec) {
+		if req.SubResource == "status" || equality.Semantic.DeepEqual(old.Spec, obj.Spec) {
+			return admission.Allowed("")
+		}
+		if !sandboxtemplate.IsBuildVersion(old) {
+			// Keep unmanaged update compatibility except for changed Deferred specs.
+			errs = sidecarutils.ValidateDeferredStartup(obj.Spec.StartupMode, obj.Spec.Runtimes, obj.Spec.Template, field.NewPath("spec"))
+			if len(errs) > 0 {
+				return admission.Errored(http.StatusUnprocessableEntity, errs.ToAggregate())
+			}
+			return admission.Allowed("")
+		}
+		if sandboxtemplate.IsSubmitted(old) {
 			return admission.Allowed("")
 		}
 	}
@@ -275,6 +287,7 @@ func validateSandboxTemplateSpec(spec agentsv1alpha1.SandboxTemplateSpec, fldPat
 	if spec.Template == nil {
 		return append(errList, field.Required(fldPath.Child("template"), "template is required"))
 	}
+	errList = append(errList, sidecarutils.ValidateDeferredStartup(spec.StartupMode, spec.Runtimes, spec.Template, fldPath)...)
 	errList = append(errList, validateLabelsAndAnnotations(spec.Template.ObjectMeta, fldPath.Child("template"))...)
 	errList = append(errList, validateSandboxPodTemplateSpec(spec, fldPath)...)
 	return errList

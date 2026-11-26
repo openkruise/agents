@@ -14,8 +14,8 @@ limitations under the License.
 package runtime
 
 // filesystem.go groups the native e2b-compatible files capability of the
-// runtime: pushing a file into the sandbox via the upstream multipart /files
-// API, and the directory operations exposed by the envd Filesystem service
+// runtime: reading and writing files via the upstream /files API, and the
+// directory operations exposed by the envd Filesystem service
 // (ListDir, Remove). These map to the standard envd/e2b protocol rather than to
 // a KruiseAgents-specific extended route.
 
@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -44,7 +45,7 @@ import (
 )
 
 // FilesystemAPI is the runtime filesystem capability group. It covers the
-// E2B-compatible multipart /files route (Write) and the envd Filesystem service
+// E2B-compatible /files route (ReadFile, Write) and the envd Filesystem service
 // (ListDir, Remove).
 //
 // Every method is addressed through the transport resolved by the owning
@@ -53,6 +54,8 @@ import (
 // plaintext runtime URL. The group is bound to one sandbox at construction
 // time, so no method takes a *Sandbox argument.
 type FilesystemAPI interface {
+	// ReadFile reads a single file up to the requested byte limit.
+	ReadFile(ctx context.Context, req ReadFileRequest) ([]byte, error)
 	// Write pushes a single file into the sandbox, unconditionally overwriting
 	// any pre-existing file at the same path.
 	Write(ctx context.Context, req WriteFileRequest) (WriteFileResult, error)
@@ -61,6 +64,16 @@ type FilesystemAPI interface {
 	// Remove deletes a file or directory inside the sandbox. Directory removal is
 	// recursive.
 	Remove(ctx context.Context, req RemovePathRequest) error
+}
+
+// ReadFileRequest describes a bounded read from the native /files API.
+type ReadFileRequest struct {
+	FilePath string
+	Username string
+	AuthUser string
+	Timeout  time.Duration
+	// MaxBytes must be positive and leave room for one extra byte to detect overflow.
+	MaxBytes int64
 }
 
 // WriteFileRequest describes a single file write. It is WriteFileArgs without
@@ -220,6 +233,42 @@ func WriteFileWithRuntime(ctx context.Context, args WriteFileArgs, rtOpts ...Opt
 	})
 }
 
+// ReadFile implements FilesystemAPI using the native GET /files route.
+func (f *filesystemAPI) ReadFile(ctx context.Context, req ReadFileRequest) ([]byte, error) {
+	if req.MaxBytes <= 0 || req.MaxBytes == math.MaxInt64 {
+		return nil, fmt.Errorf("maxBytes must be positive and less than %d", int64(math.MaxInt64))
+	}
+	httpReq, httpClient, cancel, err := f.newFilesRequest(ctx, http.MethodGet,
+		req.FilePath, req.Username, req.AuthUser, req.Timeout, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call runtime files API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		apiErr := &APIError{Path: "/files", StatusCode: resp.StatusCode}
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("%w: %w", ErrRuntimePathNotFound, apiErr)
+		}
+		return nil, apiErr
+	}
+
+	content, err := io.ReadAll(io.LimitReader(resp.Body, req.MaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read runtime file: %w", err)
+	}
+	if int64(len(content)) > req.MaxBytes {
+		return nil, fmt.Errorf("%w: limit %d bytes", ErrRuntimeFileTooLarge, req.MaxBytes)
+	}
+	return content, nil
+}
+
 // Write implements FilesystemAPI by posting the file content to the runtime
 // files API. It is the single implementation of the write path, shared by the
 // capability group and the WriteFileWithRuntime convenience wrapper.
@@ -230,49 +279,23 @@ func (f *filesystemAPI) Write(ctx context.Context, req WriteFileRequest) (WriteF
 	sbx := f.r.sbx
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(logs.DebugLogLevel)
 
-	// The multipart write shares the transport decision with every other
-	// capability group; runtimeFilesHTTPClient stays the plaintext client so the
-	// existing test seam keeps working.
-	base, httpClient, err := f.r.resolveTransport(sbx, runtimeFilesHTTPClient)
-	if err != nil {
-		return WriteFileResult{}, err
-	}
-
-	username := req.Username
-	if username == "" {
-		username = defaultRuntimeFilesUsername
-	}
-	timeout := req.Timeout
-	if timeout <= 0 {
-		timeout = defaultRuntimeWriteTimeout
-	}
-
 	body, contentType, err := buildRuntimeFilesMultipartBody(req.FilePath, req.Content)
 	if err != nil {
 		return WriteFileResult{}, err
 	}
 
-	endpoint := buildRuntimeFilesEndpoint(base, req.FilePath, username)
-	reqCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, body)
+	httpReq, httpClient, cancel, err := f.newFilesRequest(ctx, http.MethodPost,
+		req.FilePath, req.Username, req.AuthUser, req.Timeout, body)
 	if err != nil {
-		return WriteFileResult{}, fmt.Errorf("failed to build runtime files write request: %w", err)
+		return WriteFileResult{}, err
 	}
+	defer cancel()
 	httpReq.Header.Set("Content-Type", contentType)
-	if accessToken := utils.GetAccessToken(sbx); accessToken != "" {
-		httpReq.Header.Set(accessTokenHeader, accessToken)
-	}
-	// The Basic user credential is caller-supplied: it is sent only when
-	// req.AuthUser expresses a user identity for the runtime to resolve.
-	if req.AuthUser != "" {
-		httpReq.Header.Set("Authorization", basicAuthHeader(req.AuthUser))
-	}
 
 	start := time.Now()
 	log.Info("writing file to runtime via files API",
 		"filePath", req.FilePath,
-		"endpoint", endpoint)
+		"endpoint", httpReq.URL.String())
 
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
@@ -305,6 +328,43 @@ func (f *filesystemAPI) Write(ctx context.Context, req WriteFileRequest) (WriteF
 	return result, nil
 }
 
+func (f *filesystemAPI) newFilesRequest(ctx context.Context, method, filePath, username, authUser string,
+	timeout time.Duration, body io.Reader) (*http.Request, *http.Client, context.CancelFunc, error) {
+	if filePath == "" {
+		return nil, nil, nil, fmt.Errorf("filePath is required")
+	}
+	base, httpClient, err := f.r.resolveTransport(f.r.sbx, runtimeFilesHTTPClient)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if username == "" {
+		username = defaultRuntimeFilesUsername
+	}
+	if timeout <= 0 {
+		timeout = defaultRuntimeWriteTimeout
+	}
+
+	endpoint := buildRuntimeFilesEndpoint(base, filePath, username)
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	httpReq, err := http.NewRequestWithContext(reqCtx, method, endpoint, body)
+	if err != nil {
+		cancel()
+		operation := "write"
+		if method == http.MethodGet {
+			operation = "read"
+		}
+		return nil, nil, nil, fmt.Errorf("failed to build runtime files %s request: %w", operation, err)
+	}
+	if accessToken := utils.GetAccessToken(f.r.sbx); accessToken != "" {
+		httpReq.Header.Set(accessTokenHeader, accessToken)
+	}
+	// The Basic user credential is caller-supplied and sent only when non-empty.
+	if authUser != "" {
+		httpReq.Header.Set("Authorization", basicAuthHeader(authUser))
+	}
+	return httpReq, httpClient, cancel, nil
+}
+
 // buildRuntimeFilesMultipartBody assembles a multipart/form-data body whose only field is
 // the file content. The returned contentType already carries the boundary produced by
 // multipart.Writer, so the caller can set it as Content-Type as-is.
@@ -335,12 +395,13 @@ func buildRuntimeFilesEndpoint(runtimeURL, filePath, username string) string {
 	return fmt.Sprintf("%s/files?%s", base, q.Encode())
 }
 
-// Sentinel errors returned by the Filesystem service helpers below, so callers
-// can classify a failure with errors.Is instead of matching message text or
-// re-deriving connect codes themselves.
+// Sentinel errors returned by the filesystem helpers, so callers can classify a
+// failure with errors.Is instead of matching message text or re-deriving codes.
 var (
+	// ErrRuntimeFileTooLarge reports that a file exceeds the requested read limit.
+	ErrRuntimeFileTooLarge = errors.New("file exceeds sandbox runtime read limit")
 	// ErrRuntimePathNotFound reports that the target path does not exist inside
-	// the sandbox (connect code NotFound). It lets callers treat "nothing there"
+	// the sandbox (HTTP 404 or connect code NotFound). It lets callers treat "nothing there"
 	// as a benign outcome without swallowing genuine failures.
 	ErrRuntimePathNotFound = errors.New("path not found in sandbox runtime")
 	// ErrRuntimeFilesystemUnsupported reports that the sandbox runtime does not

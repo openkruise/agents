@@ -43,12 +43,14 @@ import (
 	"github.com/openkruise/agents/pkg/autopause"
 	"github.com/openkruise/agents/pkg/sandboxtemplate"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
+	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
 )
 
 type SandboxSetValidatingHandler struct {
-	Client  client.Client
-	Decoder admission.Decoder
+	Client    client.Client
+	APIReader client.Reader
+	Decoder   admission.Decoder
 }
 
 // +kubebuilder:webhook:path=/validate-sandboxset,mutating=false,failurePolicy=fail,sideEffects=None,admissionReviewVersions=v1;v1beta1,groups=agents.kruise.io,resources=sandboxsets,verbs=create;update,versions=v1alpha1,name=v-sbs.kb.io
@@ -70,6 +72,32 @@ func (h *SandboxSetValidatingHandler) Handle(ctx context.Context, req admission.
 	var errList field.ErrorList
 	errList = append(errList, validateSandboxSetMetadata(obj.ObjectMeta, field.NewPath("metadata"))...)
 	errList = append(errList, validateSandboxSetSpec(obj.Spec, field.NewPath("spec"))...)
+	templateRefChanged := true
+	startupInputsChanged := req.Operation == admissionv1.Create
+	if req.Operation == admissionv1.Update {
+		old := &agentsv1alpha1.SandboxSet{}
+		if err := h.Decoder.DecodeRaw(req.OldObject, old); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+		templateRefChanged = !equality.Semantic.DeepEqual(old.Spec.TemplateRef, obj.Spec.TemplateRef)
+		startupInputsChanged = templateRefChanged || old.Spec.StartupMode != obj.Spec.StartupMode || !equality.Semantic.DeepEqual(old.Spec.Runtimes, obj.Spec.Runtimes)
+	}
+	var resolvedTemplate *agentsv1alpha1.SandboxTemplate
+	// Unrelated updates must not depend on an already-bound template still existing.
+	if startupInputsChanged && obj.Spec.StartupMode == agentsv1alpha1.StartupModeDeferred && obj.Spec.Template == nil && obj.Spec.TemplateRef != nil {
+		resolvedTemplate, err = h.resolveTemplateRef(ctx, obj.Namespace, obj.Spec.TemplateRef.Name)
+		if err != nil {
+			return admission.Errored(http.StatusUnprocessableEntity, err)
+		}
+		for _, validationErr := range sidecarutils.ValidateDeferredStartup(obj.Spec.StartupMode, obj.Spec.Runtimes, resolvedTemplate.Spec.Template, field.NewPath("spec")) {
+			// Referenced template fields are not present in the admitted pool.
+			if validationErr.Field == "spec.template" || strings.HasPrefix(validationErr.Field, "spec.template.") {
+				validationErr.Detail = fmt.Sprintf("referenced SandboxTemplate %s/%s, field %s: %s", resolvedTemplate.Namespace, resolvedTemplate.Name, validationErr.Field, validationErr.Detail)
+				validationErr.Field = field.NewPath("spec", "templateRef").String()
+			}
+			errList = append(errList, validationErr)
+		}
+	}
 	if len(errList) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())
 	}
@@ -92,23 +120,16 @@ func (h *SandboxSetValidatingHandler) Handle(ctx context.Context, req admission.
 	// (scaling, relabeling) while its referenced Version is terminating or
 	// temporarily not Ready. The /scale subresource bypasses this webhook, so
 	// the controller-side validateTemplateRef is the steady-state backstop.
-	templateRefChanged := true
-	if req.Operation == admissionv1.Update {
-		old := &agentsv1alpha1.SandboxSet{}
-		if err := h.Decoder.DecodeRaw(req.OldObject, old); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
-		}
-		templateRefChanged = !equality.Semantic.DeepEqual(old.Spec.TemplateRef, obj.Spec.TemplateRef)
-	}
 	if obj.Spec.TemplateRef != nil && templateRefChanged {
-		template := &agentsv1alpha1.SandboxTemplate{}
-		err := h.Client.Get(ctx, client.ObjectKey{Namespace: obj.Namespace, Name: obj.Spec.TemplateRef.Name}, template)
+		if resolvedTemplate == nil {
+			resolvedTemplate, err = h.resolveTemplateRef(ctx, obj.Namespace, obj.Spec.TemplateRef.Name)
+		}
 		if err == nil {
-			if sandboxtemplate.IsBuildVersion(template) {
-				if template.DeletionTimestamp != nil || !sandboxtemplate.IsStaticReady(template) {
+			if sandboxtemplate.IsBuildVersion(resolvedTemplate) {
+				if resolvedTemplate.DeletionTimestamp != nil || !sandboxtemplate.IsStaticReady(resolvedTemplate) {
 					return admission.Errored(http.StatusUnprocessableEntity, field.Forbidden(field.NewPath("spec", "templateRef"), "only Ready static Versions can be referenced"))
 				}
-			} else if template.DeletionTimestamp != nil {
+			} else if resolvedTemplate.DeletionTimestamp != nil {
 				return admission.Errored(http.StatusUnprocessableEntity, field.Forbidden(field.NewPath("spec", "templateRef"), "referenced template is being deleted"))
 			}
 		} else if !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
@@ -116,6 +137,18 @@ func (h *SandboxSetValidatingHandler) Handle(ctx context.Context, req admission.
 		}
 	}
 	return admission.Allowed("")
+}
+
+// resolveTemplateRef reads only the named reference. A newly created template may
+// not be in the informer yet, so only cache NotFound permits one live Get.
+func (h *SandboxSetValidatingHandler) resolveTemplateRef(ctx context.Context, namespace, name string) (*agentsv1alpha1.SandboxTemplate, error) {
+	template := &agentsv1alpha1.SandboxTemplate{}
+	key := client.ObjectKey{Namespace: namespace, Name: name}
+	err := h.Client.Get(ctx, key, template)
+	if apierrors.IsNotFound(err) {
+		err = h.APIReader.Get(ctx, key, template)
+	}
+	return template, err
 }
 
 func validateSandboxSetMetadata(metadata metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
@@ -152,6 +185,7 @@ func validateSandboxSetSpec(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.P
 	}
 
 	if spec.EmbeddedSandboxTemplate.Template != nil {
+		errList = append(errList, sidecarutils.ValidateDeferredStartup(spec.StartupMode, spec.Runtimes, spec.Template, fldPath)...)
 		errList = append(errList, validateLabelsAndAnnotations(spec.Template.ObjectMeta, fldPath.Child("template"))...)
 		errList = append(errList, validateSandboxSetPodTemplateSpec(spec, fldPath)...)
 	}

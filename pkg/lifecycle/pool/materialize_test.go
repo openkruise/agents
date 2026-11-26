@@ -28,6 +28,22 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
+func TestNewSandboxStartupMode(t *testing.T) {
+	for _, mode := range []agentsv1alpha1.StartupMode{"", agentsv1alpha1.StartupModeImmediate, agentsv1alpha1.StartupModeDeferred} {
+		for _, useRef := range []bool{false, true} {
+			pool := &agentsv1alpha1.SandboxSet{Spec: agentsv1alpha1.SandboxSetSpec{StartupMode: mode}}
+			template := &agentsv1alpha1.SandboxTemplate{Spec: agentsv1alpha1.SandboxTemplateSpec{StartupMode: agentsv1alpha1.StartupModeDeferred, Template: &corev1.PodTemplateSpec{}}}
+			if useRef {
+				pool.Spec.TemplateRef = &agentsv1alpha1.SandboxTemplateRef{Name: "template"}
+			} else {
+				pool.Spec.Template = template.Spec.Template
+			}
+			box := NewSandboxFromSandboxSet(pool, template)
+			assert.Equal(t, mode, box.Spec.StartupMode)
+		}
+	}
+}
+
 func TestNewSandboxFromSandboxSet(t *testing.T) {
 	tests := []struct {
 		name                       string

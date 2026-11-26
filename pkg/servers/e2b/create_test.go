@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -54,6 +55,8 @@ import (
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
+	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
+	testutils "github.com/openkruise/agents/test/utils"
 )
 
 type fakeQuotaManager struct {
@@ -1332,6 +1335,88 @@ type templateLookupTestCache struct {
 	templateErr       error
 	checkpointErr     error
 	checkpointLookups int
+}
+
+func TestCreateSandboxDeferredWithoutInit(t *testing.T) {
+	controller, cli, teardown := Setup(t)
+	defer teardown()
+	cleanup := CreateSandboxPool(t, controller, "deferred-pool", 1)
+	defer cleanup()
+	const stage = utils.SandboxEnvClaimDir + "/.startup-TEST000000"
+	processServer := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
+		RunCommandImmediately: true,
+		RunCommandResult:      runtimeclient.RunCommandResult{Exited: true, Stdout: []string{stage + "\n"}},
+	})
+	defer processServer.Close()
+	var mu sync.Mutex
+	files := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/files" {
+			assert.NotEqual(t, "/init", r.URL.Path)
+			// Skipped-init envd is unbound; this process fixture uses a fixed token.
+			r.Header.Set("X-Access-Token", runtimeclient.AccessToken)
+			processServer.Config.Handler.ServeHTTP(w, r)
+			return
+		}
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		defer file.Close()
+		data, err := io.ReadAll(file)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		mu.Lock()
+		files[r.URL.Query().Get("path")] = string(data)
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	box := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, cli.Get(t.Context(), types.NamespacedName{Namespace: Namespace, Name: "deferred-pool-0"}, box))
+	box.Spec.StartupMode = agentsv1alpha1.StartupModeDeferred
+	if box.Annotations == nil {
+		box.Annotations = map[string]string{}
+	}
+	box.Annotations[agentsv1alpha1.AnnotationRuntimeURL] = server.URL
+	box.Annotations[agentsv1alpha1.AnnotationRuntimeAccessToken] = runtimeclient.AccessToken
+	require.NoError(t, cli.Update(t.Context(), box))
+	box.Status.PodInfo.PodUID = "deferred-pod-uid"
+	require.NoError(t, cli.Status().Update(t.Context(), box))
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: box.Name, Namespace: box.Namespace, UID: box.Status.PodInfo.PodUID,
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(box, agentsv1alpha1.GroupVersion.WithKind("Sandbox"))},
+	}, Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "127.0.0.1", Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
+	require.NoError(t, cli.Create(t.Context(), pod))
+	require.Eventually(t, func() bool {
+		boxes, err := controller.cache.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{Namespace: Namespace, Pool: "deferred-pool"})
+		return err == nil && len(boxes) == 1 && boxes[0].Status.PodInfo.PodUID == "deferred-pod-uid" && boxes[0].Spec.StartupMode == agentsv1alpha1.StartupModeDeferred
+	}, time.Second, 10*time.Millisecond)
+	createRequest := NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "deferred-pool", EnvVars: map[string]string{"VALUE": "from-e2b"},
+		Metadata: map[string]string{models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True},
+	}, nil, adminTestUser())
+	ctx, cancel := context.WithTimeout(createRequest.Context(), 5*time.Second)
+	defer cancel()
+	response, apiErr := controller.CreateSandbox(createRequest.WithContext(ctx))
+	require.Nil(t, apiErr)
+	require.Equal(t, http.StatusCreated, response.Code)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Contains(t, files[stage+"/env.sh"], "export VALUE='from-e2b'")
+	assert.Equal(t, "deferred-pod-uid", files[stage+"/.env_ready"])
+	assert.NotContains(t, files, stage+"/cmd.sh")
+	stored := GetSandbox(t, response.Body.SandboxID, cli)
+	request, err := runtimeclient.GetInitRuntimeRequest(stored)
+	require.NoError(t, err)
+	require.NotNil(t, request)
+	assert.True(t, request.SkipInit)
+	assert.Equal(t, "from-e2b", request.EnvVars["VALUE"])
 }
 
 func (c *templateLookupTestCache) PickSandboxSet(ctx context.Context, opts cache.PickSandboxSetOptions) (*v1alpha1.SandboxSet, error) {

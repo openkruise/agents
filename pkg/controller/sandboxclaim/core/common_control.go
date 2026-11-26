@@ -40,6 +40,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
 	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
+	"github.com/openkruise/agents/pkg/sandboxstate"
 	"github.com/openkruise/agents/pkg/utils"
 	annotationutils "github.com/openkruise/agents/pkg/utils/annotations"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
@@ -93,6 +94,10 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 
 	// Step 2: Get current count from status
 	statusCount := claim.Status.ClaimedReplicas
+
+	if err := c.resumeDeferredClaims(ctx, claim, sandboxSet); err != nil {
+		return RequeueAfter(ClaimRetryInterval), err
+	}
 
 	// Step 3: Recovery logic - query actual count to prevent loss
 	// This handles edge cases:
@@ -153,7 +158,7 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 	// ClaimTimeout with a misleading NoAvailableSandboxes event. Only
 	// sandbox-independent rules are checked here; revision-dependent checks
 	// (memory downscale, QoS class change) run per candidate in
-	// sandboxcr.preCheckCandidate.
+	// the neutral claim engine.
 	if claim.Spec.InplaceUpdate != nil && claim.Spec.InplaceUpdate.Resources != nil {
 		res := claim.Spec.InplaceUpdate.Resources
 		if err := claimengine.ValidateResizeResources(res.Requests, res.Limits); err != nil {
@@ -316,9 +321,21 @@ func validateClaimReservedIdentityKeys(claim *agentsv1alpha1.SandboxClaim) error
 	return nil
 }
 
+func validateClaimOverrides(claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) error {
+	if sandboxSet.Spec.StartupMode != agentsv1alpha1.StartupModeDeferred && len(claim.Spec.Command) > 0 {
+		return fmt.Errorf("%w: spec.command requires startupMode=Deferred", ErrInvalidClaimSpec)
+	}
+	if sandboxSet.Spec.StartupMode == agentsv1alpha1.StartupModeDeferred {
+		if err := runtimeclient.ValidateStartupData(runtimeconfig.StartupData{EnvVars: claim.Spec.EnvVars, Command: claim.Spec.Command}); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidClaimSpec, err)
+		}
+	}
+	return validateClaimReservedIdentityKeys(claim)
+}
+
 // buildClaimOptions constructs claim.Options for TryClaimSandbox
 func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (claimengine.Options, error) {
-	if err := validateClaimReservedIdentityKeys(claim); err != nil {
+	if err := validateClaimOverrides(claim, sandboxSet); err != nil {
 		return claimengine.Options{}, err
 	}
 	// finalProbes is the effective probe set the policy is validated against:
@@ -474,6 +491,15 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 // applyInitRuntimeOptions sets InitRuntime when the claim requires it and the
 // SandboxSet template provides an agent-runtime.
 func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *claimengine.Options, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) error {
+	request := &runtimeconfig.InitRuntimeOptions{
+		EnvVars:     claim.Spec.EnvVars,
+		Command:     claim.Spec.Command,
+		AccessToken: opts.AccessToken,
+		SkipInit:    true,
+	}
+	if sandboxSet.Spec.StartupMode == agentsv1alpha1.StartupModeDeferred {
+		opts.InitRuntime = request
+	}
 	if claim.Spec.SkipInitRuntime {
 		return nil
 	}
@@ -511,10 +537,8 @@ func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *claim
 	}
 
 	if hasAgentRuntime {
-		opts.InitRuntime = &runtimeconfig.InitRuntimeOptions{
-			EnvVars:     claim.Spec.EnvVars,
-			AccessToken: opts.AccessToken,
-		}
+		request.SkipInit = false
+		opts.InitRuntime = request
 	} else {
 		logger.Error(fmt.Errorf("agent-runtime not configured in SandboxSet"), "SkipInitRuntime is false but no agent-runtime found, skip InitRuntime",
 			"sandboxSet", klog.KObj(sandboxSet), "claim", klog.KObj(claim))
@@ -567,6 +591,43 @@ func (c *commonControl) buildCSIMountOptions(ctx context.Context, mounts []agent
 	}
 
 	return opts, storageAuthKey, storageAuthValue, nil
+}
+
+func (c *commonControl) resumeDeferredClaims(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, pool *agentsv1alpha1.SandboxSet) error {
+	boxes, err := c.cache.ListSandboxes(ctx, cache.ListSandboxesOptions{User: string(claim.UID), Namespace: claim.Namespace})
+	if err != nil {
+		return err
+	}
+	var opts *claimengine.Options
+	for _, box := range boxes {
+		state, _ := utils.GetSandboxState(box)
+		if state == sandboxstate.Dead || state == sandboxstate.Expired || box.Spec.StartupMode != agentsv1alpha1.StartupModeDeferred {
+			continue
+		}
+		request, err := runtimeclient.GetInitRuntimeRequest(box)
+		if err != nil {
+			return err
+		}
+		if request != nil && request.StartupDelivered {
+			if state == sandboxstate.Provisioning {
+				return fmt.Errorf("delivered Deferred sandbox %s is temporarily not ready", box.Name)
+			}
+			continue
+		}
+		if opts == nil {
+			originalPool := pool.DeepCopy()
+			originalPool.Spec.StartupMode = box.Spec.StartupMode
+			built, err := c.buildClaimOptions(ctx, claim, originalPool)
+			if err != nil {
+				return err
+			}
+			opts = &built
+		}
+		if err := claimengine.ResumeDeferredClaim(ctx, box, *opts, c.cache); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // countClaimedSandboxes counts active sandboxes claimed by this claim.

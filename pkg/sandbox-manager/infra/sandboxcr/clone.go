@@ -18,6 +18,7 @@ package sandboxcr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -183,8 +184,11 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		return nil, metrics, err
 	}
 	created := sbx
+	startupPublished := false
 	defer func() {
-		clearFailedSandbox(ctx, created, err, opts.ReserveFailedSandboxFor, opts.Admission, opts.LockString)
+		if !startupPublished && !errors.Is(err, runtime.ErrStartupPublicationUncertain) {
+			clearFailedSandbox(ctx, created, err, opts.ReserveFailedSandboxFor, opts.Admission, opts.LockString)
+		}
 	}()
 
 	// Step 4: wait for sandbox ready
@@ -273,6 +277,10 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
 
+	startupPublished, err = runtime.DeliverStartupData(ctx, sbx.Sandbox, cache.GetClient(), rtOpts...)
+	if err != nil {
+		return
+	}
 	cloned = sbx
 	return
 }
@@ -399,9 +407,26 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to modify cloned sandbox: %w", err)
 	}
+	if sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred && initRuntimeOpts == nil {
+		return nil, nil, fmt.Errorf("Deferred checkpoint has no recorded startup data")
+	}
 	if initRuntimeOpts != nil {
+		if initRuntimeOpts.SkipInit {
+			// A retained startup request does not bind skipped-init clones to the source token.
+			initRuntimeOpts.AccessToken = config.NewDefaultAccessToken()
+		}
 		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
 		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
+		if sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred || initRuntimeOpts.SkipInit {
+			initRuntimeOpts.StartupDelivered = false
+			initRuntimeOpts.StartupPodUID = ""
+			// #nosec G117 -- Persist the clone token with retained startup data, not logs.
+			raw, err := json.Marshal(initRuntimeOpts)
+			if err != nil {
+				return nil, nil, err
+			}
+			sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = string(raw)
+		}
 	} else {
 		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = config.NewDefaultAccessToken()
 	}
@@ -530,6 +555,7 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 		Spec: v1alpha1.SandboxSpec{
 			PersistentContents: tmplCopy.Spec.PersistentContents,
 			Runtimes:           tmplCopy.Spec.Runtimes,
+			StartupMode:        tmplCopy.Spec.StartupMode,
 			// Pause behavior travels with the template. A clone that dropped these
 			// would keep running forever while its source sandbox auto-pauses, so
 			// every field the template carries about pausing is copied here.
@@ -691,6 +717,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 			Template:             podTemplate,
 			VolumeClaimTemplates: sbx.Spec.VolumeClaimTemplates,
 			Runtimes:             sbx.Spec.Runtimes,
+			StartupMode:          sbx.Spec.StartupMode,
 			PauseStrategy:        sbx.Spec.PauseStrategy,
 			// The probes and the policy that reads them must be recorded together:
 			// an AutoPausePolicy names a probe, so a template holding the policy

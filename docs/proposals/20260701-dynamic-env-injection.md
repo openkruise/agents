@@ -520,6 +520,16 @@ run_with_envs.sh unblocks → sources env.sh → exec claim command or template 
 ```
 
 If validation or delivery fails, the claim fails; do not return a claimed sandbox with a blocked main process.
+The existing initialization annotation records `startupDelivered: true` only after post-processing
+and signal delivery succeed. SandboxClaim recovery resumes incomplete post-processing before counting
+an already-owned Deferred sandbox as successfully claimed; ownership alone is not completion.
+When `/init` is skipped, the same annotation still records startup data with `skipInit: true`.
+
+A confirmed, terminated publication failure is retried on the same sandbox without repeating init,
+token propagation or CSI mounts. A missing signal alone does not prove failure: if publication or
+remote termination remains unconfirmed, the sandbox stays owned for manual verification rather than
+being deleted or assigned a new shutdown deadline. A current-Pod publication signal permits completion
+bookkeeping to recover without replaying post-processing.
 
 #### 3.1. Claim-Level Command Override
 
@@ -928,7 +938,7 @@ This design ensures:
 | Env vars or claim command contain special characters breaking the generated shell fragments | Use single-quote shell escaping (`'` → `'\''`) for both `env.sh` values and `cmd.sh` argv elements. |
 | Shared volume adds overhead | `emptyDir` is lightweight; the volume only holds small text files. |
 | Backward compatibility with existing sandboxes | Controlled by the `StartupMode` field (default `Immediate`, opt-in to `Deferred`). Existing sandboxes created before this feature are unaffected. |
-| Security: env vars visible in `/mnt/envd/claim/env.sh` on disk | File permissions `0600` when the main process runs as root, or `0644` in the per-pod volume when it runs as a non-root user. Secrets should **not** be passed via `envVars`; use the traffic-extension's SecurityProfile for dynamic secret injection via L7 traffic interception. |
+| Security: env vars visible in `/mnt/envd/claim/env.sh` on disk | File permissions `0600`; the current delivery path requires root envd and a root main process. Secrets should **not** be passed via `envVars`; use the traffic-extension's SecurityProfile for dynamic secret injection via L7 traffic interception. |
 | Security: claim `command` allows starting an arbitrary process without `pods/exec` permission | The capability is bounded by the pool image, mounts, and network policy, and is granted by the existing `SandboxClaim` write permission. Documented as a risk; deployments that do not want it must not grant claim creation to untrusted callers. |
 | Pod restart loses env.sh, cmd.sh, and signal file (emptyDir ephemeral) | **Handled by design**: The `Initialize` function in `sandbox_initializer.go` re-writes them after every pod recreation (resume/wake, upgrade). The data is persisted in the `AnnotationInitRuntimeRequest` annotation on the Sandbox CR, which survives pod deletion. |
 | Command-less `Deferred` pool produces a claim with nothing to run | The main container idles on `tail -f /dev/null` under the wrapper, which stays PID 1 and keeps handling `SIGTERM`; the sandbox is used through envd. Images without `tail` fail at startup with an explicit error. |
@@ -992,6 +1002,13 @@ it made such pools unusable through the E2B API.
 
 - **agent-runtime required**: `Deferred` is unavailable to envd-less pools; the wrapper has no
   distribution or delivery path there.
+- **Root runtime required**: the current envd file and process APIs perform root-owned writes and
+  chmod. The main-container image must run as root, or explicitly set `runAsUser: 0`; Deferred
+  admission rejects explicit non-root settings. Non-root delivery is future work, not achieved
+  by making startup files world-readable.
+- **Publication lock utility required**: alongside bash and root, the main-container image must
+  provide `flock` (verified at `/usr/bin/flock` on Ubuntu 24.04) for nonblocking kernel-held startup
+  publication locking.
 - **Image entrypoint**: an entrypoint-only main container cannot be started with its image default
   once `Deferred` wrapping is applied, because the controller cannot recover the entrypoint argv.
   A claim must supply the command to run the application (Story 4); without one, the container idles.

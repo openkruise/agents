@@ -111,6 +111,47 @@ func newClaimTestInfra(t *testing.T) (*claimTestInfra, client.Client) {
 	return &claimTestInfra{Cache: c, stop: c.Stop}, fc
 }
 
+func TestClaimStartupPersistence(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		mode    v1alpha1.StartupMode
+		data    runtimeconfig.StartupData
+		init    bool
+		wantErr bool
+	}{
+		{name: "command and env survive skipped init", mode: v1alpha1.StartupModeDeferred, data: runtimeconfig.StartupData{Command: []string{"printf", "claim"}, EnvVars: map[string]string{"VALUE": "claim"}}},
+		{name: "empty claim has a durable replay record", mode: v1alpha1.StartupModeDeferred},
+		{name: "env with init", mode: v1alpha1.StartupModeDeferred, init: true, data: runtimeconfig.StartupData{EnvVars: map[string]string{"VALUE": "claim"}}},
+		{name: "Immediate command fails", data: runtimeconfig.StartupData{Command: []string{"true"}}, wantErr: true},
+		{name: "invalid input fails before claim mutation", mode: v1alpha1.StartupModeDeferred, data: runtimeconfig.StartupData{EnvVars: map[string]string{"UID": "1"}}, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &Sandbox{Sandbox: &v1alpha1.Sandbox{Spec: v1alpha1.SandboxSpec{StartupMode: tt.mode,
+				EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Command: []string{"sleep", "infinity"}}}}}},
+			}}}
+			original := box.Sandbox.DeepCopy()
+			opts := Options{InitRuntime: &runtimeconfig.InitRuntimeOptions{
+				EnvVars: tt.data.EnvVars, Command: tt.data.Command, SkipInit: !tt.init,
+			}}
+			err := modifyPickedSandbox(box, LockTypeUpdate, opts)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Equal(t, original, box.Sandbox)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, original.Spec.Template, box.Spec.Template)
+			record, err := runtime.GetInitRuntimeRequest(box.Sandbox)
+			require.NoError(t, err)
+			require.NotNil(t, record)
+			assert.Equal(t, tt.data.Command, record.Command)
+			assert.Equal(t, tt.data.EnvVars, record.EnvVars)
+			assert.Equal(t, !tt.init, record.SkipInit)
+			assert.Equal(t, v1alpha1.True, box.Labels[v1alpha1.LabelSandboxIsClaimed])
+		})
+	}
+}
+
 func TestClearFailedSandboxIgnoresNilSandbox(t *testing.T) {
 	// The old reserveFailedSandbox rejected a non-*Sandbox interface value with
 	// "unsupported sandbox type". The neutral engine takes a concrete *Sandbox,
@@ -185,7 +226,7 @@ func TestClaimCreationOutcomes(t *testing.T) {
 			}
 			wrapped := &Sandbox{Sandbox: initial, Cache: cache}
 			metrics := Metrics{}
-			err = runClaimPostProcesses(ctx, wrapped, tt.lockType, Options{WaitReadyTimeout: 20 * time.Millisecond}, cache, &metrics)
+			_, err = runClaimPostProcesses(ctx, wrapped, tt.lockType, Options{WaitReadyTimeout: 20 * time.Millisecond}, cache, &metrics)
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
@@ -2141,7 +2182,7 @@ func TestRunClaimPostProcesses_RuntimeTransport(t *testing.T) {
 			// and the nil cache is never dereferenced.
 			opts := Options{RuntimeTLSBundle: tt.bundle}
 
-			err := runClaimPostProcesses(t.Context(), sbx, LockTypeUpdate, opts, nil, &Metrics{})
+			_, err := runClaimPostProcesses(t.Context(), sbx, LockTypeUpdate, opts, nil, &Metrics{})
 
 			if !tt.wantErr {
 				require.NoError(t, err)
@@ -2285,7 +2326,7 @@ func TestRunClaimPostProcesses_ResolvesTransportAfterWaitReady(t *testing.T) {
 			}
 			metrics := &Metrics{}
 
-			err := runClaimPostProcesses(t.Context(), sbx, LockTypeCreate, opts, testInfra.Cache, metrics)
+			_, err := runClaimPostProcesses(t.Context(), sbx, LockTypeCreate, opts, testInfra.Cache, metrics)
 
 			if tt.wantErr {
 				require.Error(t, err, "resolution must run after the refresh and reject the unusable stamp")

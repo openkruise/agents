@@ -24,11 +24,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils/logs"
@@ -69,6 +75,13 @@ type initAPI struct {
 // reached the runtime over HTTPS/mTLS or plaintext HTTP, without turning on the
 // V(DebugLogLevel) per-attempt logs of the shared transport.
 func (i *initAPI) Init(ctx context.Context, opts config.InitRuntimeOptions) error {
+	if opts.SkipInit {
+		return nil
+	}
+	// Command belongs to the startup file protocol, not the envd /init API.
+	opts.Command = nil
+	opts.StartupDelivered = false
+	opts.StartupPodUID = ""
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(i.r.sbx))
 	transport := i.r.transportLogValues(i.r.sbx)
 	log.Info("init runtime starting", append(transport, "reInit", opts.ReInit)...)
@@ -109,6 +122,94 @@ func GetInitRuntimeRequest(s metav1.Object) (*config.InitRuntimeOptions, error) 
 		initRuntimeOpts = &opts
 	}
 	return initRuntimeOpts, nil
+}
+
+var ErrStartupDeliveryPending = errors.New("claim startup post-processing is incomplete")
+
+func RecordStartupDelivered(ctx context.Context, box *agentsv1alpha1.Sandbox, c client.Client) error {
+	if box == nil || box.Status.PodInfo.PodUID == "" {
+		return fmt.Errorf("sandbox has no pod UID for startup completion")
+	}
+	key := client.ObjectKeyFromObject(box)
+	var lastErr error
+	// A transport failure may have committed the patch. Re-read and validate the
+	// same delivery on every attempt instead of issuing a blind second write.
+	retryAPIError := func(err error) (bool, error) {
+		lastErr = err
+		var status apierrors.APIStatus
+		if errors.As(err, &status) {
+			code := status.Status().Code
+			if code >= 400 && code < 500 && !apierrors.IsConflict(err) && !apierrors.IsTimeout(err) && !apierrors.IsTooManyRequests(err) {
+				return false, err
+			}
+		}
+		return false, nil
+	}
+	err := wait.ExponentialBackoffWithContext(ctx, wait.Backoff{Duration: 100 * time.Millisecond, Factor: 2, Steps: 6}, func(ctx context.Context) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		current := &agentsv1alpha1.Sandbox{}
+		if err := c.Get(ctx, key, current); err != nil {
+			return retryAPIError(fmt.Errorf("read sandbox before recording startup completion: %w", err))
+		}
+		current = current.DeepCopy()
+		pod := &corev1.Pod{}
+		if err := c.Get(ctx, key, pod); err != nil {
+			return retryAPIError(fmt.Errorf("read pod before recording startup completion: %w", err))
+		}
+		owner := metav1.GetControllerOfNoCopy(pod)
+		if current.UID != box.UID || pod.UID != box.Status.PodInfo.PodUID || owner == nil || owner.UID != box.UID {
+			return false, fmt.Errorf("sandbox or pod generation changed during startup delivery")
+		}
+		request, err := GetInitRuntimeRequest(current)
+		if err != nil {
+			return false, err
+		}
+		if request == nil {
+			return false, fmt.Errorf("claimed Deferred sandbox has no recorded startup data")
+		}
+		if request.StartupDelivered && request.StartupPodUID == string(pod.UID) {
+			// Only completion metadata may differ after a lost response. A changed
+			// startup payload is still a semantic fence, even for the same PodUID.
+			expected, err := GetInitRuntimeRequest(box)
+			if err != nil {
+				return false, err
+			}
+			if expected == nil || expected.SkipInit != request.SkipInit || expected.AccessToken != request.AccessToken ||
+				expected.SkipRefresh != request.SkipRefresh || !maps.Equal(expected.EnvVars, request.EnvVars) ||
+				!slices.Equal(expected.Command, request.Command) {
+				return false, fmt.Errorf("startup request changed during delivery")
+			}
+			box.Annotations = current.Annotations
+			box.ResourceVersion = current.ResourceVersion
+			lastErr = nil
+			return true, nil
+		}
+		if current.Annotations[agentsv1alpha1.AnnotationInitRuntimeRequest] != box.Annotations[agentsv1alpha1.AnnotationInitRuntimeRequest] {
+			return false, fmt.Errorf("startup request changed during delivery")
+		}
+		request.StartupDelivered = true
+		request.StartupPodUID = string(pod.UID)
+		// #nosec G117 -- Preserve the runtime token only in its existing replay annotation.
+		raw, err := json.Marshal(request)
+		if err != nil {
+			return false, err
+		}
+		original := current.DeepCopy()
+		current.Annotations[agentsv1alpha1.AnnotationInitRuntimeRequest] = string(raw)
+		if err := c.Patch(ctx, current, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
+			return retryAPIError(fmt.Errorf("record startup completion: %w", err))
+		}
+		box.Annotations = current.Annotations
+		box.ResourceVersion = current.ResourceVersion
+		lastErr = nil
+		return true, nil
+	})
+	if errors.Is(err, wait.ErrWaitTimeout) && lastErr != nil {
+		return lastErr
+	}
+	return errors.Join(err, lastErr, ctx.Err())
 }
 
 // InitRuntime sends an init request to the sandbox runtime sidecar. It is a

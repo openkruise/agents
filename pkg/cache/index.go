@@ -77,9 +77,13 @@ func GetIndexFuncs() []IndexFunc {
 				state, _ := utils.GetSandboxState(sbx)
 				if state == sandboxstate.Available ||
 					(state == sandboxstate.Creating && utils.IsControlledBySandboxSet(sbx)) {
-					tmpl := utils.GetTemplateFromSandbox(sbx)
-					if tmpl != "" {
-						return []string{tmpl}
+					// The template label can name a template shared by multiple pools.
+					pool := sbx.Labels[agentsv1alpha1.LabelSandboxPool]
+					if pool == "" {
+						pool = utils.GetTemplateFromSandbox(sbx)
+					}
+					if pool != "" {
+						return []string{pool}
 					}
 				}
 				return nil

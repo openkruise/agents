@@ -167,11 +167,8 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		CreateOnNoStock:         request.Extensions.CreateOnNoStock,
 	}
 
-	if !request.Extensions.SkipInitRuntime {
-		infraOpts.InitRuntime = &config.InitRuntimeOptions{
-			EnvVars:     request.EnvVars,
-			AccessToken: infraOpts.AccessToken,
-		}
+	infraOpts.InitRuntime = &config.InitRuntimeOptions{
+		EnvVars: request.EnvVars, AccessToken: infraOpts.AccessToken, SkipInit: request.Extensions.SkipInitRuntime,
 	}
 
 	if extension := request.Extensions.InplaceUpdate; extension.Image != "" || extension.Resources != nil {

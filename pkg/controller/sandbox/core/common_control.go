@@ -35,6 +35,7 @@ import (
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
+	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 const CommonControlName = "common"
@@ -167,9 +168,39 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 		return 0, nil
 	}
 
-	// If RuntimeInitialized is pending (set during resume), wait for Pod Ready then run Initialize.
 	initCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized))
-	if initCond != nil && initCond.Status != metav1.ConditionTrue {
+	// Initial claims and clones do not seed RuntimeInitialized. Fence Ready
+	// independently of that condition until delivery is recorded for this Pod.
+	if box.Spec.StartupMode == agentsv1alpha1.StartupModeDeferred && box.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == agentsv1alpha1.True {
+		r.syncStatusFromPod(pod, newStatus, false)
+		request, err := utilruntime.GetInitRuntimeRequest(box)
+		if err == nil && request == nil {
+			err = fmt.Errorf("claimed Deferred sandbox has no recorded startup data")
+		}
+		if err != nil {
+			utils.SetSandboxCondition(newStatus, metav1.Condition{
+				Type: string(agentsv1alpha1.RuntimeInitialized), Status: metav1.ConditionFalse,
+				Reason:  agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+				Message: utils.TruncateConditionMessage(fmt.Sprintf("Runtime initialization failed: %v", err)), LastTransitionTime: metav1.Now(),
+			})
+			runtimeInitializationPending(newStatus)
+			return 0, err
+		}
+		if (!request.StartupDelivered || request.StartupPodUID != string(pod.UID)) && (initCond == nil || initCond.Status == metav1.ConditionTrue) {
+			utils.SetSandboxCondition(newStatus, metav1.Condition{
+				Type: string(agentsv1alpha1.RuntimeInitialized), Status: metav1.ConditionFalse,
+				Reason:  agentsv1alpha1.SandboxConditionRuntimeInitReasonPending,
+				Message: "Waiting for deferred startup delivery to the current pod", LastTransitionTime: metav1.Now(),
+			})
+		}
+	}
+
+	// Withhold Ready before any runtime call, including failures and waits for
+	// Pod readiness. Initialization must also gate postResume and other hooks.
+	if runtimeInitializationPending(newStatus) {
+		// Initialization and deferred delivery must target the current Pod, not
+		// the identity retained from before resume.
+		r.syncStatusFromPod(pod, newStatus, false)
 		pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 		if pCond == nil || pCond.Status != corev1.ConditionTrue {
 			klog.FromContext(ctx).Info("Waiting for pod ready before initialization", "sandbox", klog.KObj(box))
@@ -180,8 +211,12 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerAgentRuntimeInit)
 		err := r.initializer.Initialize(ctx, box, newStatus)
 		tracing.EndSpan(ctx, span, err)
+		pending := runtimeInitializationPending(newStatus)
 		if err != nil {
 			return 0, err
+		}
+		if pending {
+			return time.Second, nil
 		}
 	}
 
@@ -228,6 +263,24 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 
 	r.syncStatusFromPod(pod, newStatus, true)
 	return 0, nil
+}
+
+// runtimeInitializationPending holds Ready back when Initialize returned without
+// completing (for example, while the manager finishes deferred startup delivery).
+// Preserve the initializer's reason and message instead of reporting an error.
+func runtimeInitializationPending(newStatus *agentsv1alpha1.SandboxStatus) bool {
+	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized))
+	if cond == nil || cond.Status == metav1.ConditionTrue {
+		return false
+	}
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionReady),
+		Status:             metav1.ConditionFalse,
+		Reason:             cond.Reason,
+		Message:            cond.Message,
+		LastTransitionTime: metav1.Now(),
+	})
+	return true
 }
 
 // defaultSyncStatusFromPod is the default implementation of syncStatusFromPod.

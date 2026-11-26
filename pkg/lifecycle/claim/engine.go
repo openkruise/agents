@@ -89,7 +89,7 @@ func ValidateAndInitClaimOptions(opts Options) (Options, error) {
 	}
 	if opts.CSIMount != nil {
 		// for csi mount, init runtime is required
-		if opts.InitRuntime == nil {
+		if opts.InitRuntime == nil || opts.InitRuntime.SkipInit {
 			return Options{}, fmt.Errorf("init runtime is required when csi mount is specified")
 		}
 		if err := EnforceCSIMountLimit(opts.CSIMount); err != nil {
@@ -271,6 +271,7 @@ func TryClaimSandbox(ctx context.Context, opts Options, pickCache *sync.Map, cac
 	}
 
 	var pickedSandboxKey string
+	startupPublished := false
 	opts.LockString = ChooseLockString(opts.Admission, opts.LockString)
 	defer func() {
 		freeWorkerOnce()
@@ -283,7 +284,11 @@ func TryClaimSandbox(ctx context.Context, opts Options, pickCache *sync.Map, cac
 		}
 		metrics.LastError = err
 		log.Info("try claim sandbox result", "metrics", metrics.String())
-		ClearFailedSandbox(ctx, claimed, err, opts.ReserveFailedSandboxFor, opts.Admission, opts.LockString)
+		// Completion bookkeeping must not destroy an already-started app. Keep
+		// the error non-retriable and let the controller recover its record.
+		if !startupPublished && !errors.Is(err, runtime.ErrStartupPublicationUncertain) {
+			ClearFailedSandbox(ctx, claimed, err, opts.ReserveFailedSandboxFor, opts.Admission, opts.LockString)
+		}
 	}()
 	// Step 1: Pick an available sandbox
 	var sbx *Sandbox
@@ -352,8 +357,9 @@ func TryClaimSandbox(ctx context.Context, opts Options, pickCache *sync.Map, cac
 	}()
 	freeWorkerOnce() // free worker early
 
-	// Step 3: Built-in post processes. The locked sandbox must be always returned to be cleared properly.
-	err = runClaimPostProcesses(ctx, sbx, lockType, opts, cache, &metrics)
+	// Step 3: Built-in post processes. Return the locked sandbox for cleanup
+	// unless Deferred startup has already been published successfully.
+	startupPublished, err = runClaimPostProcesses(ctx, sbx, lockType, opts, cache, &metrics)
 	return
 }
 
@@ -413,7 +419,7 @@ func lockPickedSandbox(ctx context.Context, sbx *Sandbox, lockType LockType, opt
 }
 
 func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType LockType, opts Options,
-	cache infracache.Provider, metrics *Metrics) error {
+	cache infracache.Provider, metrics *Metrics) (bool, error) {
 	log := klog.FromContext(ctx)
 
 	if lockType == LockTypeCreate || lockType == LockTypeSpeculate || opts.InplaceUpdate != nil {
@@ -428,9 +434,9 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType LockType,
 		if err != nil {
 			log.Error(err, "failed to wait for sandbox ready", "cost", metrics.WaitReady)
 			if wait.Interrupted(err) {
-				return err
+				return false, err
 			}
-			return RetriableError{Message: fmt.Sprintf("failed to wait for sandbox ready: %s", err), cause: err}
+			return false, RetriableError{Message: fmt.Sprintf("failed to wait for sandbox ready: %s", err), cause: err}
 		}
 		log.Info("sandbox is ready", "cost", metrics.WaitReady)
 	}
@@ -448,16 +454,17 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType LockType,
 	rtOpts, err := runtime.TransportOptionsFor(sbx.Sandbox, opts.RuntimeTLSBundle)
 	if err != nil {
 		log.Error(err, "failed to resolve runtime transport")
-		return err
+		return false, err
 	}
 
-	if opts.InitRuntime != nil {
-		log.Info("starting to init runtime", "opts", opts.InitRuntime)
+	if opts.InitRuntime != nil && !opts.InitRuntime.SkipInit {
+		log.Info("starting to init runtime", "reInit", opts.InitRuntime.ReInit, "skipRefresh", opts.InitRuntime.SkipRefresh,
+			"envCount", len(opts.InitRuntime.EnvVars), "commandArgCount", len(opts.InitRuntime.Command))
 		var err error
 		metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *opts.InitRuntime, sbx.RefreshFunc(), rtOpts...)
 		if err != nil {
 			log.Error(err, "failed to init runtime")
-			return RetriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
+			return false, RetriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
 		}
 		metrics.Total += metrics.InitRuntime
 		log.Info("runtime inited", "cost", metrics.InitRuntime)
@@ -479,7 +486,7 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType LockType,
 		// the /init handshake and the CSI mounts use.
 		metrics.SecurityToken, err = identity.ProcessSandboxToken(ctx, cache.GetClient(), sbx.Sandbox, rtOpts...)
 		if err != nil {
-			return RetriableError{Message: fmt.Sprintf("failed to process security token: %s", err)}
+			return false, RetriableError{Message: fmt.Sprintf("failed to process security token: %s", err)}
 		}
 		metrics.Total += metrics.SecurityToken
 	}
@@ -496,7 +503,7 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType LockType,
 		})
 		metrics.TrafficToken = time.Since(start)
 		if err != nil {
-			return RetriableError{Message: err.Error()}
+			return false, RetriableError{Message: err.Error()}
 		}
 		if accessResp != nil {
 			sbx.trafficToken = accessResp
@@ -510,13 +517,43 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType LockType,
 		metrics.CSIMount, err = TraceCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount, rtOpts...)
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
-			return fmt.Errorf("failed to perform csi mount: %s", err)
+			return false, fmt.Errorf("failed to perform csi mount: %s", err)
 		}
 		metrics.Total += metrics.CSIMount
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
 
-	return nil
+	if sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred {
+		published, err := runtime.DeliverStartupData(ctx, sbx.Sandbox, cache.GetClient(), rtOpts...)
+		if err != nil && !published && !errors.Is(err, runtime.ErrStartupPublicationUncertain) && !wait.Interrupted(err) {
+			err = RetriableError{Message: fmt.Sprintf("failed to deliver startup data: %v", err), cause: err}
+		}
+		return published, err
+	}
+	return false, nil
+}
+
+// ResumeDeferredClaim completes the recorded post-processing of a claimed
+// Deferred sandbox without picking or locking another instance.
+func ResumeDeferredClaim(ctx context.Context, box *v1alpha1.Sandbox, opts Options, cache infracache.Provider) error {
+	if box.Spec.StartupMode != v1alpha1.StartupModeDeferred {
+		return nil
+	}
+	request, err := runtime.GetInitRuntimeRequest(box)
+	if err != nil {
+		return err
+	}
+	if request == nil {
+		return fmt.Errorf("claimed Deferred sandbox has no recorded startup data")
+	}
+	if request.StartupDelivered {
+		return nil
+	}
+	opts.InitRuntime = request
+	opts.InplaceUpdate = nil
+	sbx := NewSandbox(box.DeepCopy(), cache)
+	_, err = runClaimPostProcesses(ctx, sbx, LockTypeSpeculate, opts, cache, &Metrics{})
+	return err
 }
 
 // ClearFailedSandbox cleans up (or reserves) a failed sandbox according to
@@ -1053,6 +1090,18 @@ func claimMethodForLock(lockType LockType) (string, error) {
 // modifyPickedSandbox applies the claim-time mutations to a sandbox returned by
 // pickAnAvailableSandbox. It must not be called directly.
 func modifyPickedSandbox(sbx *Sandbox, lockType LockType, opts Options) error {
+	data := runtimeconfig.StartupData{}
+	if opts.InitRuntime != nil {
+		data.EnvVars, data.Command = opts.InitRuntime.EnvVars, opts.InitRuntime.Command
+	}
+	if sbx.Spec.StartupMode != v1alpha1.StartupModeDeferred && len(data.Command) > 0 {
+		return NewError(CodeBadRequest, "claim command requires startupMode=Deferred")
+	}
+	if sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred {
+		if err := runtime.ValidateStartupData(data); err != nil {
+			return NewError(CodeBadRequest, "invalid startup data: %v", err)
+		}
+	}
 	claimMethod, err := claimMethodForLock(lockType)
 	if err != nil {
 		return err
@@ -1107,9 +1156,13 @@ func modifyPickedSandbox(sbx *Sandbox, lockType LockType, opts Options) error {
 	}
 	annotations[v1alpha1.AnnotationClaimTime] = time.Now().Format(time.RFC3339)
 
-	// record init config into annotation
-	if opts.InitRuntime != nil {
-		initRuntimeJSON, err := json.Marshal(opts.InitRuntime)
+	initRequest := opts.InitRuntime
+	if initRequest == nil && sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred {
+		initRequest = &runtimeconfig.InitRuntimeOptions{SkipInit: true, AccessToken: opts.AccessToken}
+	}
+	if initRequest != nil && (!initRequest.SkipInit || sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred) {
+		// #nosec G117 -- Preserve the runtime token only in its existing replay annotation.
+		initRuntimeJSON, err := json.Marshal(initRequest)
 		if err != nil {
 			return fmt.Errorf("failed to marshal init runtime options: %w", err)
 		}
@@ -1283,9 +1336,24 @@ func WaitForSandboxReady(ctx context.Context, sbx *Sandbox, opts Options, cache 
 	}()
 	log.Info("waiting for sandbox ready", "timeout", opts.WaitReadyTimeout)
 	uid := string(sbx.UID)
-	err = cache.NewSandboxWaitReadyTask(ctx, sbx.Sandbox).Wait(opts.WaitReadyTimeout)
+	// Deferred startup delivery is itself a prerequisite for Sandbox Ready.
+	// Wait for the owned native Pod instead, or recovery would wait for the
+	// readiness condition that only its own delivery can unblock.
+	deferredPending := false
+	if sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred && sbx.Labels[v1alpha1.LabelSandboxIsClaimed] == v1alpha1.True {
+		request, readErr := runtime.GetInitRuntimeRequest(sbx.Sandbox)
+		if readErr != nil {
+			return cost, nil, readErr
+		}
+		deferredPending = request != nil && !request.StartupDelivered
+	}
+	if deferredPending {
+		err = waitForDeferredStartupPod(ctx, sbx, opts.WaitReadyTimeout, cache)
+	} else {
+		err = cache.NewSandboxWaitReadyTask(ctx, sbx.Sandbox).Wait(opts.WaitReadyTimeout)
+	}
 	if observeCreation && uid != "" {
-		if err == nil {
+		if err == nil && (!deferredPending || utils.IsSandboxReady(sbx.Sandbox)) {
 			// Preserve observed readiness even if subsequent refresh or delivery fails.
 			creation = &SandboxCreationResult{UID: uid, Namespace: sbx.Namespace, Ready: true}
 		}
@@ -1307,11 +1375,18 @@ func WaitForSandboxReady(ctx context.Context, sbx *Sandbox, opts Options, cache 
 		log.Error(err, "failed to wait for sandbox ready")
 		var waitErr *cacheutils.WaitNotSatisfiedError
 		if errors.As(err, &waitErr) {
-			if refreshErr := sbx.InplaceRefresh(ctx, true); refreshErr != nil {
-				log.Error(refreshErr, "failed to refresh sandbox for ready failure diagnosis")
+			if !deferredPending {
+				if refreshErr := sbx.InplaceRefresh(ctx, true); refreshErr != nil {
+					log.Error(refreshErr, "failed to refresh sandbox for ready failure diagnosis")
+				}
 			}
 			err = WrapError(CodeInternal, err, "%s (wait %s). Check the sandbox status before retrying", sandboxReadyFailureMessage(sbx.Sandbox), waitErr.Timeout)
 		}
+		return
+	}
+	// The native-Pod path already refreshed a private snapshot from the
+	// informer and synchronized its current Pod identity.
+	if deferredPending {
 		return
 	}
 	// Use deepcopy to avoid data race
@@ -1320,6 +1395,83 @@ func WaitForSandboxReady(ctx context.Context, sbx *Sandbox, opts Options, cache 
 		return
 	}
 	return
+}
+
+// waitForDeferredStartupPod is the claim wait predicate for an unfinished
+// deferred delivery. It never publishes Sandbox Ready and uses cached Gets only.
+func waitForDeferredStartupPod(ctx context.Context, sbx *Sandbox, timeout time.Duration, cache infracache.Provider) error {
+	expectedUID, expectedGeneration, expectedRV := sbx.UID, sbx.Generation, sbx.ResourceVersion
+	key := client.ObjectKeyFromObject(sbx)
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		fresh := &v1alpha1.Sandbox{}
+		if err := cache.GetClient().Get(ctx, key, fresh); err != nil {
+			return err
+		}
+		if expectedUID == "" || fresh.UID != expectedUID {
+			return fmt.Errorf("sandbox %s/%s UID changed while waiting for startup delivery", key.Namespace, key.Name)
+		}
+		// A freshly claimed wrapper can be newer than the informer. Never
+		// replace its delivery record with the pre-claim warm-stock snapshot.
+		freshEnough := fresh.Generation >= expectedGeneration && expectations.IsResourceVersionNewerOrEqual(expectedRV, fresh.ResourceVersion)
+		if freshEnough {
+			sbx.Sandbox = fresh.DeepCopy()
+		}
+		ready := GetSandboxCondition(fresh, v1alpha1.SandboxConditionReady)
+		if freshEnough && utils.IsSandboxStartupFailureReason(ready.Reason) {
+			return fmt.Errorf("sandbox startup failed (reason=%s): %s", ready.Reason, ready.Message)
+		}
+		inplace := GetSandboxCondition(fresh, v1alpha1.SandboxConditionInplaceUpdate)
+		active := fresh.Status.Phase == v1alpha1.SandboxRunning && !fresh.Spec.Paused
+		// Upgrade initialization can also be waiting for this same delivery.
+		if fresh.Status.Phase == v1alpha1.SandboxUpgrading {
+			init := GetSandboxCondition(fresh, v1alpha1.RuntimeInitialized)
+			active = init.Status != metav1.ConditionTrue && init.Reason == "StartupDeliveryPending"
+		}
+		if freshEnough && active && fresh.Spec.StartupMode == v1alpha1.StartupModeDeferred && fresh.Labels[v1alpha1.LabelSandboxIsClaimed] == v1alpha1.True &&
+			fresh.DeletionTimestamp.IsZero() && fresh.Status.ObservedGeneration == fresh.Generation &&
+			inplace.Reason != v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating &&
+			(fresh.Spec.ShutdownTime == nil || time.Now().Before(fresh.Spec.ShutdownTime.Time)) {
+			pod := &corev1.Pod{}
+			if err := cache.GetClient().Get(ctx, key, pod); err != nil {
+				if !apierrors.IsNotFound(err) {
+					return err
+				}
+			} else {
+				if deferredStartupPodReady(fresh, pod) {
+					sbx.Status.PodInfo = v1alpha1.PodInfo{PodUID: pod.UID, PodIP: pod.Status.PodIP, NodeName: pod.Spec.NodeName}
+					sbx.Status.SandboxIp = pod.Status.PodIP
+					sbx.Status.NodeName = pod.Spec.NodeName
+					return nil
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return &cacheutils.WaitNotSatisfiedError{Object: key, Action: cacheutils.WaitActionWaitReady, Timeout: timeout}
+		case <-ticker.C:
+		}
+	}
+}
+
+func deferredStartupPodReady(box *v1alpha1.Sandbox, pod *corev1.Pod) bool {
+	owner := metav1.GetControllerOfNoCopy(pod)
+	ready := utils.GetPodCondition(&pod.Status, corev1.PodReady)
+	return owner != nil && owner.UID == box.UID && owner.Name == box.Name &&
+		owner.Kind == "Sandbox" && owner.APIVersion == v1alpha1.GroupVersion.String() &&
+		pod.UID != "" && pod.DeletionTimestamp.IsZero() && pod.Status.Phase == corev1.PodRunning &&
+		ready != nil && ready.Status == corev1.ConditionTrue && pod.Status.PodIP != ""
 }
 
 // sandboxCreationResult converts only observed Ready or startup Failed states to neutral outcomes.
