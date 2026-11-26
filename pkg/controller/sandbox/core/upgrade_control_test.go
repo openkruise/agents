@@ -27,10 +27,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
@@ -2115,6 +2118,10 @@ func newInstallerTestSandbox(installer *agentsv1alpha1.InstallerSpec, patchVersi
 
 func newInstallerRunningPod() *corev1.Pod {
 	pod := newRunningPod()
+	// Informer pods always carry a resourceVersion, and the optimistic-lock
+	// injection patch requires one. The fake client keeps this RV on the
+	// seeded copy, so the fixture and the stored Pod agree.
+	pod.ResourceVersion = "999"
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 		Name:  "sandbox",
 		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
@@ -2124,8 +2131,10 @@ func newInstallerRunningPod() *corev1.Pod {
 
 // newInstallerTestControl builds an UpgradeControl whose client intercepts
 // pods/ephemeralcontainers subresource patches — unsupported by the fake
-// client — by merging the patched container into the stored Pod. The returned
-// pointer counts subresource patch calls.
+// client — and applies them like the API server: the optimistic-lock
+// precondition is enforced, the patch goes through the real strategic merge
+// path, and existing ephemeral containers are treated as immutable. The
+// returned pointer counts subresource patch calls.
 func newInstallerTestControl(t *testing.T, injectionError error, objects ...client.Object) (*UpgradeControl, *int) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -2148,32 +2157,44 @@ func newInstallerTestControl(t *testing.T, injectionError error, objects ...clie
 			if err != nil {
 				return err
 			}
-			var body struct {
-				Spec struct {
-					EphemeralContainers []corev1.EphemeralContainer `json:"ephemeralContainers"`
-				} `json:"spec"`
-			}
-			if err := json.Unmarshal(data, &body); err != nil {
+			var current corev1.Pod
+			if err := c.Get(ctx, types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}, &current); err != nil {
 				return err
 			}
-			var pod corev1.Pod
-			if err := c.Get(ctx, types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}, &pod); err != nil {
+			var lock struct {
+				Metadata struct {
+					ResourceVersion string `json:"resourceVersion"`
+				} `json:"metadata"`
+			}
+			if err := json.Unmarshal(data, &lock); err != nil {
 				return err
 			}
-			for _, ec := range body.Spec.EphemeralContainers {
-				found := false
-				for i := range pod.Spec.EphemeralContainers {
-					if pod.Spec.EphemeralContainers[i].Name == ec.Name {
-						pod.Spec.EphemeralContainers[i] = ec
-						found = true
-						break
-					}
-				}
-				if !found {
-					pod.Spec.EphemeralContainers = append(pod.Spec.EphemeralContainers, ec)
-				}
+			if lock.Metadata.ResourceVersion != "" && lock.Metadata.ResourceVersion != current.ResourceVersion {
+				return apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, current.Name,
+					fmt.Errorf("precondition resourceVersion %s does not match current %s",
+						lock.Metadata.ResourceVersion, current.ResourceVersion))
 			}
-			return c.Update(ctx, &pod)
+			original, err := json.Marshal(current)
+			if err != nil {
+				return err
+			}
+			merged, err := strategicpatch.StrategicMergePatch(original, data, &corev1.Pod{})
+			if err != nil {
+				return err
+			}
+			var updated corev1.Pod
+			if err := json.Unmarshal(merged, &updated); err != nil {
+				return err
+			}
+			if len(updated.Spec.EphemeralContainers) < len(current.Spec.EphemeralContainers) ||
+				!apiequality.Semantic.DeepEqual(current.Spec.EphemeralContainers,
+					updated.Spec.EphemeralContainers[:len(current.Spec.EphemeralContainers)]) {
+				return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, current.Name, field.ErrorList{
+					field.Forbidden(field.NewPath("spec", "ephemeralContainers"), "existing ephemeral containers are immutable"),
+				})
+			}
+			updated.ResourceVersion = current.ResourceVersion
+			return c.Update(ctx, &updated)
 		},
 	})
 
@@ -2672,6 +2693,23 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			expectReason: agentsv1alpha1.SandboxUpgradingReasonInstalling,
 		},
 		{
+			name: "completed installer is evaluated without a resolvable template",
+			pod: podWithEphemeral(
+				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
+				terminatedStatus(0, "")),
+			templateRef:  "missing-template",
+			expectDone:   true,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonInstalling,
+		},
+		{
+			name: "failed installer stays terminal without a resolvable template",
+			pod: podWithEphemeral(
+				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
+				terminatedStatus(126, "")),
+			templateRef:  "missing-template",
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+		},
+		{
 			name:             "unknown target container name fails",
 			installer:        &agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0", TargetContainerName: "missing"},
 			pod:              newInstallerRunningPod(),
@@ -2705,6 +2743,20 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			expectDone:       false,
 			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
 			expectMsgContain: "hostPID",
+		},
+		{
+			name:      "PID-namespace guard precedes installer observation",
+			installer: defaultInstaller(),
+			pod: func() *corev1.Pod {
+				p := podWithEphemeral(
+					&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
+					terminatedStatus(0, ""))
+				p.Spec.ShareProcessNamespace = ptr.To(true)
+				return p
+			}(),
+			expectDone:       false,
+			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+			expectMsgContain: "shareProcessNamespace",
 		},
 		{
 			name:      "pod not running waits",
@@ -2781,13 +2833,26 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			pod: podWithEphemeral(
 				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
 				&corev1.ContainerStatus{
-					Name:  existingECName,
-					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+					Name: existingECName,
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+						Reason:  "ImagePullBackOff",
+						Message: `Back-off pulling image "installer:1.4.0"`,
+					}},
 				}),
 			lastTransition:   metav1.NewTime(time.Now().Add(-2 * time.Hour)),
 			expectDone:       false,
 			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
-			expectMsgContain: "timeoutSeconds",
+			expectMsgContain: `last waiting reason: ImagePullBackOff: Back-off pulling image "installer:1.4.0"`,
+		},
+		{
+			name: "no container status past the deadline names the container",
+			pod: podWithEphemeral(
+				&corev1.EphemeralContainer{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: existingECName}},
+				nil),
+			lastTransition:   metav1.NewTime(time.Now().Add(-2 * time.Hour)),
+			expectDone:       false,
+			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+			expectMsgContain: existingECName + " did not start within timeoutSeconds",
 		},
 		{
 			name: "running past the deadline fails",
@@ -3012,10 +3077,15 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 	}
 }
 
-func TestPerformInstallerUpgrade_StaleCacheIdempotent(t *testing.T) {
+func TestPerformInstallerUpgrade_StaleCacheConflict(t *testing.T) {
 	box := newInstallerTestSandbox(&agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"}, "ops-uid-1")
 	stale := newInstallerRunningPod()
 	control, patchCalls := newInstallerTestControl(t, nil, stale.DeepCopy(), box.DeepCopy())
+	// Pin the observed snapshot to the stored resourceVersion so the injection
+	// carries a real optimistic-lock precondition.
+	var stored corev1.Pod
+	require.NoError(t, control.Get(context.Background(), client.ObjectKeyFromObject(stale), &stored))
+	stale.ResourceVersion = stored.ResourceVersion
 	newStatus := &agentsv1alpha1.SandboxStatus{
 		Phase: agentsv1alpha1.SandboxUpgrading,
 		Conditions: []metav1.Condition{{
@@ -3032,20 +3102,19 @@ func TestPerformInstallerUpgrade_StaleCacheIdempotent(t *testing.T) {
 	assert.False(t, done)
 	assert.Equal(t, 1, *patchCalls)
 
-	// A second reconcile may still read the pre-injection snapshot. The
-	// deterministic name makes its patch merge into the existing entry
-	// instead of appending a duplicate installer.
+	// A second reconcile may still read the pre-injection snapshot; the
+	// resourceVersion precondition must reject the stale write.
 	followupStatus := newStatus.DeepCopy()
 	done, err = control.performInstallerUpgrade(context.Background(),
 		EnsureFuncArgs{Pod: stale, Box: box, NewStatus: followupStatus}, &followupStatus.Conditions[0])
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.True(t, apierrors.IsConflict(err))
 	assert.False(t, done)
 	assert.Equal(t, 2, *patchCalls)
 
-	var updated corev1.Pod
-	require.NoError(t, control.Get(context.Background(), client.ObjectKeyFromObject(stale), &updated))
-	require.Len(t, updated.Spec.EphemeralContainers, 1, "stale pod must not trigger a duplicate injection")
-	assert.Equal(t, installerContainerName("ops-uid-1"), updated.Spec.EphemeralContainers[0].Name)
+	require.NoError(t, control.Get(context.Background(), client.ObjectKeyFromObject(stale), &stored))
+	require.Len(t, stored.Spec.EphemeralContainers, 1, "stale pod must not trigger a duplicate injection")
+	assert.Equal(t, installerContainerName("ops-uid-1"), stored.Spec.EphemeralContainers[0].Name)
 }
 
 func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {

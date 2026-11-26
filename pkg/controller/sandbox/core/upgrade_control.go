@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"strconv"
@@ -672,11 +671,12 @@ func nextInstallerContainerName(pod *corev1.Pod, patchVersion string) (string, s
 }
 
 // performInstallerUpgrade drives the Installing step of an InstallerUpdate
-// upgrade. It resolves the target container, guards PID-namespace ownership,
-// injects the installer ephemeral container through the pods/ephemeralcontainers
-// subresource at most once per patch version, and evaluates its termination.
-// It returns done=true when the installer exited successfully and the upgrade
-// may proceed to PostUpgrade.
+// upgrade. It guards the Pod (missing, terminating, PID-namespace ownership),
+// then observes an already-injected installer and evaluates its termination;
+// only when injecting does it resolve the target container. Injection goes
+// through the pods/ephemeralcontainers subresource at most once per patch
+// version. It returns done=true when the installer exited successfully and the
+// upgrade may proceed to PostUpgrade.
 func (r *UpgradeControl) performInstallerUpgrade(ctx context.Context, args EnsureFuncArgs, upgradeCond *metav1.Condition) (bool, error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
@@ -711,10 +711,36 @@ func (r *UpgradeControl) performInstallerUpgrade(ctx context.Context, args Ensur
 		return false, nil
 	}
 
-	// Step 1: resolve the target container. The selector may match sandboxes
-	// that did not exist at admission time, so this is resolved here rather
-	// than in the webhook.
+	// The target container must own its PID namespace. Under
+	// shareProcessNamespace or hostPID, PID 1 is the pause container or the
+	// node's init, so /proc/1/root names the wrong rootfs and the installer's
+	// own targeting self-check cannot detect it. Both fields are immutable on
+	// a running Pod, so this static guard runs with the other Pod guards,
+	// before any observation or lookup.
+	if pod.Spec.ShareProcessNamespace != nil && *pod.Spec.ShareProcessNamespace {
+		r.setInstallingFailed(upgradeCond, newStatus, box,
+			"pod sets shareProcessNamespace: true, so PID 1 is not the target container and /proc/1/root names the wrong rootfs")
+		return false, nil
+	}
+	if pod.Spec.HostPID {
+		r.setInstallingFailed(upgradeCond, newStatus, box,
+			"pod sets hostPID: true, so PID 1 is not the target container and /proc/1/root names the wrong rootfs")
+		return false, nil
+	}
+
+	// Observe an existing installer before any template or target lookup: an
+	// unavailable TemplateRef must not mask an installer that already exited,
+	// and the observation path needs no API reads.
+	timeoutSeconds := ptr.Deref(installer.TimeoutSeconds, int32(defaultInstallerTimeoutSeconds))
 	deadline := InstallerUpgradeDeadline(box, newStatus)
+	ecName, injectedName := nextInstallerContainerName(pod, policy.PatchVersion)
+	if injectedName != "" {
+		return r.evaluateInstallerStatus(ctx, box, pod, upgradeCond, newStatus, injectedName, timeoutSeconds, deadline), nil
+	}
+
+	// Resolve the target container only when injecting. The selector may match
+	// sandboxes that did not exist at admission time, so this is resolved here
+	// rather than in the webhook.
 	targetName := installer.TargetContainerName
 	if targetName == "" {
 		template, err := utils.GetTemplateSpec(ctx, r.Client, box.Namespace, &box.Spec.EmbeddedSandboxTemplate)
@@ -745,26 +771,6 @@ func (r *UpgradeControl) performInstallerUpgrade(ctx context.Context, args Ensur
 		return false, nil
 	}
 
-	// Step 2: the target container must own its PID namespace. Under
-	// shareProcessNamespace or hostPID, PID 1 is the pause container or the
-	// node's init, so /proc/1/root names the wrong rootfs and the installer's
-	// own targeting self-check cannot detect it.
-	if pod.Spec.ShareProcessNamespace != nil && *pod.Spec.ShareProcessNamespace {
-		r.setInstallingFailed(upgradeCond, newStatus, box,
-			"pod sets shareProcessNamespace: true, so PID 1 is not the target container and /proc/1/root names the wrong rootfs")
-		return false, nil
-	}
-	if pod.Spec.HostPID {
-		r.setInstallingFailed(upgradeCond, newStatus, box,
-			"pod sets hostPID: true, so PID 1 is not the target container and /proc/1/root names the wrong rootfs")
-		return false, nil
-	}
-
-	timeoutSeconds := ptr.Deref(installer.TimeoutSeconds, int32(defaultInstallerTimeoutSeconds))
-	ecName, injectedName := nextInstallerContainerName(pod, policy.PatchVersion)
-	if injectedName != "" {
-		return r.evaluateInstallerStatus(ctx, box, pod, upgradeCond, newStatus, injectedName, timeoutSeconds, deadline), nil
-	}
 	if !deadline.IsZero() && !time.Now().Before(deadline) {
 		r.setInstallingFailed(upgradeCond, newStatus, box, fmt.Sprintf(
 			"installer container %s could not be injected within timeoutSeconds=%d", ecName, timeoutSeconds))
@@ -791,18 +797,15 @@ func (r *UpgradeControl) performInstallerUpgrade(ctx context.Context, args Ensur
 
 	logger = logger.WithValues("container", ecName)
 	ec := buildInstallerEphemeralContainer(ecName, installer, policy.PatchVersion, target, box)
-	// The subresource only accepts appends, so carry the existing entries
-	// unchanged and add the installer at the end instead of replacing the list.
-	ecs := make([]corev1.EphemeralContainer, 0, len(pod.Spec.EphemeralContainers)+1)
-	ecs = append(ecs, pod.Spec.EphemeralContainers...)
-	ecs = append(ecs, ec)
-	ecsJSON, err := json.Marshal(ecs)
-	if err != nil {
-		return false, err
-	}
-	patchBody := fmt.Sprintf(`{"spec":{"ephemeralContainers":%s}}`, ecsJSON)
-	if err := r.SubResource("ephemeralcontainers").Patch(ctx, pod,
-		client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
+	// The subresource only accepts appends: diff a copy with the installer
+	// added at the end. The optimistic lock pins the patch to the observed
+	// resourceVersion, so a write from a stale cache is rejected with a
+	// Conflict and retried from a fresh Pod instead of racing another
+	// injection.
+	modified := pod.DeepCopy()
+	modified.Spec.EphemeralContainers = append(modified.Spec.EphemeralContainers, ec)
+	if err := r.SubResource("ephemeralcontainers").Patch(ctx, modified,
+		client.StrategicMergeFrom(pod, client.MergeFromWithOptimisticLock{})); err != nil {
 		logger.Error(err, "Failed to inject installer ephemeral container")
 		if errors.IsForbidden(err) || errors.IsInvalid(err) {
 			r.setInstallingFailed(upgradeCond, newStatus, box, fmt.Sprintf(
@@ -857,9 +860,18 @@ func (r *UpgradeControl) evaluateInstallerStatus(
 			}
 		}
 		if deadlineExceeded() {
-			r.setInstallingFailed(upgradeCond, newStatus, box, fmt.Sprintf(
-				"installer container %s did not start within timeoutSeconds=%d; the ephemeral container cannot be terminated and keeps running until the Pod dies",
-				ecName, timeoutSeconds))
+			msg := fmt.Sprintf(
+				"installer container %s did not start within timeoutSeconds=%d", ecName, timeoutSeconds)
+			if ecStatus != nil {
+				// Preserve the kubelet's last waiting reason so operators can
+				// tell a stuck image pull from a container that never started.
+				msg += fmt.Sprintf("; last waiting reason: %s", ecStatus.State.Waiting.Reason)
+				if ecStatus.State.Waiting.Message != "" {
+					msg += ": " + ecStatus.State.Waiting.Message
+				}
+			}
+			msg += "; the ephemeral container cannot be terminated and keeps running until the Pod dies"
+			r.setInstallingFailed(upgradeCond, newStatus, box, msg)
 			return false
 		}
 		return false

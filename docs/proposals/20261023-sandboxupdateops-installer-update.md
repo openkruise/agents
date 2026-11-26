@@ -1096,24 +1096,20 @@ transition directly to `PreUpgrade`; the abandonment check keys off
 **New `Installing` step.** A `performInstallerUpgrade` function replaces
 `Checkpointing` + `UpgradePod` and does seven things:
 
-1. **Resolve the target container.** `installer.targetContainerName`, or
-   `spec.template.spec.containers[0].name` when empty — the same convention
-   `Sandbox.SetImage` uses
-   (`pkg/sandbox-manager/infra/sandboxcr/sandbox.go:468`). If the name is absent
-   from the resolved Pod spec, set `InstallingFailed` with an explanatory message;
-   this cannot be caught at admission because the selector may match sandboxes
-   that do not exist yet.
-2. **Guard PID namespace ownership.** If the resolved Pod spec sets
+1. **Guard PID namespace ownership.** Alongside the missing- and
+   terminating-Pod guards, before any observation or lookup: if the Pod spec sets
    `shareProcessNamespace` or `hostPID`, set `InstallingFailed` with an explanatory
    message. PID 1 would then be `pause` or the node's init, so `/proc/1/root` names
    the wrong rootfs and the installer's own `-ef` guard cannot detect it — see
    [PID 1 in the target container](#pid-1-in-the-target-container). Like the target
-   name resolution in step 1, this is a controller-side check rather than an
+   name resolution in step 3, this is a controller-side check rather than an
    admission check, because the selector may match sandboxes that do not exist yet.
-3. **Require a live target.** The Pod must be `Running` and the target's
-   `ContainerStatus.State.Running` must be non-nil. Otherwise wait — do not fail,
-   since a transient restart should not abort the batch.
-4. **Do not inject twice.** Scan `pod.Spec.EphemeralContainers` backwards for the
+   Both fields are immutable on a running Pod, so the check is a static spec
+   guard with no API reads: it can run before observation without masking an
+   installer that already exited, and the controller could never have injected
+   an installer into such a Pod in the first place.
+2. **Observe before resolving; do not inject twice.** Scan
+   `pod.Spec.EphemeralContainers` backwards for the
    first entry carrying the `SANDBOX_INSTALLER_PATCH_VERSION` env — the newest
    injected installer. Compare that env's **value** with `patchVersion`, never the
    container name: a matching value means this patch version is already injected,
@@ -1123,6 +1119,20 @@ transition directly to `PreUpgrade`; the abandonment check keys off
    bounds the install to one container per `patchVersion` and replaces any need
    for an attempt counter; a requeue after a partial write finds the recorded
    version and evaluates the existing container instead of injecting again.
+   This observation runs before any template or target lookup: it needs no API
+   reads, and an unavailable `TemplateRef` must not mask an installer that
+   already exited successfully.
+3. **Resolve the target container, only when injecting.**
+   `installer.targetContainerName`, or
+   `spec.template.spec.containers[0].name` when empty — the same convention
+   `Sandbox.SetImage` uses
+   (`pkg/sandbox-manager/infra/sandboxcr/sandbox.go:468`). If the name is absent
+   from the resolved Pod spec, set `InstallingFailed` with an explanatory message;
+   this cannot be caught at admission because the selector may match sandboxes
+   that do not exist yet.
+4. **Require a live target.** The Pod must be `Running` and the target's
+   `ContainerStatus.State.Running` must be non-nil. Otherwise wait — do not fail,
+   since a transient restart should not abort the batch.
 5. **Inject.** Append one `EphemeralContainer` named
    `installer-<hash8(patchVersion)>` for the first injection of that version.
    When entries for the same version already exist but a newer installer was
@@ -1131,16 +1141,16 @@ transition directly to `PreUpgrade`; the abandonment check keys off
    existing container — regular, init, or a plain ephemeral container such as
    `kubectl debug` — already occupies the candidate name, the sequence number
    is bumped until the name is free. The name
-   is fully deterministic, so a retry from a stale informer cache patches the
-   identical entry and the strategic merge by name turns it into a no-op
-   instead of a duplicate injection. The container carries
+   stays deterministic so a rollback re-install is reproducible. The container
+   carries
    the resolved image, command, env, security context and image pull policy, with
-   `TargetContainerName` set. The patch carries the existing ephemeral containers
-   unchanged plus the new entry at the end, because the `ephemeralcontainers`
-   subresource only accepts appends — replacing the list would be rejected. Write
-   it through the `ephemeralcontainers` subresource — the same pattern already
-   used for `pods/resize` at
-   `pkg/utils/inplaceupdate/inplace_update.go:524`. A `Conflict` means the Pod
+   `TargetContainerName` set. The write is a
+   `client.StrategicMergeFrom(pod, client.MergeFromWithOptimisticLock{})` patch
+   of a Pod copy with the installer appended, sent through the
+   `ephemeralcontainers` subresource: the strategic merge diff contains only the
+   new entry, leaving existing entries untouched as the subresource requires,
+   and the `resourceVersion` precondition rejects a write computed from a stale
+   informer cache. A `Conflict` means the Pod
    changed underneath us: requeue and retry the whole step, recomputing from the
    fresh Pod rather than injecting twice. This is one injection per
    `patchVersion`; there is no second attempt.
@@ -1156,7 +1166,10 @@ transition directly to `PreUpgrade`; the abandonment check keys off
      the same `installer.timeoutSeconds` deadline, measured from when the
      `Upgrading` condition entered the `Installing` reason rather than from
      `State.Running.StartedAt`, which never exists for a container that never
-     started.
+     started. When the deadline turns a waiting container into
+     `InstallingFailed`, the durable message carries the container name and the
+     kubelet's last waiting reason and message, so an operator can distinguish
+     a stuck image pull from a running installer that timed out.
    - `State.Terminated.ExitCode == 0` → success; proceed.
    - `State.Terminated.ExitCode == 125` → `InstallingFailed`, message "container
      runtime does not support namespace targeting". Reported distinctly because no
@@ -1308,11 +1321,11 @@ operator's choice.
   this; hash `patchVersion` rather than
   embedding it, since the value is opaque and may be up to 63 characters, which
   would crowd the budget. The hash prefix keeps the name auditable per version.
-  Deterministic naming is what makes injection idempotent under a stale
-  informer cache: two reconciles reading the same pre-injection Pod compute the
-  same name, and the `ephemeralcontainers` strategic merge by name collapses
-  the second patch into the first entry rather than appending a duplicate. No
-  resourceVersion-expectation guard is needed for this path. Uniqueness against
+  Stale-cache safety comes from the optimistic-lock `resourceVersion`
+  precondition on the injection patch: a write computed from a pre-injection
+  snapshot is rejected with a `Conflict` and retried from a fresh Pod, so no
+  resourceVersion-expectation guard is needed for this path. Deterministic
+  naming keeps rollback re-installs reproducible. Uniqueness against
   regular, init and plain ephemeral containers is enforced by bumping the `-N`
   sequence number whenever the candidate name is already occupied.
 - **No probes, no ports, no lifecycle hooks** on the installer container — all
@@ -1602,8 +1615,10 @@ existing tables per the repository's test rules):
   `PostUpgrade`; exit 125 → `InstallingFailed` with the namespace-targeting
   message; exit 126 → `InstallingFailed` with the absolute-path message; exit 1 →
   `InstallingFailed` with truncated stdout/stderr; `ImagePullBackOff` → stays in
-  `Installing` until the deadline, then `InstallingFailed`; running past
-  `timeoutSeconds` → `InstallingFailed`.
+  `Installing` until the deadline, then `InstallingFailed` with the container
+  name and the kubelet's last waiting reason and message in the condition; a
+  container with no status yet still names the container at the deadline;
+  running past `timeoutSeconds` → `InstallingFailed`.
 - Single-injection guarantee: reconciling a sandbox whose newest installer entry
   records the current `patchVersion` in `SANDBOX_INSTALLER_PATCH_VERSION` performs
   no second injection and evaluates the existing entry instead, regardless of its
@@ -1612,7 +1627,14 @@ existing tables per the repository's test rules):
   contract env are ignored by the decision. Re-installing a version whose
   installer is buried under a newer one appends a `-N` sequence entry after the
   highest existing suffix, and a second reconcile from a stale pre-injection
-  Pod patches the identical name without creating a duplicate.
+  Pod is rejected with a `Conflict` by the `resourceVersion` precondition
+  without creating a duplicate. The test interceptor applies the generated
+  patch through the real strategic merge path, enforces the precondition, and
+  rejects modifications to existing ephemeral containers as the API server does.
+  Observation precedes target resolution: a completed or failed installer is
+  evaluated even when the referenced `SandboxTemplate` no longer exists, with
+  no API lookup and no patch on that path. The PID-namespace guards run before
+  observation, together with the missing- and terminating-Pod guards.
 - `EnsureSandboxUpgraded` under installer policy: `PreUpgrade` → `Installing` →
   `PostUpgrade` → `Succeeded`, with `Checkpointing` skipped and
   `CleanupCheckpoints` not called; `ResumeSucceed` advances to `PreUpgrade`
@@ -1882,6 +1904,39 @@ individually.
       for a given observed Pod, so stale-cache idempotency is preserved.
 - [ ] 11/26/2026: Extended the collision check to regular and init containers,
       matching the API server's Pod-wide container-name uniqueness rule.
+- [ ] 11/26/2026: Replaced the hand-built append JSON with
+      `client.StrategicMergeFrom(pod, client.MergeFromWithOptimisticLock{})`
+      over a Pod copy with the installer appended. The `resourceVersion`
+      precondition now rejects stale-cache writes with a `Conflict` instead of
+      relying on merge idempotency; deterministic naming is kept for
+      reproducible rollback re-installs. The unit-test interceptor applies
+      patches through the real strategic merge path and enforces
+      ephemeral-container immutability, which the previous hand merge silently
+      bypassed.
+- [ ] 11/26/2026: Moved the already-injected observation ahead of target
+      resolution. After the missing- and terminating-Pod guards, the controller
+      looks for the newest installer and evaluates its status before any
+      template or target lookup; resolution and the PID-namespace guards run
+      only on the injection path. The observation needs no API reads, and an
+      unavailable `TemplateRef` can no longer mask an installer that already
+      exited successfully — previously a deleted template kept a completed
+      install stuck retrying resolution until the deadline turned it into a
+      false `InstallingFailed`.
+- [ ] 11/26/2026: Preserved the kubelet's last waiting reason and message in the
+      `InstallingFailed` condition when a never-started installer hits the
+      deadline. Previously the `ImagePullBackOff` reason was only logged and the
+      durable message said merely "did not start within timeoutSeconds", so an
+      operator could not distinguish a stuck image pull from a running
+      installer timing out. The message now names the container and appends
+      `last waiting reason: <reason>: <kubelet message>` when a waiting status
+      exists.
+- [ ] 11/26/2026: Moved the `shareProcessNamespace`/`hostPID` guards ahead of
+      installer observation, grouped with the missing- and terminating-Pod
+      guards and before the deadline computation. Both fields are immutable on
+      a running Pod, so the check is a static spec guard with no API reads and
+      cannot mask a completed install the way a failing `TemplateRef` lookup
+      could; the controller never injects into such a Pod, so no legitimate
+      installer outcome is lost by failing first.
 - [ ] Verify the prefix-redirect pattern end-to-end against a real OpenClaw and a
       real Hermes Agent sandbox, including whether lifecycle scripts and native
       builds survive the libc-family match requirement, and whether
