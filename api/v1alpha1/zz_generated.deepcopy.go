@@ -2310,6 +2310,13 @@ func (in *SandboxSpec) DeepCopyInto(out *SandboxSpec) {
 		*out = make([]RuntimeConfig, len(*in))
 		copy(*out, *in)
 	}
+	if in.OndemandVolumesMount != nil {
+		in, out := &in.OndemandVolumesMount, &out.OndemandVolumesMount
+		*out = make([]CSIMountConfig, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 	if in.PauseTime != nil {
 		in, out := &in.PauseTime, &out.PauseTime
 		*out = (*in).DeepCopy()
