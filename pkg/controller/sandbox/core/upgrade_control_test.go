@@ -2234,6 +2234,8 @@ func TestNextInstallerContainerName(t *testing.T) {
 	tests := []struct {
 		name         string
 		ecs          []corev1.EphemeralContainer
+		regular      []corev1.Container
+		init         []corev1.Container
 		wantNext     string
 		wantInjected string
 	}{
@@ -2327,10 +2329,31 @@ func TestNextInstallerContainerName(t *testing.T) {
 			ecs:      []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: base + "-5"}}},
 			wantNext: base,
 		},
+		{
+			name:     "regular container occupying the base name bumps to suffix 1",
+			regular:  []corev1.Container{{Name: base}},
+			wantNext: base + "-1",
+		},
+		{
+			name:     "init container occupying the base name bumps to suffix 1",
+			init:     []corev1.Container{{Name: base}},
+			wantNext: base + "-1",
+		},
+		{
+			name:     "collisions across container kinds bump until the name is free",
+			regular:  []corev1.Container{{Name: base}},
+			init:     []corev1.Container{{Name: base + "-1"}},
+			ecs:      []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: base + "-2"}}},
+			wantNext: base + "-3",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pod := &corev1.Pod{Spec: corev1.PodSpec{EphemeralContainers: tt.ecs}}
+			pod := &corev1.Pod{Spec: corev1.PodSpec{
+				EphemeralContainers: tt.ecs,
+				Containers:          tt.regular,
+				InitContainers:      tt.init,
+			}}
 			next, injected := nextInstallerContainerName(pod, "ops-uid-1")
 			assert.Equal(t, tt.wantNext, next)
 			assert.Equal(t, tt.wantInjected, injected)

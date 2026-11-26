@@ -1127,10 +1127,10 @@ transition directly to `PreUpgrade`; the abandonment check keys off
    `installer-<hash8(patchVersion)>` for the first injection of that version.
    When entries for the same version already exist but a newer installer was
    appended after them (a re-install of an older version), the new entry takes
-   the next sequence number after the existing ones: `-1`, `-2`, ... If a plain
-   ephemeral container (for example a `kubectl debug` container) already
-   occupies the candidate name, the sequence number is bumped until the name
-   is free. The name
+   the next sequence number after the existing ones: `-1`, `-2`, ... If any
+   existing container — regular, init, or a plain ephemeral container such as
+   `kubectl debug` — already occupies the candidate name, the sequence number
+   is bumped until the name is free. The name
    is fully deterministic, so a retry from a stale informer cache patches the
    identical entry and the strategic merge by name turns it into a no-op
    instead of a duplicate injection. The container carries
@@ -1313,8 +1313,8 @@ operator's choice.
   same name, and the `ephemeralcontainers` strategic merge by name collapses
   the second patch into the first entry rather than appending a duplicate. No
   resourceVersion-expectation guard is needed for this path. Uniqueness against
-  plain ephemeral containers is enforced by bumping the `-N` sequence number
-  whenever the candidate name is already occupied.
+  regular, init and plain ephemeral containers is enforced by bumping the `-N`
+  sequence number whenever the candidate name is already occupied.
 - **No probes, no ports, no lifecycle hooks** on the installer container — all
   rejected by the API server. Readiness is judged solely from
   `ephemeralContainerStatuses`.
@@ -1880,6 +1880,8 @@ individually.
       debug` container) already occupies the candidate name, the `-N` sequence
       number is bumped until the name is free. The choice stays deterministic
       for a given observed Pod, so stale-cache idempotency is preserved.
+- [ ] 11/26/2026: Extended the collision check to regular and init containers,
+      matching the API server's Pod-wide container-name uniqueness rule.
 - [ ] Verify the prefix-redirect pattern end-to-end against a real OpenClaw and a
       real Hermes Agent sandbox, including whether lifecycle scripts and native
       builds survive the libc-family match requirement, and whether
