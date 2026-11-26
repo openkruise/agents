@@ -400,7 +400,10 @@ func (i *Infra) GetTemplate(ctx context.Context, namespace, name string) (infra.
 	}
 	template, err := i.Cache.PickSandboxSet(ctx, cache.PickSandboxSetOptions{Namespace: namespace, Name: name})
 	if err != nil {
-		return infra.TemplateInfo{}, err
+		if errors.Is(err, cache.ErrSandboxSetNotFound) {
+			return infra.TemplateInfo{}, managererrors.WrapError(managererrors.ErrorNotFound, err, "template %s not found", name)
+		}
+		return infra.TemplateInfo{}, managererrors.WrapError(managererrors.ErrorInternal, err, "failed to get template %s: %v", name, err)
 	}
 	return templateInfoOf(template), nil
 }

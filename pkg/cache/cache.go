@@ -429,7 +429,7 @@ func (c *Cache) PickSandboxSet(ctx context.Context, opts PickSandboxSetOptions) 
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("sandboxset %s not found in cache", opts.Name)
+		return nil, fmt.Errorf("%w: %s", ErrSandboxSetNotFound, opts.Name)
 	}
 	return result, nil
 }

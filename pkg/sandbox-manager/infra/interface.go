@@ -233,6 +233,7 @@ type Infrastructure interface {
 	GetSandbox(ctx context.Context, opts GetSandboxOptions) (Sandbox, error)
 	IssueTrafficAccessToken(ctx context.Context, opts IssueTrafficAccessTokenOptions) (TrafficAccessToken, error)
 	ListTemplates(ctx context.Context, namespace string) ([]TemplateInfo, error)
+	// GetTemplate reports ErrorNotFound only when the backend determines the template is absent.
 	GetTemplate(ctx context.Context, namespace, name string) (TemplateInfo, error)
 	SelectSucceededCheckpoints(ctx context.Context, opts SelectSucceededCheckpointsOptions) ([]CheckpointInfo, error)
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)

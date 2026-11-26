@@ -80,12 +80,17 @@ func (sc *Controller) GetTemplate(r *http.Request) (web.ApiResponse[*models.Temp
 
 	template, err := sc.manager.GetTemplate(r.Context(), namespace, templateID)
 	if err != nil {
-		if errors.GetErrCode(err) == errors.ErrorUnavailable {
+		switch errors.GetErrCode(err) {
+		case errors.ErrorUnavailable:
 			return web.ApiResponse[*models.Template]{}, &web.ApiError{Code: http.StatusInternalServerError, Message: "Cache not available"}
-		}
-		return web.ApiResponse[*models.Template]{}, &web.ApiError{
-			Code:    http.StatusNotFound,
-			Message: fmt.Sprintf("Template not found: %s", templateID),
+		case errors.ErrorNotFound:
+			return web.ApiResponse[*models.Template]{}, &web.ApiError{
+				Code:    http.StatusNotFound,
+				Message: fmt.Sprintf("Template not found: %s", templateID),
+			}
+		default:
+			log.Error(err, "failed to get template", "templateID", templateID)
+			return web.ApiResponse[*models.Template]{}, &web.ApiError{Code: http.StatusInternalServerError, Message: "Failed to get template"}
 		}
 	}
 

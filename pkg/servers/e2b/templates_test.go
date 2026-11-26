@@ -18,6 +18,7 @@ package e2b
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"testing"
@@ -38,6 +39,7 @@ import (
 	"github.com/openkruise/agents/pkg/proxy"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
@@ -45,17 +47,26 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
-type listSandboxSetsSpy struct {
-	*cachetest.Cache
+type templateViewCacheSpy struct {
+	infracache.Provider
 	result    []*v1alpha1.SandboxSet
+	listErr   error
+	pickErr   error
 	called    bool
 	namespace string
 }
 
-func (s *listSandboxSetsSpy) ListSandboxSets(_ context.Context, opts infracache.ListSandboxSetsOptions) ([]*v1alpha1.SandboxSet, error) {
+func (s *templateViewCacheSpy) ListSandboxSets(_ context.Context, opts infracache.ListSandboxSetsOptions) ([]*v1alpha1.SandboxSet, error) {
 	s.called = true
 	s.namespace = opts.Namespace
-	return s.result, nil
+	return s.result, s.listErr
+}
+
+func (s *templateViewCacheSpy) PickSandboxSet(ctx context.Context, opts infracache.PickSandboxSetOptions) (*v1alpha1.SandboxSet, error) {
+	if s.pickErr != nil {
+		return nil, s.pickErr
+	}
+	return s.Provider.PickSandboxSet(ctx, opts)
 }
 
 func TestDeleteTemplate(t *testing.T) {
@@ -524,9 +535,9 @@ func TestListTemplatesUsesCacheProvider(t *testing.T) {
 	}
 	template.Spec.Template = &corev1.PodTemplateSpec{}
 	template.Spec.Template.Spec.Containers = []corev1.Container{{Resources: corev1.ResourceRequirements{Limits: limits}}}
-	spyCache := &listSandboxSetsSpy{
-		Cache:  baseCache,
-		result: []*v1alpha1.SandboxSet{template},
+	spyCache := &templateViewCacheSpy{
+		Provider: baseCache,
+		result:   []*v1alpha1.SandboxSet{template},
 	}
 
 	opts := config.InitOptions(config.SandboxManagerOptions{
@@ -577,6 +588,16 @@ func TestListTemplatesUsesCacheProvider(t *testing.T) {
 	require.NotNil(t, apiErr)
 	assert.Equal(t, http.StatusNotFound, apiErr.Code)
 	assert.False(t, spyCache.called)
+
+	t.Run("cache read failure returns internal server error", func(t *testing.T) {
+		spyCache.result = nil
+		spyCache.listErr = errors.New("cache read failed")
+		resp, apiErr := controller.ListTemplates(NewRequest(t, nil, nil, nil, user))
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
+		assert.Equal(t, "Failed to list templates: cache read failed", apiErr.Message)
+		assert.Nil(t, resp.Body)
+	})
 }
 
 func TestTemplatesCacheUnavailable(t *testing.T) {
@@ -614,13 +635,15 @@ func TestGetTemplate(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		setupPool    func(t *testing.T, controller *Controller, fc ctrlclient.Client) func()
-		templateID   string
-		user         *models.CreatedTeamAPIKey
-		expectStatus int
-		expectError  bool
-		validateFunc func(t *testing.T, template *models.Template)
+		name               string
+		setupPool          func(t *testing.T, controller *Controller, fc ctrlclient.Client) func()
+		templateID         string
+		user               *models.CreatedTeamAPIKey
+		cacheErr           error
+		cancelRequest      bool
+		expectStatus       int
+		expectErrorMessage string
+		validateFunc       func(t *testing.T, template *models.Template)
 	}{
 		{
 			name: "admin gets template across namespaces",
@@ -630,7 +653,6 @@ func TestGetTemplate(t *testing.T) {
 			templateID:   "test-tmpl-get",
 			user:         user,
 			expectStatus: http.StatusOK,
-			expectError:  false,
 			validateFunc: func(t *testing.T, template *models.Template) {
 				assert.Equal(t, "test-tmpl-get", template.TemplateID)
 				assert.True(t, template.Public)
@@ -648,20 +670,33 @@ func TestGetTemplate(t *testing.T) {
 			},
 		},
 		{
-			name:         "template not found",
-			setupPool:    func(t *testing.T, controller *Controller, fc ctrlclient.Client) func() { return nil },
-			templateID:   "non-existent-template",
-			user:         user,
-			expectStatus: http.StatusNotFound,
-			expectError:  true,
+			name:               "template not found",
+			templateID:         "non-existent-template",
+			user:               user,
+			expectStatus:       http.StatusNotFound,
+			expectErrorMessage: "Template not found: non-existent-template",
 		},
 		{
-			name:         "user is nil returns error",
-			setupPool:    func(t *testing.T, controller *Controller, fc ctrlclient.Client) func() { return nil },
-			templateID:   "test-tmpl",
-			user:         nil,
-			expectStatus: http.StatusInternalServerError,
-			expectError:  true,
+			name:               "cache read failure with a backend not-found error",
+			templateID:         "test-tmpl",
+			user:               user,
+			cacheErr:           managererrors.NewError(managererrors.ErrorNotFound, "informer index unavailable"),
+			expectStatus:       http.StatusInternalServerError,
+			expectErrorMessage: "Failed to get template",
+		},
+		{
+			name:               "request canceled before lookup",
+			templateID:         "test-tmpl",
+			user:               user,
+			cancelRequest:      true,
+			expectStatus:       http.StatusInternalServerError,
+			expectErrorMessage: "Failed to get template",
+		},
+		{
+			name:               "user is nil returns error",
+			templateID:         "test-tmpl",
+			expectStatus:       http.StatusInternalServerError,
+			expectErrorMessage: "User not found",
 		},
 	}
 
@@ -678,15 +713,25 @@ func TestGetTemplate(t *testing.T) {
 				defer cleanup()
 			}
 
+			if tt.cacheErr != nil {
+				instance := controller.manager.GetInfra().(*sandboxcr.Infra)
+				instance.Cache = &templateViewCacheSpy{Provider: instance.Cache, pickErr: tt.cacheErr}
+			}
 			req := NewRequest(t, nil, nil, map[string]string{
 				"templateID": tt.templateID,
 			}, tt.user)
+			if tt.cancelRequest {
+				ctx, cancel := context.WithCancel(req.Context())
+				cancel()
+				req = req.WithContext(ctx)
+			}
 
 			resp, apiErr := controller.GetTemplate(req)
 
-			if tt.expectError {
+			if tt.expectErrorMessage != "" {
 				require.NotNil(t, apiErr)
 				assert.Equal(t, tt.expectStatus, apiErr.Code)
+				assert.Equal(t, tt.expectErrorMessage, apiErr.Message)
 			} else {
 				require.Nil(t, apiErr)
 				assert.Equal(t, tt.expectStatus, resp.Code)

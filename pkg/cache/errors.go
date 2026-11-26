@@ -25,6 +25,9 @@ import (
 
 var (
 	ErrSandboxNotFound = errors.New("sandbox not found in cache")
+	// ErrSandboxSetNotFound reports that no SandboxSet is indexed for the
+	// requested template.
+	ErrSandboxSetNotFound = errors.New("sandboxset not found in cache")
 	// ErrCheckpointNotFound reports that no Checkpoint is indexed for the ID.
 	// Cache read failures stay distinct so callers can avoid treating an
 	// infrastructure error as absence.

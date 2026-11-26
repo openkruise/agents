@@ -46,6 +46,7 @@ func TestSandboxSetLookupDoesNotWait(t *testing.T) {
 			{Namespace: "team-a", Name: "missing"},
 		} {
 			_, err := c.PickSandboxSet(t.Context(), opts)
+			require.ErrorIs(t, err, cache.ErrSandboxSetNotFound)
 			require.ErrorContains(t, err, "not found in cache")
 		}
 		ctx, cancel := context.WithCancel(t.Context())

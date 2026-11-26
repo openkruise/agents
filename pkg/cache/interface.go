@@ -42,6 +42,7 @@ type Provider interface {
 
 	GetCheckpoint(ctx context.Context, opts GetCheckpointOptions) (*agentsv1alpha1.Checkpoint, error)
 
+	// PickSandboxSet returns an error wrapping ErrSandboxSetNotFound for a definitive miss.
 	PickSandboxSet(ctx context.Context, opts PickSandboxSetOptions) (*agentsv1alpha1.SandboxSet, error)
 
 	ListSandboxSets(ctx context.Context, opts ListSandboxSetsOptions) ([]*agentsv1alpha1.SandboxSet, error)
