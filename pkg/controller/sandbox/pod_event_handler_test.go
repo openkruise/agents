@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	_ "github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
@@ -48,6 +49,28 @@ func TestIsActivePodUpdate(t *testing.T) {
 		expected    bool
 		description string
 	}{
+		{
+			name: "template hash changed without status change",
+			oldPod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{agentsv1alpha1.PodLabelTemplateHash: "old"},
+			}},
+			newPod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{agentsv1alpha1.PodLabelTemplateHash: "target"},
+			}},
+			expected: true,
+		},
+		{
+			name:     "resource version alone changed",
+			oldPod:   &corev1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "10"}},
+			newPod:   &corev1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "20"}},
+			expected: false,
+		},
+		{
+			name:     "unrelated metadata changed",
+			oldPod:   &corev1.Pod{},
+			newPod:   &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"unrelated": "value"}}},
+			expected: false,
+		},
 		{
 			name: "Phase changed from Pending to Running",
 			oldPod: &corev1.Pod{
@@ -1611,6 +1634,23 @@ func TestSandboxPodEventHandler_Update(t *testing.T) {
 		expectEnqueue      bool
 	}{
 		{
+			name:               "template hash response wakes cache wait without status change",
+			featureGateEnabled: true,
+			oldPod: func() *corev1.Pod {
+				p := newAgentPod("sbx-1", "default")
+				p.Labels = map[string]string{agentsv1alpha1.PodLabelTemplateHash: "old"}
+				p.ResourceVersion = "10"
+				return p
+			}(),
+			newPod: func() *corev1.Pod {
+				p := newAgentPod("sbx-1", "default")
+				p.Labels = map[string]string{agentsv1alpha1.PodLabelTemplateHash: "target"}
+				p.ResourceVersion = "20"
+				return p
+			}(),
+			expectEnqueue: true,
+		},
+		{
 			name:               "feature gate enabled - active update enqueued",
 			featureGateEnabled: true,
 			oldPod: func() *corev1.Pod {
@@ -1711,9 +1751,21 @@ func TestSandboxPodEventHandler_Delete(t *testing.T) {
 			q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
 			defer q.ShutDown()
 
-			handler := &SandboxPodEventHandler{}
-			handler.Delete(context.Background(), event.TypedDeleteEvent[client.Object]{Object: tt.pod}, q)
+			pod := tt.pod.DeepCopy()
+			pod.UID = types.UID(t.Name())
+			pod.ResourceVersion = "10"
+			expected := pod.DeepCopy()
+			expected.ResourceVersion = "20"
+			core.ResourceVersionExpectations.Expect(expected)
+			t.Cleanup(func() { core.ResourceVersionExpectations.Delete(expected) })
+			isSatisfied, _ := core.ResourceVersionExpectations.IsSatisfied(pod)
+			assert.False(t, isSatisfied)
 
+			handler := &SandboxPodEventHandler{}
+			handler.Delete(context.Background(), event.TypedDeleteEvent[client.Object]{Object: pod}, q)
+
+			isSatisfied, _ = core.ResourceVersionExpectations.IsSatisfied(pod)
+			assert.Equal(t, tt.expectEnqueue, isSatisfied, "only clear expectations for managed Pods")
 			assert.Equal(t, tt.expectEnqueue, q.Len() > 0)
 			if tt.expectEnqueue {
 				item, _ := q.Get()

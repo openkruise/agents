@@ -305,6 +305,20 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return reconcile.Result{RequeueAfter: staleCacheRequeueInterval}, nil
 	}
 
+	if pod != nil {
+		core.ResourceVersionExpectations.Observe(pod)
+		if isSatisfied, unsatisfiedDuration := core.ResourceVersionExpectations.IsSatisfied(pod); !isSatisfied {
+			if unsatisfiedDuration < expectations.ExpectationTimeout {
+				klog.FromContext(ctx).Info("Not satisfied resourceVersion for Pod, wait for cache event", "pod", klog.KObj(pod))
+				return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
+			}
+			klog.FromContext(ctx).Info("ResourceVersionExpectations unsatisfied overtime for Pod, wait for cache event timeout", "pod", klog.KObj(pod), "timeout", unsatisfiedDuration)
+			core.ResourceVersionExpectations.Delete(pod)
+			// Do not continue with a known-stale cached Pod; requeue briefly before reading it again.
+			return reconcile.Result{RequeueAfter: staleCacheRequeueInterval}, nil
+		}
+	}
+
 	defer func() {
 		if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxCreatePodRateLimitGate) ||
 			!core.IsHighPrioritySandbox(ctx, box) || err != nil {
@@ -920,15 +934,15 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			return newStatus, true
 		}
 
-		// If a pod template change requires a recreate upgrade, transition to Upgrading first;
-		// otherwise, if the sandbox is paused, transition to Paused.
+		// If a pod template change requires the upgrade lifecycle, transition to Upgrading
+		// first; otherwise, if the sandbox is paused, transition to Paused.
 		// To prevent loss of state information, the state immediately before Paused must currently be Running.
 		// Note: upgrade detection takes priority over spec.paused for all sandboxes. A user
 		// pausing a running sandbox with a pending template change will see it upgrade first
 		// and pause afterwards. This is intentional — upgrading from Running is safer than
 		// upgrading from Paused (which requires a resume-then-upgrade detour).
 		if newStatus.UpdateRevision != box.Status.UpdateRevision &&
-			core.RequiresPodReplacementUpgrade(box) {
+			core.RequiresUpgradeSandbox(box) {
 			klog.FromContext(ctx).Info("Detected upgrade trigger", "sandbox", klog.KObj(box),
 				"oldRevision", box.Status.UpdateRevision,
 				"newRevision", newStatus.UpdateRevision)
@@ -1009,6 +1023,12 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 				utils.SetSandboxCondition(newStatus, *upgradeCond)
 			}
 		}
+	}
+	// When the revision changes and the sandbox is not upgraded through an
+	// UpgradePolicy, the InplaceUpdate condition left by the previous round must
+	// be cleared, otherwise the new round may reuse its terminal state.
+	if newStatus.UpdateRevision != box.Status.UpdateRevision && !core.RequiresUpgradeSandbox(box) {
+		utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 	}
 	return newStatus, false
 }

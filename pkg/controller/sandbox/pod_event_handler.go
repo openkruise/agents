@@ -66,6 +66,7 @@ func (e *SandboxPodEventHandler) Delete(_ context.Context, evt event.TypedDelete
 	if !isAgentPod(evt.Object) {
 		return
 	}
+	core.ResourceVersionExpectations.Delete(evt.Object)
 	core.ScaleExpectation.ObserveScale(utils.GetControllerKey(evt.Object), expectations.Delete, evt.Object.GetName())
 	w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.Object)})
 }
@@ -116,6 +117,10 @@ func isActivePodUpdate(oldObj, newObj *corev1.Pod) bool {
 	rcCond1 := utils.GetPodCondition(&oldObj.Status, core.PodConditionResetComplete)
 	rcCond2 := utils.GetPodCondition(&newObj.Status, core.PodConditionResetComplete)
 	if !isPodConditionEqual(rcCond1, rcCond2) {
+		return true
+	}
+	// The final in-place write may only change spec and metadata; hash changes must wake version waiters.
+	if oldObj.Labels[agentsv1alpha1.PodLabelTemplateHash] != newObj.Labels[agentsv1alpha1.PodLabelTemplateHash] {
 		return true
 	}
 	// for in-place upgrade scenarios

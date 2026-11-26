@@ -501,6 +501,11 @@ var _ = Describe("Sandbox Upgrade Lifecycle", func() {
 		By("Recording initial update revision")
 		Expect(sandbox.Status.UpdateRevision).NotTo(BeEmpty())
 		initialRevision := sandbox.Status.UpdateRevision
+		initialPod := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+		}, initialPod)).To(Succeed())
 
 		By("Triggering upgrade: change image, remove volume2, add volume3")
 		latest := &agentsv1alpha1.Sandbox{}
@@ -589,6 +594,15 @@ var _ = Describe("Sandbox Upgrade Lifecycle", func() {
 		Expect(volNames).To(HaveKey("volume1"))
 		Expect(volNames).To(HaveKey("volume3"))
 		Expect(volNames).NotTo(HaveKey("volume2"))
+
+		By("Verifying that Recreate replaced the Pod and emitted replacement and upgrade success events")
+		Expect(pod.UID).NotTo(Equal(initialPod.UID))
+		Eventually(func(g Gomega) {
+			reasons := sandboxEventReasons(ctx, g, sandbox)
+			g.Expect(reasons).To(HaveKey("UpgradePodReplaced"))
+			g.Expect(reasons).To(HaveKey("UpgradeSucceeded"))
+			g.Expect(reasons).NotTo(HaveKey("UpgradePodInplaceUpdate"))
+		}, 30*time.Second, time.Second).Should(Succeed())
 	})
 
 	// Rollback scenarios
@@ -761,3 +775,16 @@ var _ = Describe("Sandbox Upgrade Lifecycle", func() {
 		Expect(rollbackPod.Spec.Containers[0].Image).To(Equal(initialImage))
 	})
 })
+
+// sandboxEventReasons returns the set of event reasons recorded for the Sandbox.
+func sandboxEventReasons(ctx context.Context, g Gomega, sbx *agentsv1alpha1.Sandbox) map[string]bool {
+	eventList := &corev1.EventList{}
+	g.Expect(k8sClient.List(ctx, eventList, client.InNamespace(sbx.Namespace))).To(Succeed())
+	reasons := map[string]bool{}
+	for _, evt := range eventList.Items {
+		if evt.InvolvedObject.Name == sbx.Name {
+			reasons[evt.Reason] = true
+		}
+	}
+	return reasons
+}
