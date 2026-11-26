@@ -164,8 +164,9 @@ require (
 
 replace k8s.io/client-go => k8s.io/client-go v0.37.2
 
-// Code generation tools, executed with `go tool -modfile=tools.mod` (Makefile)
-// and `go run -modfile=tools.mod` (hack/generate_client.sh). This file mirrors
+// Code generation tools, executed with
+// `GOWORK=off go run -mod=readonly -modfile=tools.mod` (Makefile and
+// hack/generate_client.sh). This file mirrors
 // the dependency versions of go.mod: after upgrading go.mod dependencies, apply
 // the same upgrades here and run `go mod tidy -modfile=tools.mod` (make deps)
 // to refresh tools.sum.

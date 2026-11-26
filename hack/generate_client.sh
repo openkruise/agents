@@ -5,8 +5,11 @@ set -o pipefail
 
 # Generates clientset, listers and informers in module mode: the code
 # generators are pinned as tool directives in tools.mod and run via
-# `go run -modfile=tools.mod`, so no `go install`, GOBIN, or vendored
-# GOPATH flow is involved.
+# `GOWORK=off go run -mod=readonly -modfile=tools.mod`, so no `go install`,
+# GOBIN, or vendored GOPATH flow is involved. GOWORK=off and -mod=readonly
+# resolve the generators from tools.mod, bypassing any active Go workspace
+# (incompatible with -modfile) and the main module's vendor tree (which lacks
+# the tool-only dependencies).
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${SCRIPT_ROOT}"
@@ -57,7 +60,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 echo "Generating client code for ${#input_pkgs[@]} targets"
-go run -modfile=tools.mod k8s.io/code-generator/cmd/client-gen \
+GOWORK=off go run -mod=readonly -modfile=tools.mod k8s.io/code-generator/cmd/client-gen \
     -v "${V}" \
     --go-header-file "${BOILERPLATE}" \
     --output-dir "${TMP_DIR}/clientset" \
@@ -70,7 +73,7 @@ go run -modfile=tools.mod k8s.io/code-generator/cmd/client-gen \
     "${inputs[@]}"
 
 echo "Generating lister code for ${#input_pkgs[@]} targets"
-go run -modfile=tools.mod k8s.io/code-generator/cmd/lister-gen \
+GOWORK=off go run -mod=readonly -modfile=tools.mod k8s.io/code-generator/cmd/lister-gen \
     -v "${V}" \
     --go-header-file "${BOILERPLATE}" \
     --output-dir "${TMP_DIR}/listers" \
@@ -79,7 +82,7 @@ go run -modfile=tools.mod k8s.io/code-generator/cmd/lister-gen \
     "${input_pkgs[@]}"
 
 echo "Generating informer code for ${#input_pkgs[@]} targets"
-go run -modfile=tools.mod k8s.io/code-generator/cmd/informer-gen \
+GOWORK=off go run -mod=readonly -modfile=tools.mod k8s.io/code-generator/cmd/informer-gen \
     -v "${V}" \
     --go-header-file "${BOILERPLATE}" \
     --output-dir "${TMP_DIR}/informers" \

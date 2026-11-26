@@ -269,8 +269,12 @@ KIND ?= kind
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 # controller-gen is declared as a tool directive in tools.mod (see the comment
 # near the "deps" target for the tools.mod sync mechanism) and runs through
-# the main module toolchain instead of a go-install-tool download.
-CONTROLLER_GEN ?= go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen
+# the module toolchain instead of a go-install-tool download. GOWORK=off and
+# -mod=readonly pin dependency resolution to tools.mod, bypassing any active
+# Go workspace (incompatible with -modfile) and the main module's vendor tree
+# (which lacks the tool-only dependencies); go tool cannot pass -mod, so the
+# generator is invoked with go run.
+CONTROLLER_GEN ?= GOWORK=off go run -mod=readonly -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 
