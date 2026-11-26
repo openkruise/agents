@@ -196,9 +196,14 @@ func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1
 	return nil
 }
 
-func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
+// applySandboxPatch applies the ops configuration to the sandbox. The returned
+// unclaimedConfig reports a successful write that neither started an upgrade
+// nor claimed the sandbox for pause/resume hooks; the caller must requeue to
+// re-observe such a configuration, because no sandbox event will enqueue the
+// ops for it.
+func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) (bool, error) {
 	if isInstallerUpdateOps(ops) && len(ops.Spec.Patch.Raw) > 0 && sbx.Spec.Template == nil {
-		return fmt.Errorf("InstallerUpdate template patch requires an inline template")
+		return false, fmt.Errorf("InstallerUpdate template patch requires an inline template")
 	}
 	modified := sbx.DeepCopy()
 	pauseResumeOnly := isPauseResumeOnly(ops)
@@ -271,13 +276,16 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 			modified.Annotations = map[string]string{}
 		}
 		modified.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] = agentsv1alpha1.True
-		return r.patchAndExpect(ctx, sbx, modified, "resume-trigger")
+		return false, r.patchAndExpect(ctx, sbx, modified, "resume-trigger")
 	}
 
 	if err := mergeTemplate(modified, ops); err != nil {
-		return err
+		return false, err
 	}
-	return r.patchAndExpect(ctx, sbx, modified, "update")
+	if err := r.patchAndExpect(ctx, sbx, modified, "update"); err != nil {
+		return false, err
+	}
+	return !upgrade && !pauseResumeOnly, nil
 }
 
 // applyTemplatePatch is phase 2 of the two-phase upgrade for paused sandboxes.

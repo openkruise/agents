@@ -71,7 +71,7 @@ func TestApplySandboxPatch_SuccessfulTemplatePatch(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	// Verify the sandbox was patched
@@ -112,7 +112,7 @@ func TestApplySandboxPatch_SetsUpgradePolicyRecreate(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
@@ -160,7 +160,7 @@ func TestApplySandboxPatch_CopiesLifecycle(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
@@ -199,7 +199,7 @@ func TestApplySandboxPatch_AddsTrackingLabel(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
@@ -235,7 +235,7 @@ func TestApplySandboxPatch_InvalidPatchJSON(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to apply strategic merge patch")
 }
@@ -280,7 +280,7 @@ func TestApplySandboxPatch_PatchAPIError(t *testing.T) {
 		Recorder: record.NewFakeRecorder(100),
 	}
 
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "simulated patch error")
 }
@@ -309,7 +309,7 @@ func TestApplySandboxPatch_NilLabelsCreatesMap(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
@@ -352,7 +352,7 @@ func TestApplySandboxPatch_PausedSetsResumeTriggerAnnotation(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
@@ -587,7 +587,7 @@ func TestApplySandboxPatch_AnnotationOnlyPatchKeepsContainers(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
@@ -665,7 +665,9 @@ func TestApplySandboxPatch_HookOnly_MergesHooksWithoutUpgrade(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	require.NoError(t, r.applySandboxPatch(context.Background(), sbx, ops))
+	unclaimed, err := r.applySandboxPatch(context.Background(), sbx, ops)
+	require.NoError(t, err)
+	assert.False(t, unclaimed, "pause/resume-only writes claim the sandbox")
 
 	updated := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated))
@@ -714,7 +716,8 @@ func TestApplySandboxPatch_PausedSandbox_OperationModes(t *testing.T) {
 					sbx.Spec.Paused = true
 
 					r := newTestReconciler(sbx)
-					require.NoError(t, r.applySandboxPatch(t.Context(), sbx, ops))
+					_, err := r.applySandboxPatch(t.Context(), sbx, ops)
+					require.NoError(t, err)
 
 					updated := &agentsv1alpha1.Sandbox{}
 					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
@@ -773,7 +776,8 @@ func TestApplySandboxPatch_MixedOps_AppliesHooksWithUpgrade(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	require.NoError(t, r.applySandboxPatch(context.Background(), sbx, ops))
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
+	require.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated))
@@ -856,7 +860,8 @@ func TestApplySandboxPatch_MixedOps_PausedSandbox_Phase1CarriesHooks(t *testing.
 	}
 
 	r := newTestReconciler(sbx)
-	require.NoError(t, r.applySandboxPatch(context.Background(), sbx, ops))
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
+	require.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated))
@@ -1018,7 +1023,9 @@ func TestApplySandboxPatch_UpgradeOwnership(t *testing.T) {
 			sbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] = agentsv1alpha1.True
 
 			r := newTestReconciler(sbx)
-			require.NoError(t, r.applySandboxPatch(t.Context(), sbx, ops))
+			unclaimed, err := r.applySandboxPatch(t.Context(), sbx, ops)
+			require.NoError(t, err)
+			assert.Equal(t, !tt.wantUpgrade, unclaimed)
 			updated := &agentsv1alpha1.Sandbox{}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
 			assert.Equal(t, "busybox:1.0", updated.Spec.Template.Spec.Containers[0].Image)
@@ -1284,7 +1291,7 @@ func TestApplySandboxPatch_InstallerUpdate(t *testing.T) {
 			t.Cleanup(func() { ResourceVersionExpectations.Delete(sbx) })
 			r := newTestReconciler(sbx)
 			if tt.templateRef {
-				err := r.applySandboxPatch(t.Context(), sbx, ops)
+				_, err := r.applySandboxPatch(t.Context(), sbx, ops)
 				require.ErrorContains(t, err, "requires an inline template")
 				updated := &agentsv1alpha1.Sandbox{}
 				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
@@ -1294,7 +1301,8 @@ func TestApplySandboxPatch_InstallerUpdate(t *testing.T) {
 				require.ErrorContains(t, r.applyTemplatePatch(t.Context(), sbx, ops), "requires an inline template")
 				return
 			}
-			require.NoError(t, r.applySandboxPatch(t.Context(), sbx, ops))
+			_, err := r.applySandboxPatch(t.Context(), sbx, ops)
+			require.NoError(t, err)
 
 			updated := &agentsv1alpha1.Sandbox{}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))

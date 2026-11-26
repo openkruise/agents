@@ -210,7 +210,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		for i := 0; i < toUpgrade; i++ {
 			klog.InfoS("Applying patch to sandbox", "sandbox", klog.KObj(candidates[i]), "ops", klog.KObj(ops))
 
-			if err := r.applySandboxPatch(ctx, candidates[i], ops); err != nil {
+			unclaimedConfig, err := r.applySandboxPatch(ctx, candidates[i], ops)
+			if err != nil {
 				klog.ErrorS(err, "Failed to apply patch to sandbox",
 					"sandbox", klog.KObj(candidates[i]), "ops", klog.KObj(ops))
 				r.Recorder.Eventf(ops, v1.EventTypeWarning, "PatchFailed",
@@ -221,8 +222,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			} else {
 				r.Recorder.Eventf(ops, v1.EventTypeNormal, "SandboxUpgrading",
 					"Upgrading sandbox %s", candidates[i].Name)
-				if !isInstallerUpdateOps(ops) && len(ops.Spec.Patch.Raw) > 0 && candidates[i].Status.Phase != agentsv1alpha1.SandboxUpgrading &&
-					candidates[i].Labels[agentsv1alpha1.LabelSandboxUpdateOps] != ops.Name && isSandboxTemplateMatchPatch(candidates[i], ops) {
+				if unclaimedConfig {
 					requeueConfiguration = true
 				}
 			}
