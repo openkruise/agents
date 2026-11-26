@@ -2210,14 +2210,105 @@ func TestRequiresInstallerUpgrade(t *testing.T) {
 
 func TestInstallerContainerName(t *testing.T) {
 	name := installerContainerName("ops-uid-1")
-	// DNS-label shape: installer-<8 hex chars>-<random suffix>.
-	assert.Regexp(t, `^installer-[0-9a-f]{8}-[a-z0-9]{5}$`, name)
-	// The version hash prefix is stable; the random suffix makes each call unique.
-	other := installerContainerName("ops-uid-1")
-	assert.Equal(t, name[:18], other[:18])
-	assert.NotEqual(t, name, other)
-	// Distinct patch versions produce distinct hash prefixes.
-	assert.NotEqual(t, name[:18], installerContainerName("ops-uid-2")[:18])
+	// DNS-label shape: installer-<8 hex chars>, deterministic per patch version.
+	assert.Regexp(t, `^installer-[0-9a-f]{8}$`, name)
+	// The same version always yields the same name, so a retry from a stale
+	// cache patches the identical entry instead of appending a duplicate.
+	assert.Equal(t, name, installerContainerName("ops-uid-1"))
+	// Distinct patch versions produce distinct names.
+	assert.NotEqual(t, name, installerContainerName("ops-uid-2"))
+}
+
+func TestNextInstallerContainerName(t *testing.T) {
+	base := installerContainerName("ops-uid-1")
+	installerEC := func(name, version string) corev1.EphemeralContainer {
+		return corev1.EphemeralContainer{
+			EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+				Name: name,
+				Env:  []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: version}},
+			},
+		}
+	}
+	newerEC := installerEC(installerContainerName("ops-uid-0"), "ops-uid-0")
+
+	tests := []struct {
+		name         string
+		ecs          []corev1.EphemeralContainer
+		wantNext     string
+		wantInjected string
+	}{
+		{
+			name:     "no ephemeral containers uses the base name",
+			wantNext: base,
+		},
+		{
+			name: "unrelated entries do not affect the base name",
+			ecs: []corev1.EphemeralContainer{
+				{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "debugger"}},
+				newerEC,
+			},
+			wantNext: base,
+		},
+		{
+			name:         "newest installer matching the version means already injected",
+			ecs:          []corev1.EphemeralContainer{newerEC, installerEC(base, "ops-uid-1")},
+			wantInjected: base,
+		},
+		{
+			name:         "legacy newest installer name is returned for evaluation",
+			ecs:          []corev1.EphemeralContainer{newerEC, installerEC("installer-legacy", "ops-uid-1")},
+			wantInjected: "installer-legacy",
+		},
+		{
+			name:         "trailing debug container does not hide the newest installer",
+			ecs:          []corev1.EphemeralContainer{installerEC(base, "ops-uid-1"), {EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "debugger"}}},
+			wantInjected: base,
+		},
+		{
+			name:     "buried base name gets suffix 1",
+			ecs:      []corev1.EphemeralContainer{installerEC(base, "ops-uid-1"), newerEC},
+			wantNext: base + "-1",
+		},
+		{
+			name: "suffix 1 gets suffix 2",
+			ecs: []corev1.EphemeralContainer{
+				installerEC(base, "ops-uid-1"),
+				installerEC(base+"-1", "ops-uid-1"),
+				newerEC,
+			},
+			wantNext: base + "-2",
+		},
+		{
+			name: "numbering follows the highest suffix, not the entry count",
+			ecs: []corev1.EphemeralContainer{
+				installerEC(base+"-3", "ops-uid-1"),
+				installerEC(base, "ops-uid-1"),
+				newerEC,
+			},
+			wantNext: base + "-4",
+		},
+		{
+			name:     "legacy name without a numeric suffix counts as the first entry",
+			ecs:      []corev1.EphemeralContainer{installerEC("installer-legacy", "ops-uid-1"), newerEC},
+			wantNext: base + "-1",
+		},
+		{
+			name: "entries for other versions never consume a sequence number",
+			ecs: []corev1.EphemeralContainer{
+				installerEC(base, "ops-uid-1"),
+				installerEC(base+"-7", "ops-uid-0"),
+			},
+			wantNext: base + "-1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{Spec: corev1.PodSpec{EphemeralContainers: tt.ecs}}
+			next, injected := nextInstallerContainerName(pod, "ops-uid-1")
+			assert.Equal(t, tt.wantNext, next)
+			assert.Equal(t, tt.wantInjected, injected)
+		})
+	}
 }
 
 func TestBuildInstallerEphemeralContainer(t *testing.T) {
@@ -2346,6 +2437,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 		expectErr          bool
 		expectPatches      int
 		expectEphemerals   int
+		expectECName       string
 		expectReason       string
 		expectMsgContain   string
 	}{
@@ -2387,6 +2479,54 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			expectTarget:     "sandbox",
 			expectPatches:    1,
 			expectEphemerals: 2,
+			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstalling,
+		},
+		{
+			name: "re-installing an older version appends a numbered container",
+			pod: func() *corev1.Pod {
+				p := newInstallerRunningPod()
+				p.Spec.EphemeralContainers = []corev1.EphemeralContainer{
+					{EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+						Name: existingECName,
+						Env:  []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: "ops-uid-1"}},
+					}},
+					{EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+						Name: installerContainerName("ops-uid-0"),
+						Env:  []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: "ops-uid-0"}},
+					}},
+				}
+				return p
+			}(),
+			expectTarget:     "sandbox",
+			expectPatches:    1,
+			expectEphemerals: 3,
+			expectECName:     existingECName + "-1",
+			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstalling,
+		},
+		{
+			name: "numbering continues after the highest existing suffix",
+			pod: func() *corev1.Pod {
+				p := newInstallerRunningPod()
+				p.Spec.EphemeralContainers = []corev1.EphemeralContainer{
+					{EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+						Name: existingECName,
+						Env:  []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: "ops-uid-1"}},
+					}},
+					{EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+						Name: existingECName + "-1",
+						Env:  []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: "ops-uid-1"}},
+					}},
+					{EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+						Name: installerContainerName("ops-uid-0"),
+						Env:  []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: "ops-uid-0"}},
+					}},
+				}
+				return p
+			}(),
+			expectTarget:     "sandbox",
+			expectPatches:    1,
+			expectEphemerals: 4,
+			expectECName:     existingECName + "-2",
 			expectReason:     agentsv1alpha1.SandboxUpgradingReasonInstalling,
 		},
 		{
@@ -2775,7 +2915,11 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 					assert.Equal(t, tt.pod.Spec.EphemeralContainers, updated.Spec.EphemeralContainers[:existing])
 				}
 				ec := updated.Spec.EphemeralContainers[wantEphemerals-1]
-				assert.Regexp(t, `^installer-[0-9a-f]{8}-[a-z0-9]{5}$`, ec.Name)
+				wantName := tt.expectECName
+				if wantName == "" {
+					wantName = installerContainerName("ops-uid-1")
+				}
+				assert.Equal(t, wantName, ec.Name)
 				assert.Equal(t, installer.Image, ec.Image)
 				assert.Equal(t, tt.expectTarget, ec.TargetContainerName)
 				require.NotNil(t, ec.SecurityContext)
@@ -2816,6 +2960,42 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPerformInstallerUpgrade_StaleCacheIdempotent(t *testing.T) {
+	box := newInstallerTestSandbox(&agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"}, "ops-uid-1")
+	stale := newInstallerRunningPod()
+	control, patchCalls := newInstallerTestControl(t, nil, stale.DeepCopy(), box.DeepCopy())
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxUpgrading,
+		Conditions: []metav1.Condition{{
+			Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+			Status:             metav1.ConditionFalse,
+			Reason:             agentsv1alpha1.SandboxUpgradingReasonInstalling,
+			LastTransitionTime: metav1.Now(),
+		}},
+	}
+
+	done, err := control.performInstallerUpgrade(context.Background(),
+		EnsureFuncArgs{Pod: stale, Box: box, NewStatus: newStatus}, &newStatus.Conditions[0])
+	require.NoError(t, err)
+	assert.False(t, done)
+	assert.Equal(t, 1, *patchCalls)
+
+	// A second reconcile may still read the pre-injection snapshot. The
+	// deterministic name makes its patch merge into the existing entry
+	// instead of appending a duplicate installer.
+	followupStatus := newStatus.DeepCopy()
+	done, err = control.performInstallerUpgrade(context.Background(),
+		EnsureFuncArgs{Pod: stale, Box: box, NewStatus: followupStatus}, &followupStatus.Conditions[0])
+	require.NoError(t, err)
+	assert.False(t, done)
+	assert.Equal(t, 2, *patchCalls)
+
+	var updated corev1.Pod
+	require.NoError(t, control.Get(context.Background(), client.ObjectKeyFromObject(stale), &updated))
+	require.Len(t, updated.Spec.EphemeralContainers, 1, "stale pod must not trigger a duplicate injection")
+	assert.Equal(t, installerContainerName("ops-uid-1"), updated.Spec.EphemeralContainers[0].Name)
 }
 
 func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {

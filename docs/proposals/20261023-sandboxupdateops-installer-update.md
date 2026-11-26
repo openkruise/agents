@@ -518,7 +518,7 @@ SandboxUpdateOps                       Sandbox controller                kubelet
                                      4. PreUpgrade hook (envd, inside sandbox)
                                      5. verify target container Running
                                      6. POST pods/<name>/ephemeralcontainers
-                                          name: installer-<hash8>-<random>
+                                          name: installer-<hash8>[-N]
                                           image/command/env/securityContext from spec
                                           targetContainerName: <resolved>
                                                                     |
@@ -1124,7 +1124,13 @@ transition directly to `PreUpgrade`; the abandonment check keys off
    for an attempt counter; a requeue after a partial write finds the recorded
    version and evaluates the existing container instead of injecting again.
 5. **Inject.** Append one `EphemeralContainer` named
-   `installer-<hash8(patchVersion)>-<random>`, carrying
+   `installer-<hash8(patchVersion)>` for the first injection of that version.
+   When entries for the same version already exist but a newer installer was
+   appended after them (a re-install of an older version), the new entry takes
+   the next sequence number after the existing ones: `-1`, `-2`, ... The name
+   is fully deterministic, so a retry from a stale informer cache patches the
+   identical entry and the strategic merge by name turns it into a no-op
+   instead of a duplicate injection. The container carries
    the resolved image, command, env, security context and image pull policy, with
    `TargetContainerName` set. The patch carries the existing ephemeral containers
    unchanged plus the new entry at the end, because the `ephemeralcontainers`
@@ -1295,11 +1301,15 @@ operator's choice.
 - **Container name validity.** The generated name must be a DNS label: lowercase
   alphanumerics and `-`, at most 63 characters, and unique across the Pod's
   containers, init containers and ephemeral containers.
-  `installer-<8 hex>-<random 5>` satisfies this; hash `patchVersion` rather than
+  `installer-<8 hex>` (plus a `-N` sequence number for re-installs) satisfies
+  this; hash `patchVersion` rather than
   embedding it, since the value is opaque and may be up to 63 characters, which
-  would crowd the budget. The hash prefix keeps the name auditable per version,
-  while the random suffix guarantees uniqueness across injections — the
-  already-injected guard relies on the env value, not on the name.
+  would crowd the budget. The hash prefix keeps the name auditable per version.
+  Deterministic naming is what makes injection idempotent under a stale
+  informer cache: two reconciles reading the same pre-injection Pod compute the
+  same name, and the `ephemeralcontainers` strategic merge by name collapses
+  the second patch into the first entry rather than appending a duplicate. No
+  resourceVersion-expectation guard is needed for this path.
 - **No probes, no ports, no lifecycle hooks** on the installer container — all
   rejected by the API server. Readiness is judged solely from
   `ephemeralContainerStatuses`.
@@ -1594,7 +1604,10 @@ existing tables per the repository's test rules):
   no second injection and evaluates the existing entry instead, regardless of its
   container name; a newer installer recording a different version triggers an
   append that preserves the older entries, and ephemeral containers without the
-  contract env are ignored by the decision.
+  contract env are ignored by the decision. Re-installing a version whose
+  installer is buried under a newer one appends a `-N` sequence entry after the
+  highest existing suffix, and a second reconcile from a stale pre-injection
+  Pod patches the identical name without creating a duplicate.
 - `EnsureSandboxUpgraded` under installer policy: `PreUpgrade` → `Installing` →
   `PostUpgrade` → `Succeeded`, with `Checkpointing` skipped and
   `CleanupCheckpoints` not called; `ResumeSucceed` advances to `PreUpgrade`
@@ -1846,6 +1859,17 @@ individually.
       recognized even if its name differs from what the current code would
       generate, and a new injection can never collide with an existing entry.
       The hash prefix is kept for auditability only.
+- [ ] 11/26/2026: Replaced the random name suffix with deterministic naming.
+      The first injection of a version uses `installer-<hash8(patchVersion)>`;
+      re-installing a version whose entries are buried under a newer installer
+      appends the next sequence number (`-1`, `-2`, ...) after the existing
+      entries for that version. This restores stale-cache idempotency without a
+      `ResourceVersionExpectations` guard: two reconciles reading the same
+      pre-injection Pod compute the same name, and the `ephemeralcontainers`
+      strategic merge by name collapses the repeated patch into the existing
+      entry instead of appending a duplicate (the CI failure mode of the
+      random-suffix scheme). The env-value guard remains the already-injected
+      decision; the name only needs to be unique and reproducible.
 - [ ] Verify the prefix-redirect pattern end-to-end against a real OpenClaw and a
       real Hermes Agent sandbox, including whether lifecycle scripts and native
       builds survive the libc-family match requirement, and whether
