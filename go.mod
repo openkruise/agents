@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	connectrpc.com/connect v1.19.1
 	github.com/DATA-DOG/go-sqlmock v1.5.2
-	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2
 	github.com/container-storage-interface/spec v1.13.0
 	github.com/distribution/reference v0.6.0
