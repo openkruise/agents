@@ -20,62 +20,24 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/openkruise/agents/pkg/utils/timeout"
+	"github.com/openkruise/agents/api/v1alpha1"
 )
 
-// fakeHandle is a minimal in-package Handle. The neutral claim package cannot
-// import the concrete CR-backed sandbox (it lives under pkg/sandbox-manager),
-// so this double stands in for it. It mirrors the concrete type's pod-template
-// semantics: when hasTemplate is false the pod-metadata accessors return nil
-// and the setters are no-ops.
-type fakeHandle struct {
-	*metav1.ObjectMeta
-	hasTemplate    bool
-	podLabels      map[string]string
-	podAnnotations map[string]string
-	timeoutOpts    timeout.Options
-}
-
-func newFakeHandle(hasTemplate bool, labels, annotations map[string]string) *fakeHandle {
-	return &fakeHandle{
-		ObjectMeta:     &metav1.ObjectMeta{},
-		hasTemplate:    hasTemplate,
-		podLabels:      labels,
-		podAnnotations: annotations,
+// newTestHandle builds a real CR-backed Handle so the merge helpers run against
+// the production pod-metadata accessors, including their nil-template no-op
+// semantics. The cache is unused by these paths.
+func newTestHandle(hasTemplate bool, labels, annotations map[string]string) *Sandbox {
+	sbx := &v1alpha1.Sandbox{}
+	if hasTemplate {
+		sbx.Spec.Template = &corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: annotations},
+		}
 	}
+	return NewSandbox(sbx, nil)
 }
-
-func (f *fakeHandle) GetPodLabels() map[string]string {
-	if f.hasTemplate {
-		return f.podLabels
-	}
-	return nil
-}
-
-func (f *fakeHandle) SetPodLabels(labels map[string]string) {
-	if f.hasTemplate {
-		f.podLabels = labels
-	}
-}
-
-func (f *fakeHandle) GetPodAnnotations() map[string]string {
-	if f.hasTemplate {
-		return f.podAnnotations
-	}
-	return nil
-}
-
-func (f *fakeHandle) SetPodAnnotations(annotations map[string]string) {
-	if f.hasTemplate {
-		f.podAnnotations = annotations
-	}
-}
-
-func (f *fakeHandle) SetTimeout(opts timeout.Options) { f.timeoutOpts = opts }
-
-var _ Handle = (*fakeHandle)(nil)
 
 func TestMergePodLabels(t *testing.T) {
 	tests := []struct {
@@ -166,7 +128,7 @@ func TestMergePodLabels(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newFakeHandle(!tt.noTemplate, tt.existingLabels, nil)
+			h := newTestHandle(!tt.noTemplate, tt.existingLabels, nil)
 			assert.NotPanics(t, func() {
 				MergePodLabels(h, tt.inputLabels)
 			})
@@ -176,7 +138,7 @@ func TestMergePodLabels(t *testing.T) {
 }
 
 func TestMergePodLabels_Idempotent(t *testing.T) {
-	h := newFakeHandle(true, map[string]string{"app": "sandbox"}, nil)
+	h := newTestHandle(true, map[string]string{"app": "sandbox"}, nil)
 	input := map[string]string{"env": "prod", "tier": "frontend"}
 	MergePodLabels(h, input)
 	MergePodLabels(h, input)
@@ -246,7 +208,7 @@ func TestMergePodAnnotations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newFakeHandle(!tt.noTemplate, nil, tt.existingAnnotations)
+			h := newTestHandle(!tt.noTemplate, nil, tt.existingAnnotations)
 			assert.NotPanics(t, func() {
 				MergePodAnnotations(h, tt.inputAnnotations)
 			})

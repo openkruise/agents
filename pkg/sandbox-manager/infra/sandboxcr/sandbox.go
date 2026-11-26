@@ -25,16 +25,13 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
-	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandboxid"
@@ -55,7 +52,7 @@ import (
 //   - changed: true when the provided sandbox was modified and should be updated;
 //     false when no update should be issued.
 //   - err:     non-nil to abort retryUpdate immediately.
-type ModifierFunc func(sbx *agentsv1alpha1.Sandbox) (bool, error)
+type ModifierFunc = claim.ModifierFunc
 
 type Sandbox struct {
 	*agentsv1alpha1.Sandbox
@@ -69,26 +66,7 @@ type Sandbox struct {
 }
 
 func setMemoryPersistence(sbx *Sandbox, enabled *bool) {
-	if enabled == nil {
-		return
-	}
-
-	contents := make([]string, 0, len(sbx.Spec.PersistentContents)+1)
-	memoryAdded := false
-	for _, content := range sbx.Spec.PersistentContents {
-		if content == agentsv1alpha1.PersistentContentMemory {
-			if *enabled && !memoryAdded {
-				contents = append(contents, content)
-				memoryAdded = true
-			}
-			continue
-		}
-		contents = append(contents, content)
-	}
-	if *enabled && !memoryAdded {
-		contents = append(contents, agentsv1alpha1.PersistentContentMemory)
-	}
-	sbx.Spec.PersistentContents = contents
+	claim.SetMemoryPersistence(sbx.Sandbox, enabled)
 }
 
 func (s *Sandbox) GetIP() string {
@@ -103,41 +81,16 @@ func (s *Sandbox) GetRoute() (sandboxroute.Route, error) {
 	return sandboxroute.RouteFromSandbox(s.Sandbox)
 }
 
-var DefaultDeleteSandbox = deleteSandbox
-
-func deleteSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, client client.Client) error {
-	return client.Delete(ctx, sbx)
-}
-
 func (s *Sandbox) GetTemplate() string {
 	return utils.GetTemplateFromSandbox(s.Sandbox)
 }
 
 func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(logs.DebugLogLevel)
-	fetchFromApiServer := false
-	objectKey := client.ObjectKeyFromObject(s.Sandbox)
-	newSbx := &agentsv1alpha1.Sandbox{}
-	err := s.Cache.GetClient().Get(ctx, objectKey, newSbx)
+	cr, err := claim.InplaceRefresh(ctx, s.Cache, s.Sandbox, deepcopy)
 	if err != nil {
-		log.Info("failed to get claimed sandbox from cache, fetch from api-server", "reason", err.Error())
-		fetchFromApiServer = true
-	} else if !expectations.ResourceVersionExpectationSatisfied(newSbx) {
-		log.Info("sandbox cache is out-dated, fetch from api-server")
-		fetchFromApiServer = true
+		return err
 	}
-	if fetchFromApiServer {
-		if err = s.Cache.GetAPIReader().Get(ctx, objectKey, newSbx); err != nil {
-			return err
-		}
-	}
-	if expectations.IsResourceVersionStrictlyNewer(s.Sandbox.GetResourceVersion(), newSbx.GetResourceVersion()) {
-		if deepcopy {
-			s.Sandbox = newSbx.DeepCopy()
-		} else {
-			s.Sandbox = newSbx
-		}
-	}
+	s.Sandbox = cr
 	return nil
 }
 
@@ -161,62 +114,12 @@ func (s *Sandbox) refreshFunc() runtime.RefreshFunc {
 //   - updated: true if a real Update was issued and the sandbox was written back; false if no update was needed.
 //   - err:     non-nil when either refresh/update failed or modifier/Update returned an error.
 func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) (bool, error) {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
-	objectKey := client.ObjectKeyFromObject(s.Sandbox)
-	updated := false
-	first := true
-	var attemptErr error
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() (err error) {
-		defer func() { attemptErr = err }()
-		if err = ctx.Err(); err != nil {
-			return err
-		}
-		latest := &agentsv1alpha1.Sandbox{}
-		if first {
-			err = s.Cache.GetClient().Get(ctx, objectKey, latest)
-		} else {
-			err = s.Cache.GetAPIReader().Get(ctx, objectKey, latest)
-		}
-		first = false
-		if err != nil {
-			return err
-		}
-
-		copied := latest.DeepCopy()
-		shouldUpdate, err := modifier(copied)
-		if err != nil {
-			return err
-		}
-		if !shouldUpdate {
-			// The informer view may lag behind writes made earlier in the same
-			// operation; never roll the wrapper back to an older object.
-			if expectations.IsResourceVersionNewerOrEqual(s.Sandbox.ResourceVersion, latest.ResourceVersion) {
-				s.Sandbox = latest
-			}
-			updated = false
-			return nil
-		}
-		// Inject trace context into annotations before updating so the
-		// sandbox-controller can establish parent-child span relationship.
-		copied.Annotations = tracing.InjectTraceContext(ctx, copied.Annotations)
-		if err = s.Cache.GetClient().Update(ctx, copied); err != nil {
-			return err
-		}
-		s.Sandbox = copied
-		expectations.ResourceVersionExpectationExpect(copied)
-		updated = true
-		return nil
-	})
-	if err == nil && attemptErr != nil {
-		// retry.OnError rewrites wait.Interrupted errors (context cancellation
-		// included) to the last conflict, which is nil when no conflict
-		// happened; restore the real cause instead of reporting success.
-		err = attemptErr
-	}
+	cr, updated, err := claim.RetryUpdate(ctx, s.Cache, s.Sandbox, modifier)
 	if err != nil {
-		log.Error(err, "failed to update sandbox after retries")
 		return false, err
 	}
+	s.Sandbox = cr
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 	if updated {
 		log.Info("sandbox updated successfully")
 	} else {
@@ -234,63 +137,12 @@ func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) (bool,
 //
 // Returns the same contract as retryUpdate.
 func (s *Sandbox) retryPatch(ctx context.Context, modifier ModifierFunc) (bool, error) {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
-	objectKey := client.ObjectKeyFromObject(s.Sandbox)
-	updated := false
-	first := true
-	var attemptErr error
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() (err error) {
-		defer func() { attemptErr = err }()
-		if err = ctx.Err(); err != nil {
-			return err
-		}
-		latest := &agentsv1alpha1.Sandbox{}
-		if first {
-			err = s.Cache.GetClient().Get(ctx, objectKey, latest)
-		} else {
-			err = s.Cache.GetAPIReader().Get(ctx, objectKey, latest)
-		}
-		first = false
-		if err != nil {
-			return err
-		}
-
-		copied := latest.DeepCopy()
-		shouldUpdate, err := modifier(copied)
-		if err != nil {
-			return err
-		}
-		if !shouldUpdate {
-			// The informer view may lag behind writes made earlier in the same
-			// operation; never roll the wrapper back to an older object.
-			if expectations.IsResourceVersionNewerOrEqual(s.Sandbox.ResourceVersion, latest.ResourceVersion) {
-				s.Sandbox = latest
-			}
-			updated = false
-			return nil
-		}
-		// Inject trace context into annotations before patching so the
-		// sandbox-controller can establish parent-child span relationship.
-		copied.Annotations = tracing.InjectTraceContext(ctx, copied.Annotations)
-		patch := client.MergeFromWithOptions(latest, client.MergeFromWithOptimisticLock{})
-		if err = s.Cache.GetClient().Patch(ctx, copied, patch); err != nil {
-			return err
-		}
-		s.Sandbox = copied
-		expectations.ResourceVersionExpectationExpect(copied)
-		updated = true
-		return nil
-	})
-	if err == nil && attemptErr != nil {
-		// retry.OnError rewrites wait.Interrupted errors (context cancellation
-		// included) to the last conflict, which is nil when no conflict
-		// happened; restore the real cause instead of reporting success.
-		err = attemptErr
-	}
+	cr, updated, err := claim.RetryPatch(ctx, s.Cache, s.Sandbox, modifier)
 	if err != nil {
-		log.Error(err, "failed to patch sandbox after retries")
 		return false, err
 	}
+	s.Sandbox = cr
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 	if updated {
 		log.Info("sandbox patched successfully")
 	} else {
@@ -300,42 +152,18 @@ func (s *Sandbox) retryPatch(ctx context.Context, modifier ModifierFunc) (bool, 
 }
 
 func (s *Sandbox) refreshFromAPIReader(ctx context.Context) error {
-	latest := &agentsv1alpha1.Sandbox{}
-	if err := s.Cache.GetAPIReader().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), latest); err != nil {
+	latest, err := claim.RefreshFromAPIReader(ctx, s.Cache, s.Sandbox)
+	if err != nil {
 		return err
 	}
 	s.Sandbox = latest
 	return nil
 }
 
-func (s *Sandbox) Kill(ctx context.Context) (err error) {
-	if s.GetDeletionTimestamp() != nil {
-		return nil
-	}
-
-	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraKill,
-		attribute.String(tracing.AttrSandboxName, s.Name),
-	)
-	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
-	// evaluate err while still nil and record every failure as success.
-	defer func() { tracing.EndSpan(ctx, span, err) }()
-
-	// Inject trace context before deletion so the controller's terminating
-	// Reconcile can establish a parent-child trace relationship. The whole
-	// block is guarded by HasInjectableTraceContext so the deletion path has
-	// zero extra cost (no DeepCopy, no Patch) when tracing is disabled or no
-	// span is active. The patched object is built from a DeepCopy so the
-	// shared s.Sandbox is never mutated. Patch failure is non-fatal: trace loss
-	// is acceptable, deletion must proceed unconditionally.
-	if tracing.HasInjectableTraceContext(ctx) {
-		patched := s.Sandbox.DeepCopy()
-		patched.Annotations = tracing.InjectTraceContext(ctx, patched.Annotations)
-		if err := s.Cache.GetClient().Patch(ctx, patched, client.MergeFrom(s.Sandbox)); err != nil {
-			klog.FromContext(ctx).Error(err, "failed to inject trace context before deletion")
-		}
-	}
-
-	return DefaultDeleteSandbox(ctx, s.Sandbox, s.Cache.GetClient())
+// Kill delegates to the neutral engine, whose DefaultDeleteSandbox hook tests
+// override to intercept deletion.
+func (s *Sandbox) Kill(ctx context.Context) error {
+	return claim.Kill(ctx, s.Cache, s.Sandbox)
 }
 
 // GetTrafficAccessToken returns the transient access token minted during claim or clone
@@ -359,28 +187,11 @@ func (s *Sandbox) GetTrafficAccessTokenExpiration() string {
 }
 
 func setTimeout(sbx *agentsv1alpha1.Sandbox, opts timeout.Options) {
-	if !opts.PauseTime.IsZero() {
-		sbx.Spec.PauseTime = ptr.To(metav1.NewTime(timeout.NormalizeTime(opts.PauseTime)))
-	} else {
-		sbx.Spec.PauseTime = nil
-	}
-	if !opts.ShutdownTime.IsZero() {
-		sbx.Spec.ShutdownTime = ptr.To(metav1.NewTime(timeout.NormalizeTime(opts.ShutdownTime)))
-	} else {
-		sbx.Spec.ShutdownTime = nil
-	}
+	claim.ApplyTimeout(sbx, opts)
 }
 
 func mergeExtraAnnotations(sbx *agentsv1alpha1.Sandbox, annotations map[string]string) {
-	if len(annotations) == 0 {
-		return
-	}
-	if sbx.Annotations == nil {
-		sbx.Annotations = map[string]string{}
-	}
-	for key, value := range annotations {
-		sbx.Annotations[key] = value
-	}
+	claim.MergeExtraAnnotations(sbx, annotations)
 }
 
 func (s *Sandbox) SetTimeout(opts timeout.Options) {
@@ -392,77 +203,30 @@ func (s *Sandbox) SetTimeout(opts timeout.Options) {
 // re-arms auto-pause with it; a non-positive value leaves PauseTimeout unset
 // and the wake does not re-arm auto-pause.
 func (s *Sandbox) EnableWakeOnIngressTraffic(pauseTimeout time.Duration) {
-	policy := s.Sandbox.Spec.AutoPausePolicy
-	if policy == nil {
-		policy = &agentsv1alpha1.AutoPausePolicy{}
-		s.Sandbox.Spec.AutoPausePolicy = policy
-	}
-	if policy.Resume == nil {
-		policy.Resume = &agentsv1alpha1.ResumePolicy{}
-	}
-	rule := &agentsv1alpha1.IngressTrafficRule{}
-	if pauseTimeout > 0 {
-		rule.PauseTimeout = &metav1.Duration{Duration: pauseTimeout}
-	}
-	policy.Resume.OnIngressTraffic = rule
+	claim.EnableWakeOnIngressTraffic(s.Sandbox, pauseTimeout)
 }
 
 // ClearWakeOnIngressTraffic removes the wake-on-ingress-traffic resume rule
 // and prunes now-empty parent policy nodes so a pooled spec stays
 // byte-identical to a fresh one.
 func (s *Sandbox) ClearWakeOnIngressTraffic() {
-	policy := s.Sandbox.Spec.AutoPausePolicy
-	if policy == nil || policy.Resume == nil {
-		return
-	}
-	policy.Resume.OnIngressTraffic = nil
-	if *policy.Resume == (agentsv1alpha1.ResumePolicy{}) {
-		policy.Resume = nil
-	}
-	if policy.Pause == nil && policy.Resume == nil {
-		s.Sandbox.Spec.AutoPausePolicy = nil
-	}
+	claim.ClearWakeOnIngressTraffic(s.Sandbox)
 }
 
-func (s *Sandbox) GetPodLabels() map[string]string {
-	if s.Spec.Template != nil {
-		return s.Spec.Template.Labels
-	}
-	return nil
-}
+func (s *Sandbox) GetPodLabels() map[string]string { return claim.GetPodLabels(s.Sandbox) }
 
-func (s *Sandbox) SetPodLabels(labels map[string]string) {
-	if s.Spec.Template != nil {
-		s.Spec.Template.Labels = labels
-	}
-}
+func (s *Sandbox) SetPodLabels(labels map[string]string) { claim.SetPodLabels(s.Sandbox, labels) }
 
-func (s *Sandbox) GetPodAnnotations() map[string]string {
-	if s.Spec.Template != nil {
-		return s.Spec.Template.Annotations
-	}
-	return nil
-}
+func (s *Sandbox) GetPodAnnotations() map[string]string { return claim.GetPodAnnotations(s.Sandbox) }
 
 func (s *Sandbox) SetPodAnnotations(annotations map[string]string) {
-	if s.Spec.Template != nil {
-		s.Spec.Template.Annotations = annotations
-	}
+	claim.SetPodAnnotations(s.Sandbox, annotations)
 }
 
 // SetImage sets the image of the first container
-func (s *Sandbox) SetImage(image string) {
-	if s.Spec.Template != nil {
-		s.Spec.Template.Spec.Containers[0].Image = image
-	}
-}
+func (s *Sandbox) SetImage(image string) { claim.SetImage(s.Sandbox, image) }
 
-func (s *Sandbox) GetImage() string {
-	if s.Spec.Template != nil {
-		return s.Spec.Template.Spec.Containers[0].Image
-	}
-	return ""
-}
+func (s *Sandbox) GetImage() string { return claim.GetImage(s.Sandbox) }
 
 // SaveTimeoutWithPolicy updates timeout with given policy. Available timeout update policies:
 //   - Always: overwrite timeout whenever the requested value differs from current.
@@ -507,10 +271,7 @@ func (s *Sandbox) GetTimeout() timeout.Options {
 }
 
 func (s *Sandbox) GetResource() infra.SandboxResource {
-	if s.Spec.Template == nil {
-		return infra.SandboxResource{}
-	}
-	return infra.CalculateResourceFromContainers(s.Spec.Template.Spec.Containers)
+	return claim.GetResource(s.Sandbox)
 }
 
 func (s *Sandbox) Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) {
@@ -745,7 +506,7 @@ func (s *Sandbox) CreateCheckpoint(ctx context.Context, opts infra.CreateCheckpo
 }
 
 var _ infra.Sandbox = &Sandbox{}
-var _ claimengine.Handle = &Sandbox{}
+var _ claim.Handle = &Sandbox{}
 
 func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache cache.Provider) *Sandbox {
 	return &Sandbox{

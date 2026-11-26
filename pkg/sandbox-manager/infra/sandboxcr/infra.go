@@ -32,6 +32,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -136,10 +137,13 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	log := klog.FromContext(ctx)
 	metrics := infra.ClaimMetrics{}
 
-	opts, err := ValidateAndInitClaimOptions(opts)
+	opts, err := claim.ValidateAndInitClaimOptions(opts)
 	if err != nil {
 		log.Error(err, "invalid claim options")
-		return nil, metrics, err
+		// Convert at the Infra boundary so a typed *claim.Error (e.g. resize
+		// validation BadRequest) keeps its code for HTTP status mapping rather
+		// than escaping unclassified and being re-wrapped as Internal upstream.
+		return nil, metrics, buildClaimError(err, nil, nil)
 	}
 	// Overwrite with the Infra-owned runtime TLS bundle so claim
 	// post-processing can resolve the per-sandbox transport; the field is
@@ -161,7 +165,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	waitErr := wait.ExponentialBackoffWithContext(claimCtx, createRetryBackoff(), func(context.Context) (bool, error) {
 		metrics.Retries++
 		log.Info("try to claim sandbox", "retries", metrics.Retries)
-		claimed, tryMetrics, claimErr := TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.claimLockChannel, i.createLimiter)
+		claimed, tryMetrics, claimErr := claim.TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.claimLockChannel, i.createLimiter)
 		metrics.Total += tryMetrics.Total
 		metrics.Wait += tryMetrics.Wait
 		metrics.PickAndLock += tryMetrics.PickAndLock
@@ -175,18 +179,23 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		metrics.ClaimResults = append(metrics.ClaimResults, tryMetrics.ClaimResults...)
 		metrics.MergePickSandboxFailures(tryMetrics.PickSandboxFailures)
 		if tryMetrics.LastError != nil {
-			metrics.LastError = tryMetrics.LastError
+			metrics.LastError = managerErrorFromClaim(tryMetrics.LastError)
 		}
 		if claimErr == nil {
-			claimedSandbox = claimed
+			// The neutral engine returns a *claim.Sandbox; wrap it back into the
+			// fat sandboxcr.Sandbox the Manager/API layers consume, carrying over
+			// the transient traffic token that is never persisted to the CR.
+			wrapped := AsSandbox(claimed.Sandbox, i.Cache)
+			wrapped.trafficToken = claimed.TrafficToken()
+			claimedSandbox = wrapped
 			return true, nil
 		}
 		metrics.RetryCost += tryMetrics.Total
 		lastErr = claimErr
-		if errors.As(claimErr, &terminalMutationError{}) || errors.As(claimErr, &terminalValidationError{}) {
+		if errors.As(claimErr, &claim.TerminalMutationError{}) || errors.As(claimErr, &claim.TerminalValidationError{}) {
 			return false, claimErr
 		}
-		if errors.As(claimErr, &retriableError{}) {
+		if errors.As(claimErr, &claim.RetriableError{}) {
 			return false, nil
 		}
 		// Terminal error (e.g. classified BadRequest/Internal): stop retrying so
@@ -209,7 +218,18 @@ func buildClaimError(err error, lastError error, failures []infra.PickSandboxFai
 	}
 	// Preserve classified terminal errors. An exhausted retry can also carry a
 	// classified cause, but still needs the accumulated attempt diagnostics.
-	_, retriable := err.(retriableError)
+	_, retriable := err.(claim.RetriableError)
+	// The neutral engine reports terminal failures as *claim.Error carrying a
+	// category. claim.ErrorCode intentionally mirrors the managererrors codes
+	// (same underlying strings), so convert it directly to preserve the HTTP
+	// status mapping for BadRequest / Conflict / NotFound / Internal.
+	var cErr *claim.Error
+	if !retriable && errors.As(err, &cErr) {
+		return managererrors.WrapError(managererrors.ErrorCode(cErr.Code), err, "%s", cErr.Message)
+	}
+	// Preserve an already-classified manager error (e.g. a typed quota-exceeded
+	// error surfaced by an injected admission hook) so its ErrorCode reaches the
+	// HTTP layer unchanged.
 	var mErr *managererrors.Error
 	if !retriable && errors.As(err, &mErr) {
 		return mErr
@@ -259,10 +279,10 @@ func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions
 		}
 		metrics.LastError = cloneErr
 		lastErr = cloneErr
-		if errors.As(cloneErr, &terminalMutationError{}) || errors.As(cloneErr, &terminalValidationError{}) {
+		if errors.As(cloneErr, &claim.TerminalMutationError{}) || errors.As(cloneErr, &claim.TerminalValidationError{}) {
 			return false, cloneErr
 		}
-		if errors.As(cloneErr, &retriableError{}) {
+		if errors.As(cloneErr, &claim.RetriableError{}) {
 			return false, nil
 		}
 		// Terminal error: stop retrying and preserve its ErrorCode.
@@ -291,6 +311,14 @@ func buildCloneError(err error) error {
 	var mErr *managererrors.Error
 	if errors.As(err, &mErr) {
 		return mErr
+	}
+	// The clone path reaches shared engine primitives (for example the CSI mount
+	// limit guard) that report failures as *claim.Error. Convert it the same way
+	// buildClaimError does so its category reaches the HTTP layer instead of
+	// being flattened to ErrorInternal.
+	var cErr *claim.Error
+	if errors.As(err, &cErr) {
+		return managererrors.WrapError(managererrors.ErrorCode(cErr.Code), err, "%s", cErr.Message)
 	}
 	if apierrors.IsAlreadyExists(err) {
 		return managererrors.WrapError(managererrors.ErrorConflict, err, "%v", err)

@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 )
 
@@ -236,7 +237,7 @@ func TestClassifyCreateError(t *testing.T) {
 				return
 			}
 			if tt.expectRetryable {
-				assert.True(t, errors.As(result, &retriableError{}), "expected retriableError, got %T: %v", result, result)
+				assert.True(t, errors.As(result, &claim.RetriableError{}), "expected claim.RetriableError, got %T: %v", result, result)
 			} else {
 				code := managererrors.GetErrCode(result)
 				assert.Equal(t, tt.expectErrorCode, code, "expected ErrorCode mismatch for %v", result)

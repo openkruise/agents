@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -54,8 +55,12 @@ func TestValidateAndInitClaimOptions_AccessToken(t *testing.T) {
 				}
 			}
 
-			// When the options are validated before claim execution.
-			got, err := ValidateAndInitClaimOptions(input)
+			// When the options are validated before claim execution, through the
+			// same Infra boundary pair ClaimSandbox uses.
+			got, err := claim.ValidateAndInitClaimOptions(input)
+			if err != nil {
+				err = buildClaimError(err, nil, nil)
+			}
 
 			// Then the input remains unchanged and inconsistent credentials fail safely.
 			require.Equal(t, tt.outerToken, input.AccessToken)
