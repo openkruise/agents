@@ -2069,7 +2069,7 @@ func TestCloneSandbox(t *testing.T) {
 				}
 				if tt.expectInterrupted {
 					assert.ErrorIs(t, err, context.DeadlineExceeded)
-					var retryErr retriableError
+					var retryErr claim.RetriableError
 					assert.False(t, errors.As(err, &retryErr), "cancellation must surface as-is, not as a retriable failure")
 				}
 			} else {
