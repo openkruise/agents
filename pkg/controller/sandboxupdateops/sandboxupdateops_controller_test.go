@@ -734,6 +734,204 @@ func TestClassifySandbox(t *testing.T) {
 	}
 }
 
+func TestClassifySandbox_InstallerUpdate(t *testing.T) {
+	opsName := "test-ops"
+	const patchVersion = "1.4.0"
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: opsName, UID: types.UID("installer-ops-uid")},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
+				Type:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+				PatchVersion: patchVersion,
+				Installer:    &agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"},
+			},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		sandbox  *agentsv1alpha1.Sandbox
+		expected sandboxUpdateState
+	}{
+		{
+			name: "no ops label, install not completed, Running -> candidate",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Status:     agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+			},
+			expected: sandboxCandidate,
+		},
+		{
+			name: "no ops label, install completed -> noNeedUpdate",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:                 agentsv1alpha1.SandboxRunning,
+					InstalledPatchVersion: patchVersion,
+				},
+			},
+			expected: sandboxNoNeedUpdate,
+		},
+		{
+			name: "no ops label, different patch version completed -> candidate",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:                 agentsv1alpha1.SandboxRunning,
+					InstalledPatchVersion: "another-ops-uid",
+				},
+			},
+			expected: sandboxCandidate,
+		},
+		{
+			name: "no ops label, install completed but Upgrading -> candidate (recovery)",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:                 agentsv1alpha1.SandboxUpgrading,
+					InstalledPatchVersion: patchVersion,
+				},
+			},
+			expected: sandboxCandidate,
+		},
+		{
+			name: "ops label + Installing reason -> updating",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+				}},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxUpgrading,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonInstalling, Status: metav1.ConditionFalse},
+					},
+				},
+			},
+			expected: sandboxUpdating,
+		},
+		{
+			name: "ops label + InstallingFailed reason -> failed",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+				}},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxUpgrading,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonInstallingFailed, Status: metav1.ConditionFalse},
+					},
+				},
+			},
+			expected: sandboxFailed,
+		},
+		{
+			name: "ops label + ResumeSucceed reason -> phase 2",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+				}},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxUpgrading,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonResumeSucceed, Status: metav1.ConditionFalse},
+					},
+				},
+			},
+			expected: sandboxResumeSucceed,
+		},
+		{
+			name: "ops label + no condition + unpaused with trigger -> phase 2",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      map[string]string{agentsv1alpha1.LabelSandboxUpdateOps: opsName},
+					Annotations: map[string]string{agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True},
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+			},
+			expected: sandboxResumeSucceed,
+		},
+		{
+			name: "ops label + no condition + Running -> updating (no phase-2 heuristic)",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+				}},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+			},
+			expected: sandboxUpdating,
+		},
+		{
+			name: "ops label + succeeded condition + matching token -> updated",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+				}},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:                 agentsv1alpha1.SandboxRunning,
+					InstalledPatchVersion: patchVersion,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			expected: sandboxUpdated,
+		},
+		{
+			name: "ops label + old succeeded condition + old token -> updating",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+				}},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:                 agentsv1alpha1.SandboxRunning,
+					InstalledPatchVersion: "previous-ops-uid",
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			expected: sandboxUpdating,
+		},
+		{
+			name: "ops label + old succeeded condition without installed version -> updating",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+				}},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			expected: sandboxUpdating,
+		},
+		{
+			// Labeled by this ops, install already completed, no condition:
+			// target reached, nothing to do.
+			name: "ops label + no condition + installed patch version -> updated",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+				}},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:                 agentsv1alpha1.SandboxRunning,
+					InstalledPatchVersion: patchVersion,
+				},
+			},
+			expected: sandboxUpdated,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newTestReconciler()
+			result := r.classifySandbox(context.Background(), tt.sandbox, ops)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestCalculateMaxUnavailable(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -1658,6 +1856,7 @@ func TestHandleDeletion_ClearsUpgradePolicyOnlyForUpdatedSandboxes(t *testing.T)
 	action := &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"backup"}}}
 	tests := []struct {
 		name      string
+		strategy  agentsv1alpha1.SandboxUpdateOpsStrategyType
 		patch     runtime.RawExtension
 		lifecycle *agentsv1alpha1.SandboxLifecycle
 	}{
@@ -1665,40 +1864,62 @@ func TestHandleDeletion_ClearsUpgradePolicyOnlyForUpdatedSandboxes(t *testing.T)
 		{name: "legacy nil lifecycle"},
 		{name: "legacy empty lifecycle", lifecycle: &agentsv1alpha1.SandboxLifecycle{}},
 		{name: "legacy upgrade hooks", lifecycle: &agentsv1alpha1.SandboxLifecycle{PreUpgrade: action}},
+		{name: "installer", strategy: agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsFailed, false, nil)
+			ops.UID = "current-ops-uid"
 			ops.Spec.Patch = tt.patch
 			ops.Spec.Lifecycle = tt.lifecycle.DeepCopy()
 			ops.Finalizers = []string{finalizerName}
 			policy := &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore}
-			sbxUpdated := newSandbox("sbx-updated", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
-				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
-			})
+			installer := tt.strategy == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate
+			if installer {
+				ops.Spec.UpdateStrategy.PatchVersion = "1.4.0"
+				policy = &agentsv1alpha1.SandboxUpgradePolicy{
+					Type:         agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate,
+					PatchVersion: ops.Spec.UpdateStrategy.PatchVersion,
+					Installer:    &agentsv1alpha1.InstallerSpec{Image: "installer:v2"},
+				}
+				ops.Spec.UpdateStrategy.Type = tt.strategy
+				ops.Spec.UpdateStrategy.Installer = policy.Installer.DeepCopy()
+			}
+			succeeded := []metav1.Condition{{
+				Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue,
+			}}
+			sbxUpdated := newSandbox("sbx-updated", "default", "test-ops", agentsv1alpha1.SandboxRunning, succeeded)
 			sbxUpdated.Spec.UpgradePolicy = policy.DeepCopy()
+			sbxUpdated.Status.InstalledPatchVersion = ops.Spec.UpdateStrategy.PatchVersion
 			sbxUpgrading := newSandbox("sbx-upgrading", "default", "test-ops", agentsv1alpha1.SandboxUpgrading, []metav1.Condition{
 				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod, Status: metav1.ConditionFalse},
 			})
 			sbxUpgrading.Spec.UpgradePolicy = policy.DeepCopy()
-			for _, sbx := range []*agentsv1alpha1.Sandbox{sbxUpdated, sbxUpgrading} {
+			// A success recorded for another installer ops does not complete this one.
+			sbxPrevious := newSandbox("sbx-previous", "default", "test-ops", agentsv1alpha1.SandboxRunning, succeeded)
+			sbxPrevious.Spec.UpgradePolicy = policy.DeepCopy()
+			sbxPrevious.Status.InstalledPatchVersion = "previous-ops-uid"
+			sandboxes := []*agentsv1alpha1.Sandbox{sbxUpdated, sbxUpgrading, sbxPrevious}
+			for _, sbx := range sandboxes {
 				sbx.Annotations = map[string]string{agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True}
 			}
 
-			r := newTestReconciler(ops, sbxUpdated, sbxUpgrading)
+			r := newTestReconciler(ops, sbxUpdated, sbxUpgrading, sbxPrevious)
 			require.NoError(t, r.Delete(t.Context(), ops))
-			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ops)})
+			result, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ops)})
 			require.NoError(t, err)
+			assert.Equal(t, ctrl.Result{}, result)
 
-			for _, sbx := range []*agentsv1alpha1.Sandbox{sbxUpdated, sbxUpgrading} {
+			for _, sbx := range sandboxes {
 				updated := &agentsv1alpha1.Sandbox{}
 				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
 				assert.Empty(t, updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
 				assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
-				if sbx.Name == sbxUpdated.Name {
-					assert.Nil(t, updated.Spec.UpgradePolicy)
-				} else {
+				assert.Equal(t, sbx.Status.InstalledPatchVersion, updated.Status.InstalledPatchVersion)
+				if sbx == sbxUpgrading || (sbx == sbxPrevious && installer) {
 					assert.Equal(t, policy, updated.Spec.UpgradePolicy)
+				} else {
+					assert.Nil(t, updated.Spec.UpgradePolicy)
 				}
 			}
 		})
@@ -1706,59 +1927,110 @@ func TestHandleDeletion_ClearsUpgradePolicyOnlyForUpdatedSandboxes(t *testing.T)
 }
 
 func TestIsUpgradeSucceeded(t *testing.T) {
+	succeeded := []metav1.Condition{{
+		Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue,
+	}}
 	tests := []struct {
-		name       string
-		conditions []metav1.Condition
-		want       bool
+		name             string
+		conditions       []metav1.Condition
+		strategy         agentsv1alpha1.SandboxUpdateOpsStrategyType
+		installedVersion string
+		want             bool
 	}{
 		{name: "no conditions", conditions: nil, want: false},
-		{
-			name: "upgrade succeeded",
-			conditions: []metav1.Condition{
-				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
-			},
-			want: true,
-		},
+		{name: "upgrade succeeded", conditions: succeeded, want: true},
 		{
 			name: "succeeded reason but status false",
 			conditions: []metav1.Condition{
 				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionFalse},
 			},
-			want: false,
 		},
 		{
 			name: "upgrade in progress",
 			conditions: []metav1.Condition{
 				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod, Status: metav1.ConditionFalse},
 			},
-			want: false,
 		},
 		{
 			name: "upgrade failed",
 			conditions: []metav1.Condition{
 				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed, Status: metav1.ConditionFalse},
 			},
-			want: false,
+		},
+		{
+			name:             "installer success requires the current operation token",
+			conditions:       succeeded,
+			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+			installedVersion: "1.4.0",
+			want:             true,
+		},
+		{
+			name:       "old success without a token is not installer success",
+			conditions: succeeded,
+			strategy:   agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+		},
+		{
+			name:             "ops UID is not the desired payload version",
+			conditions:       succeeded,
+			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+			installedVersion: "current-ops-uid",
+		},
+		{
+			name:             "previous installer token does not complete the current operation",
+			conditions:       succeeded,
+			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+			installedVersion: "previous-ops-uid",
+		},
+		{
+			name:             "matching token without succeeded condition is insufficient",
+			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+			installedVersion: "1.4.0",
+		},
+		{
+			name:             "Recreate success ignores installer tokens",
+			conditions:       succeeded,
+			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyRecreate,
+			installedVersion: "previous-ops-uid",
+			want:             true,
+		},
+		{
+			name:             "CheckpointRestore success ignores installer tokens",
+			conditions:       succeeded,
+			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore,
+			installedVersion: "previous-ops-uid",
+			want:             true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+			ops.UID = "current-ops-uid"
+			ops.Spec.UpdateStrategy.Type = tt.strategy
+			ops.Spec.UpdateStrategy.PatchVersion = "1.4.0"
 			sbx := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxRunning, tt.conditions)
-			assert.Equal(t, tt.want, isUpgradeSucceeded(sbx))
+			sbx.Status.InstalledPatchVersion = tt.installedVersion
+			assert.Equal(t, tt.want, isUpgradeSucceeded(sbx, ops))
 		})
 	}
 }
 
 func TestReconcile_CleanupUpdatedSandbox(t *testing.T) {
 	policy := &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}
+	installerPolicy := &agentsv1alpha1.SandboxUpgradePolicy{
+		Type: agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate, PatchVersion: "1.4.0",
+		Installer: &agentsv1alpha1.InstallerSpec{Image: "installer:v2"},
+	}
 	tests := []struct {
-		name           string
-		policy         *agentsv1alpha1.SandboxUpgradePolicy
-		hasFailedLabel bool
-		injectPatchErr bool
-		wantPatches    int
-		wantPolicyNil  bool
-		wantLabelGone  bool
+		name             string
+		policy           *agentsv1alpha1.SandboxUpgradePolicy
+		strategy         agentsv1alpha1.SandboxUpdateOpsStrategyType
+		installedVersion string
+		hasFailedLabel   bool
+		injectPatchErr   bool
+		wantPatches      int
+		wantPolicyNil    bool
+		wantLabelGone    bool
+		wantUpdating     bool
 	}{
 		{
 			name:          "clears policy after upgrade succeeds",
@@ -1796,20 +2068,50 @@ func TestReconcile_CleanupUpdatedSandbox(t *testing.T) {
 			wantPatches:    1,
 			wantPolicyNil:  false,
 		},
+		{
+			name:             "matching installer token permits cleanup",
+			policy:           installerPolicy.DeepCopy(),
+			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+			installedVersion: "1.4.0",
+			wantPatches:      1,
+			wantPolicyNil:    true,
+		},
+		{
+			name:             "previous success does not complete a new installer operation",
+			policy:           installerPolicy.DeepCopy(),
+			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+			installedVersion: "previous-ops-uid",
+			wantUpdating:     true,
+		},
+		{
+			name:         "success without an installed version does not clear the new installer policy",
+			policy:       installerPolicy.DeepCopy(),
+			strategy:     agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+			wantUpdating: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
-			ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
-				},
-			})
+			ops.UID = "current-ops-uid"
+			ops.Spec.UpdateStrategy.Type = tt.strategy
+			ops.Spec.UpdateStrategy.PatchVersion = "1.4.0"
+			if tt.strategy == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate {
+				ops.Spec.UpdateStrategy.Installer = installerPolicy.Installer.DeepCopy()
+			} else {
+				ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+					},
+				})
+			}
 			ops.Finalizers = []string{finalizerName}
 			sbx := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
 				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
 			})
 			sbx.Spec.UpgradePolicy = tt.policy
+			sbx.Status.InstalledPatchVersion = tt.installedVersion
+			t.Cleanup(func() { ResourceVersionExpectations.Delete(sbx) })
 			if tt.hasFailedLabel {
 				sbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] = agentsv1alpha1.True
 			}
@@ -1838,16 +2140,23 @@ func TestReconcile_CleanupUpdatedSandbox(t *testing.T) {
 			})
 			assert.NoError(t, err)
 
-			// The ops still reaches Completed even when the cleanup patch fails.
 			updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
 			err = r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps)
-			assert.NoError(t, err)
-			assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsCompleted, updatedOps.Status.Phase)
+			require.NoError(t, err)
+			if tt.wantUpdating {
+				assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsUpdating, updatedOps.Status.Phase)
+				assert.Zero(t, updatedOps.Status.UpdatedReplicas)
+				assert.Equal(t, int32(1), updatedOps.Status.UpdatingReplicas)
+			} else {
+				assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsCompleted, updatedOps.Status.Phase)
+				assert.Equal(t, int32(1), updatedOps.Status.UpdatedReplicas)
+			}
 			assert.Equal(t, tt.wantPatches, sandboxPatches)
 
 			updatedSbx := &agentsv1alpha1.Sandbox{}
 			err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx)
-			assert.NoError(t, err)
+			require.NoError(t, err)
+			assert.Equal(t, tt.installedVersion, updatedSbx.Status.InstalledPatchVersion)
 			if tt.wantPolicyNil {
 				assert.Nil(t, updatedSbx.Spec.UpgradePolicy)
 			} else {
@@ -1857,6 +2166,15 @@ func TestReconcile_CleanupUpdatedSandbox(t *testing.T) {
 				assert.NotEqual(t, agentsv1alpha1.True, updatedSbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
 			} else if tt.hasFailedLabel {
 				assert.Equal(t, agentsv1alpha1.True, updatedSbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
+			}
+			if tt.wantUpdating {
+				assert.Equal(t, tt.policy, updatedSbx.Spec.UpgradePolicy)
+				_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ops)})
+				require.NoError(t, err)
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(ops), updatedOps))
+				assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsUpdating, updatedOps.Status.Phase)
+				assert.Zero(t, updatedOps.Status.UpdatedReplicas)
+				assert.Equal(t, tt.wantPatches, sandboxPatches)
 			}
 		})
 	}
@@ -2558,11 +2876,21 @@ func TestReconcile_UpgradeFailedLabelRemovedOnRecovery(t *testing.T) {
 func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 	action := &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"backup"}}}
 	tests := []struct {
-		name      string
-		patch     runtime.RawExtension
-		lifecycle *agentsv1alpha1.SandboxLifecycle
-		wantImage string
+		name        string
+		patch       runtime.RawExtension
+		lifecycle   *agentsv1alpha1.SandboxLifecycle
+		wantImage   string
+		installer   bool
+		wantVersion string
 	}{
+		{
+			name: "installer metadata patch",
+			patch: mustMarshalPatch(corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{"harness-version": "v2"}, Annotations: map[string]string{"harness-version": "v2"},
+			}}),
+			installer: true, wantImage: "busybox:1.0", wantVersion: "v2",
+		},
+		{name: "installer empty patch", installer: true, wantImage: "busybox:1.0"},
 		{name: "template patch", patch: mustMarshalPatch(corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}}}}), wantImage: "busybox:2.0"},
 		{name: "legacy nil lifecycle", wantImage: "busybox:1.0"},
 		{name: "legacy empty lifecycle", lifecycle: &agentsv1alpha1.SandboxLifecycle{}, wantImage: "busybox:1.0"},
@@ -2575,12 +2903,27 @@ func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 			ops.Finalizers = []string{finalizerName}
 			ops.Spec.Patch = tt.patch
 			ops.Spec.Lifecycle = tt.lifecycle.DeepCopy()
+			if tt.installer {
+				ops.UID = "current-ops-uid"
+				ops.Spec.UpdateStrategy.Type = agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate
+				ops.Spec.UpdateStrategy.PatchVersion = "1.4.0"
+				ops.Spec.UpdateStrategy.Installer = &agentsv1alpha1.InstallerSpec{Image: "installer:v2"}
+			}
 			sbx := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxUpgrading, []metav1.Condition{
 				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonResumeSucceed, Status: metav1.ConditionFalse},
 			})
 			sbx.Spec.Lifecycle = tt.lifecycle.DeepCopy()
 			sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}
+			if tt.installer {
+				sbx.Spec.Paused = true
+				sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
+					Type:         agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate,
+					PatchVersion: ops.Spec.UpdateStrategy.PatchVersion, Installer: ops.Spec.UpdateStrategy.Installer.DeepCopy(),
+				}
+				sbx.Status.UpgradingPatchVersion = ops.Spec.UpdateStrategy.PatchVersion
+			}
 			sbx.Annotations = map[string]string{agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True}
+			t.Cleanup(func() { ResourceVersionExpectations.Delete(sbx) })
 
 			r := newTestReconciler(ops, sbx)
 			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ops)}
@@ -2590,7 +2933,10 @@ func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 			updatedSbx := &agentsv1alpha1.Sandbox{}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updatedSbx))
 			assert.Equal(t, tt.wantImage, updatedSbx.Spec.Template.Spec.Containers[0].Image)
+			assert.Equal(t, tt.wantVersion, updatedSbx.Spec.Template.Labels["harness-version"])
+			assert.Equal(t, tt.wantVersion, updatedSbx.Spec.Template.Annotations["harness-version"])
 			assert.Empty(t, updatedSbx.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+			assert.Equal(t, sbx.Spec.Paused, updatedSbx.Spec.Paused)
 			assert.Equal(t, sbx.Spec.UpgradePolicy, updatedSbx.Spec.UpgradePolicy)
 			updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
 			require.NoError(t, r.Get(t.Context(), req.NamespacedName, updatedOps))

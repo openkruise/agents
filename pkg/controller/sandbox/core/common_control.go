@@ -203,12 +203,8 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 		// and publishes Ready in the same reconcile.
 	}
 
-	// For upgrade policies that do not require pod replacement (e.g.,
-	// sandbox-manager triggered inplace update via annotation), perform
-	// inplace update directly without entering the full upgrade lifecycle
-	// (PreUpgrade -> UpgradePod -> PostUpgrade). Recreate and CheckpointRestore
-	// are excluded here because they require the full lifecycle.
-	if !RequiresPodReplacementUpgrade(box) {
+	// Policies outside the full upgrade lifecycle reconcile in-place updates directly.
+	if !RequiresUpgrade(box) {
 		done, err := r.handleInplaceUpdateSandbox(ctx, args)
 		if err != nil {
 			return 0, err

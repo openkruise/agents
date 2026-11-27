@@ -87,14 +87,22 @@ const (
 	// checkpointing the pod, deleting it, and restoring from the checkpoint.
 	// This preserves the writable layer of containers whose image is unchanged.
 	SandboxUpdateOpsStrategyCheckpointRestore SandboxUpdateOpsStrategyType = "CheckpointRestore"
+
+	// SandboxUpdateOpsStrategyInstallerUpdate means sandboxes will be updated by
+	// injecting an ephemeral installer container into the running Pod. The installer
+	// writes new content into the target container's filesystem through /proc/1/root,
+	// so the Pod is not replaced and the target container's writable layer is preserved.
+	// Container images must not be modified under this strategy.
+	SandboxUpdateOpsStrategyInstallerUpdate SandboxUpdateOpsStrategyType = "InstallerUpdate"
 )
 
 // SandboxUpdateOpsStrategy defines the strategy for batch sandbox updates.
+// +kubebuilder:validation:XValidation:rule="!has(self.type) || self.type != 'InstallerUpdate' || has(self.patchVersion)",message="patchVersion is required when type is InstallerUpdate"
 type SandboxUpdateOpsStrategy struct {
 	// Type specifies the update strategy type.
 	// When empty, defaults to Recreate.
-	// Supported values: Recreate, CheckpointRestore.
-	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore
+	// Supported values: Recreate, CheckpointRestore, InstallerUpdate.
+	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore;InstallerUpdate
 	// +optional
 	Type SandboxUpdateOpsStrategyType `json:"type,omitempty"`
 
@@ -102,6 +110,22 @@ type SandboxUpdateOpsStrategy struct {
 	// Value can be an absolute number (e.g., 5) or a percentage of total sandboxes (e.g., 10%).
 	// +optional
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+
+	// PatchVersion is the user-defined installer payload version copied to each
+	// sandbox's upgrade policy. It must be a nonempty Kubernetes label value.
+	// Required for InstallerUpdate; ignored by other strategies. Immutable.
+	// Reuse a version only for the same payload; a new attempt needs a new version.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="patchVersion is immutable"
+	PatchVersion string `json:"patchVersion,omitempty"`
+
+	// Installer configures the ephemeral container injected into each selected
+	// sandbox. Required when Type is InstallerUpdate, forbidden otherwise.
+	// +optional
+	Installer *InstallerSpec `json:"installer,omitempty"`
 }
 
 // SandboxUpdateOpsPhase represents the phase of a SandboxUpdateOps.

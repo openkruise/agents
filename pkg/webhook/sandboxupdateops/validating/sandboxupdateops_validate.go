@@ -17,16 +17,19 @@ limitations under the License.
 package validating
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -104,17 +107,9 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 		}
 	}
 
-	// 4. When using CheckpointRestore strategy, the patch must not modify container images.
-	// CheckpointRestore preserves the writable layer of containers whose image is unchanged;
-	// changing an image would invalidate the checkpoint.
-	if obj.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore && len(obj.Spec.Patch.Raw) > 0 {
-		patchTmpl := &corev1.PodTemplateSpec{}
-		if err := json.Unmarshal(obj.Spec.Patch.Raw, patchTmpl); err != nil {
-			errList = append(errList, field.Invalid(specPath.Child("patch"), obj.Spec.Patch, "failed to parse patch as PodTemplateSpec: "+err.Error()))
-		} else if msg := validateNoImageChange(patchTmpl); msg != "" {
-			errList = append(errList, field.Forbidden(specPath.Child("patch"), msg))
-		}
-	}
+	// 4. Validate the update strategy: installer presence and the
+	// no-image-change rule for strategies that preserve the writable layer.
+	errList = append(errList, h.validateUpdateStrategy(obj, specPath)...)
 
 	// 5. Check for active (non-terminal) SandboxUpdateOps in the same namespace
 	opsList := &agentsv1alpha1.SandboxUpdateOpsList{}
@@ -139,17 +134,133 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 	return admission.Allowed("")
 }
 
+// validateUpdateStrategy validates the installer configuration and strategy-specific patch restrictions.
+func (h *SandboxUpdateOpsValidatingHandler) validateUpdateStrategy(obj *agentsv1alpha1.SandboxUpdateOps, specPath *field.Path) field.ErrorList {
+	var errList field.ErrorList
+	strategy := obj.Spec.UpdateStrategy
+	strategyPath := specPath.Child("updateStrategy")
+
+	if strategy.PatchVersion != "" {
+		for _, msg := range validation.IsValidLabelValue(strategy.PatchVersion) {
+			errList = append(errList, field.Invalid(strategyPath.Child("patchVersion"), strategy.PatchVersion, msg))
+		}
+	}
+	if strategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate {
+		if strategy.PatchVersion == "" {
+			errList = append(errList, field.Required(strategyPath.Child("patchVersion"), "patchVersion is required when updateStrategy.type is InstallerUpdate"))
+		}
+		if strategy.Installer == nil {
+			errList = append(errList, field.Required(strategyPath.Child("installer"), "installer is required when updateStrategy.type is InstallerUpdate"))
+		} else {
+			errList = append(errList, validateInstallerSpec(strategy.Installer, strategyPath.Child("installer"))...)
+		}
+	} else if strategy.Installer != nil {
+		errList = append(errList, field.Forbidden(strategyPath.Child("installer"), "installer is only allowed when updateStrategy.type is InstallerUpdate"))
+	}
+
+	if (strategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore ||
+		strategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate) && len(obj.Spec.Patch.Raw) > 0 {
+		patchTmpl := &corev1.PodTemplateSpec{}
+		if err := json.Unmarshal(obj.Spec.Patch.Raw, patchTmpl); err != nil {
+			errList = append(errList, field.Invalid(specPath.Child("patch"), obj.Spec.Patch, "failed to parse patch as PodTemplateSpec: "+err.Error()))
+		} else if strategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate {
+			errList = append(errList, validateInstallerTemplatePatch(obj.Spec.Patch.Raw, specPath.Child("patch"))...)
+		} else if msg := validateNoImageChange(patchTmpl, strategy.Type); msg != "" {
+			errList = append(errList, field.Forbidden(specPath.Child("patch"), msg))
+		}
+	}
+
+	return errList
+}
+
+func validateInstallerTemplatePatch(raw []byte, path *field.Path) field.ErrorList {
+	var patch map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &patch); err != nil {
+		return field.ErrorList{field.Invalid(path, string(raw), "failed to parse metadata-only template patch: "+err.Error())}
+	}
+	if patch == nil {
+		return field.ErrorList{field.Invalid(path, string(raw), "template patch must be an object")}
+	}
+	var errList field.ErrorList
+	for key, fields := range patch {
+		if key == "metadata" {
+			if fields == nil {
+				errList = append(errList, field.Forbidden(path.Child(key), "InstallerUpdate does not support metadata deletion or replacement"))
+				continue
+			}
+			for name, value := range fields {
+				if name == "creationTimestamp" && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+					continue
+				}
+				if name != "labels" && name != "annotations" {
+					errList = append(errList, field.Forbidden(path.Child(key, name), "InstallerUpdate only supports template labels and annotations"))
+					continue
+				}
+				var entries map[string]*string
+				if err := json.Unmarshal(value, &entries); err != nil {
+					errList = append(errList, field.Invalid(path.Child(key, name), string(value), err.Error()))
+					continue
+				}
+				// Pod metadata synchronization is additive and cannot apply template removals.
+				if entries == nil {
+					errList = append(errList, field.Forbidden(path.Child(key, name), "InstallerUpdate does not support metadata deletion or replacement"))
+				}
+				for entry, entryValue := range entries {
+					if entryValue == nil || strings.HasPrefix(entry, "$") {
+						errList = append(errList, field.Forbidden(path.Child(key, name).Key(entry), "InstallerUpdate does not support metadata deletion or replacement"))
+					}
+				}
+			}
+			continue
+		}
+		// A marshaled metadata-only PodTemplateSpec carries an empty spec with containers:null.
+		if key == "spec" && fields != nil && (len(fields) == 0 ||
+			(len(fields) == 1 && bytes.Equal(bytes.TrimSpace(fields["containers"]), []byte("null")))) {
+			continue
+		}
+		errList = append(errList, field.Forbidden(path.Child(key), "InstallerUpdate only supports metadata-only template patches"))
+	}
+	return errList
+}
+
+// validateInstallerSpec validates the fields of an installer configuration.
+func validateInstallerSpec(installer *agentsv1alpha1.InstallerSpec, path *field.Path) field.ErrorList {
+	var errList field.ErrorList
+
+	if installer.Image == "" {
+		errList = append(errList, field.Required(path.Child("image"), "installer.image is required"))
+	}
+	for i, cmd := range installer.Command {
+		if cmd == "" {
+			errList = append(errList, field.Invalid(path.Child("command").Index(i), cmd, "command elements must be non-empty"))
+		}
+	}
+	if installer.TimeoutSeconds != nil && *installer.TimeoutSeconds < 1 {
+		errList = append(errList, field.Invalid(path.Child("timeoutSeconds"), *installer.TimeoutSeconds, "timeoutSeconds must be positive"))
+	}
+	for _, env := range installer.Env {
+		if strings.HasPrefix(env.Name, "SANDBOX_INSTALLER_") {
+			errList = append(errList, field.Forbidden(path.Child("env").Key(env.Name), "env names with the SANDBOX_INSTALLER_ prefix are reserved for the controller"))
+		}
+	}
+	if installer.SecurityContext != nil && installer.SecurityContext.Privileged != nil && *installer.SecurityContext.Privileged {
+		errList = append(errList, field.Forbidden(path.Child("securityContext", "privileged"), "privileged installer containers are not allowed"))
+	}
+
+	return errList
+}
+
 // validateNoImageChange checks whether the given patch template modifies any container
 // or init container image. Returns a non-empty string describing the violation if found.
-func validateNoImageChange(tmpl *corev1.PodTemplateSpec) string {
+func validateNoImageChange(tmpl *corev1.PodTemplateSpec, strategyType agentsv1alpha1.SandboxUpdateOpsStrategyType) string {
 	for _, c := range tmpl.Spec.Containers {
 		if c.Image != "" {
-			return fmt.Sprintf("CheckpointRestore strategy does not support modifying container images (container %q)", c.Name)
+			return fmt.Sprintf("%s strategy does not support modifying container images (container %q)", strategyType, c.Name)
 		}
 	}
 	for _, c := range tmpl.Spec.InitContainers {
 		if c.Image != "" {
-			return fmt.Sprintf("CheckpointRestore strategy does not support modifying init container images (container %q)", c.Name)
+			return fmt.Sprintf("%s strategy does not support modifying init container images (container %q)", strategyType, c.Name)
 		}
 	}
 	return ""
@@ -174,6 +285,16 @@ func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, 
 	if !reflect.DeepEqual(oldObj.Spec.Lifecycle, newObj.Spec.Lifecycle) {
 		errList = append(errList, field.Forbidden(specPath.Child("lifecycle"), "lifecycle is immutable"))
 	}
+	if !reflect.DeepEqual(oldObj.Spec.UpdateStrategy.Installer, newObj.Spec.UpdateStrategy.Installer) {
+		errList = append(errList, field.Forbidden(specPath.Child("updateStrategy", "installer"), "installer is immutable"))
+	}
+	if oldObj.Spec.UpdateStrategy.PatchVersion != newObj.Spec.UpdateStrategy.PatchVersion {
+		errList = append(errList, field.Forbidden(specPath.Child("updateStrategy", "patchVersion"), "patchVersion is immutable"))
+	}
+
+	// updateStrategy.type stays mutable, so the strategy-level rules must hold
+	// on update as well.
+	errList = append(errList, h.validateUpdateStrategy(newObj, specPath)...)
 
 	if len(errList) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())

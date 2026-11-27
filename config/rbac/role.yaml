@@ -38,6 +38,7 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods/ephemeralcontainers
   - pods/resize
   - pods/status
   verbs:

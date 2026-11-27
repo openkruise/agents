@@ -505,20 +505,20 @@ SandboxUpdateOps                       Sandbox controller                kubelet
         |
         | 2. patch Sandbox:
         |      spec.upgradePolicy.type         = InstallerUpdate
-        |      spec.upgradePolicy.patchVersion = <ops UID>
+        |      spec.upgradePolicy.patchVersion = ops.spec.updateStrategy.patchVersion
         |      spec.upgradePolicy.installer    = <copied from ops>
         |      spec.lifecycle                  = ops.spec.lifecycle
         |      labels[agents.kruise.io/update-ops] = <ops name>
         |    (spec.template is NOT modified)
         v
    Sandbox CR ------------------------------------------------------->
-                                     3. trigger: patchVersion != status.completedPatchVersion
+                                     3. trigger: patchVersion != status.installedPatchVersion
                                         -> phase = Upgrading
                                         -> Upgrading condition removed
                                      4. PreUpgrade hook (envd, inside sandbox)
                                      5. verify target container Running
                                      6. POST pods/<name>/ephemeralcontainers
-                                          name: installer-<hash8>
+                                          name: installer-<hash8>[-N]
                                           image/command/env/securityContext from spec
                                           targetContainerName: <resolved>
                                                                     |
@@ -531,7 +531,7 @@ SandboxUpdateOps                       Sandbox controller                kubelet
                                                                     |
                                      9. poll pod.status                |
                                         .ephemeralContainerStatuses <----- terminated, exit 0
-                                     10. status.completedPatchVersion = patchVersion
+                                     10. status.installedPatchVersion = patchVersion
                                      11. PostUpgrade hook (envd) — restart harness,
                                          assert new version
                                      12. Upgrading = True/Succeeded, phase = Running
@@ -578,6 +578,7 @@ spec:
 
   updateStrategy:
     type: InstallerUpdate
+    patchVersion: "1.4.0"
     maxUnavailable: 1
     installer:
       # Required. Carrier of the update payload and of whatever tooling the
@@ -645,6 +646,7 @@ What the manifest cannot express, field by field:
 | Field | Required | Default | Notes |
 |---|---|---|---|
 | `updateStrategy.type` | no | `Recreate` | Enum widened to `Recreate;CheckpointRestore;InstallerUpdate`. |
+| `updateStrategy.patchVersion` | with `type: InstallerUpdate` | — | User-defined, immutable payload version; 1–63 characters, alphanumeric at both ends, with alphanumerics, `-`, `_`, or `.` inside. Suitable as a Sandbox label value. |
 | `updateStrategy.installer` | with `type: InstallerUpdate` | — | Rejected under any other strategy. |
 | `installer.image` | **yes** | — | `MinLength=1`. |
 | `installer.command` | no | image `ENTRYPOINT`/`CMD` | `+listType=atomic`, so a strategic merge patch replaces the whole list instead of appending. |
@@ -654,9 +656,9 @@ What the manifest cannot express, field by field:
 | `installer.imagePullPolicy` | no | `IfNotPresent` | Enum `Always;IfNotPresent;Never`. |
 | `installer.timeoutSeconds` | no | `600` | `Minimum=1`. Bounds the install from entry into `Installing`, so it also covers an image pull that never completes. |
 
-The Go declaration itself is unchanged in shape from the existing
-`SandboxUpdateOpsStrategy`: one optional pointer field, `Installer
-*InstallerSpec` with `json:"installer,omitempty"`. `InstallerSpec` is declared in
+`SandboxUpdateOpsStrategy` adds `PatchVersion string` with
+`json:"patchVersion,omitempty"` and `Installer *InstallerSpec` with
+`json:"installer,omitempty"`. `InstallerSpec` is declared in
 `api/v1alpha1/sandbox_types.go` rather than in `sandboxupdateops_types.go`,
 because it is referenced from both `SandboxUpdateOpsStrategy.Installer` and
 `SandboxUpgradePolicy.Installer`. That file already imports
@@ -688,14 +690,14 @@ type SandboxUpgradePolicy struct {
 	// +optional
 	Type SandboxUpgradePolicyType `json:"type,omitempty"`
 
-	// PatchVersion identifies the payload this upgrade installs. It is an opaque
-	// token: SandboxUpdateOps sets it to the UID of the owning ops object, so every
-	// operation carries a distinct value. The sandbox controller runs an
-	// InstallerUpdate upgrade only while PatchVersion differs from
-	// status.completedPatchVersion; Recreate and CheckpointRestore ignore it because
-	// they key off the Pod template revision instead.
-	// Required when Type is InstallerUpdate.
+	// PatchVersion is the user-defined installer payload version and must be a
+	// nonempty Kubernetes label value. InstallerUpdate runs only when it differs
+	// from status.installedPatchVersion. Recreate and CheckpointRestore ignore it.
+	// Required when Type is InstallerUpdate; a new attempt needs a new version.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
 	PatchVersion string `json:"patchVersion,omitempty"`
 
 	// Installer configures the ephemeral container for an InstallerUpdate
@@ -709,14 +711,25 @@ type SandboxUpgradePolicy struct {
 type SandboxStatus struct {
 	// ...existing fields...
 
-	// CompletedPatchVersion is the spec.upgradePolicy.patchVersion of the last
-	// InstallerUpdate upgrade that finished successfully. It is what makes the
-	// install idempotent: the controller does not re-run a patch it has already
-	// completed, and a new ops object carries a new token.
+	// InstalledPatchVersion is the spec.upgradePolicy.patchVersion whose installer
+	// last exited successfully, recording the changes applied to the sandbox. It
+	// does not mean the sandbox can start normally at that version; for example,
+	// PostUpgrade may still fail. The controller does not reinstall this version.
 	// +optional
-	CompletedPatchVersion string `json:"completedPatchVersion,omitempty"`
+	InstalledPatchVersion string `json:"installedPatchVersion,omitempty"`
 }
 ```
+
+`installedPatchVersion` answers "which payload has been written into this
+sandbox", not "is this sandbox healthy at that payload". The controller records
+it as soon as the installer exits 0 and before `postUpgrade` runs, so it is set
+even when `postUpgrade` then fails — for example because the harness does not
+restart or the version assertion does not hold — and an installed version can
+likewise fail to start later. Whether the upgraded sandbox is usable is reported
+by the `Upgrading` condition reaching `Succeeded` together with the `Ready`
+condition, never by this field alone. The field exists so the controller never
+reinstalls a payload that has already been applied, because a second install
+would meet a filesystem the first one already changed.
 
 `SandboxUpgradePolicy` exists only on `SandboxSpec`
 (`api/v1alpha1/sandbox_types.go:107`); it is not a field of `SandboxSetSpec` or
@@ -733,13 +746,15 @@ revision and break
 `pkg/controller/sandbox/core/upgrade_control.go:394`. A separate token avoids
 that entirely.
 
-The field is named for what it will carry rather than for how it is generated
-today. Deriving it from the ops UID keeps SUO the only writer and guarantees
-distinctness across operations, which is all the controller needs. Letting an
-operator set it explicitly from the payload version — so that
-`status.completedPatchVersion` reads as `1.4.0` rather than as a UID — is a
-compatible later extension, since the controller only ever compares the two values
-for equality.
+The operator supplies `spec.updateStrategy.patchVersion`, which SUO copies to
+`spec.upgradePolicy.patchVersion`; the ops UID remains an object identity, not a
+payload version. The version must be a nonempty Kubernetes label value (at most
+63 characters), so values such as `1.4.0` can also be used in Sandbox labels.
+No label key or automatic label publication is introduced by this field.
+The strategy version is immutable within an ops object, like its installer.
+Reusing an installed version does not reinstall it; reuse a version only for the
+same payload. Recovery from a terminal failure requires a new ops object with a
+different version, even when the corrected installer uses the same image tag.
 
 Why the token cannot be dropped: the `Upgrading` condition alone is insufficient.
 SUO clears `spec.upgradePolicy` only after it observes success, so between
@@ -832,7 +847,8 @@ The installer command is expected to:
 5. **Be idempotent.** The controller runs a given `patchVersion` exactly once and
    never re-injects, so this is not about surviving a retry. It is about surviving
    a *failure*: a non-zero exit may leave the target half-updated, and the
-   operator's recovery is a new ops object whose installer meets that state. The
+   operator's recovery is a new ops object with a different `patchVersion` whose
+   installer meets that state. The
    same image may also be applied to a sandbox that a previous, different ops
    already installed into.
 6. **Exit 0 on success.** stdout and stderr are truncated into the `Upgrading`
@@ -1005,7 +1021,7 @@ All in `pkg/controller/sandboxupdateops/`.
 
 **`patch.go` — `applySandboxPatch` (line 140).** The ops→sandbox policy mapping at
 lines 144-150 gains an `InstallerUpdate` case. It sets the policy type, sets
-`PatchVersion` to the UID of the owning ops object, and deep-copies
+`PatchVersion` to `ops.Spec.UpdateStrategy.PatchVersion`, and deep-copies
 `ops.Spec.UpdateStrategy.Installer` into the policy.
 
 For `InstallerUpdate` the function must **not** call `mergeTemplate`, because
@@ -1021,7 +1037,7 @@ adjustments, all guarded on the strategy being `InstallerUpdate`:
   image change — and typically an empty `spec.patch` — that check is meaningless
   here and would let the ops complete without installing anything. Replace it with
   an install-aware check: the sandbox needs no update when
-  `sbx.Status.CompletedPatchVersion == string(ops.UID)`.
+  `sbx.Status.InstalledPatchVersion == ops.Spec.UpdateStrategy.PatchVersion`.
 - Line 467 returns `sandboxResumeSucceed` for a labelled, `Running` sandbox with no
   `Upgrading` condition. That heuristic exists to recover a lost phase-2 template
   patch. `InstallerUpdate` has no phase 2, so this branch must be skipped; such a
@@ -1046,12 +1062,12 @@ condition must split by policy. Today it fires when the computed
 `status.updateRevision` differs from the recorded one *and* the policy requires a
 Pod replacement; under `InstallerUpdate` neither half holds. For installer policy it
 instead fires when `spec.upgradePolicy.patchVersion` is non-empty and differs from
-`status.completedPatchVersion`. Both paths keep the existing effect: set
+`status.installedPatchVersion`. Both paths keep the existing effect: set
 `Phase=Upgrading` and remove the `Upgrading` and `Paused` conditions.
 
 The `SandboxUpgrading` case at line 857, which resets the condition when the
 template changes mid-upgrade, needs the same split: for installer policy compare
-`PatchVersion` against `CompletedPatchVersion` instead of the template revision, so a
+`PatchVersion` against `InstalledPatchVersion` instead of the template revision, so a
 re-issued patch resumes from the right step.
 
 **Gate** — `pkg/controller/sandbox/core/upgrade_control.go:100`. Add a
@@ -1075,39 +1091,66 @@ skipped.
 patch and abandons the upgrade if the resume trigger disappears without a revision
 change. Under installer policy there is no phase-2 patch, so this state must
 transition directly to `PreUpgrade`; the abandonment check keys off
-`PatchVersion != CompletedPatchVersion` instead of `UpdateRevision`.
+`PatchVersion != InstalledPatchVersion` instead of `UpdateRevision`.
 
 **New `Installing` step.** A `performInstallerUpgrade` function replaces
 `Checkpointing` + `UpgradePod` and does seven things:
 
-1. **Resolve the target container.** `installer.targetContainerName`, or
+1. **Guard PID namespace ownership.** Alongside the missing- and
+   terminating-Pod guards, before any observation or lookup: if the Pod spec sets
+   `shareProcessNamespace` or `hostPID`, set `InstallingFailed` with an explanatory
+   message. PID 1 would then be `pause` or the node's init, so `/proc/1/root` names
+   the wrong rootfs and the installer's own `-ef` guard cannot detect it — see
+   [PID 1 in the target container](#pid-1-in-the-target-container). Like the target
+   name resolution in step 3, this is a controller-side check rather than an
+   admission check, because the selector may match sandboxes that do not exist yet.
+   Both fields are immutable on a running Pod, so the check is a static spec
+   guard with no API reads: it can run before observation without masking an
+   installer that already exited, and the controller could never have injected
+   an installer into such a Pod in the first place.
+2. **Observe before resolving; do not inject twice.** Scan
+   `pod.Spec.EphemeralContainers` backwards for the
+   first entry carrying the `SANDBOX_INSTALLER_PATCH_VERSION` env — the newest
+   injected installer. Compare that env's **value** with `patchVersion`, never the
+   container name: a matching value means this patch version is already injected,
+   so skip injection and go straight to step 6; any other value means a new
+   container must be appended. Entries without the env (for example `kubectl
+   debug` containers) never participate in the decision. The env value is what
+   bounds the install to one container per `patchVersion` and replaces any need
+   for an attempt counter; a requeue after a partial write finds the recorded
+   version and evaluates the existing container instead of injecting again.
+   This observation runs before any template or target lookup: it needs no API
+   reads, and an unavailable `TemplateRef` must not mask an installer that
+   already exited successfully.
+3. **Resolve the target container, only when injecting.**
+   `installer.targetContainerName`, or
    `spec.template.spec.containers[0].name` when empty — the same convention
    `Sandbox.SetImage` uses
    (`pkg/sandbox-manager/infra/sandboxcr/sandbox.go:468`). If the name is absent
    from the resolved Pod spec, set `InstallingFailed` with an explanatory message;
    this cannot be caught at admission because the selector may match sandboxes
    that do not exist yet.
-2. **Guard PID namespace ownership.** If the resolved Pod spec sets
-   `shareProcessNamespace` or `hostPID`, set `InstallingFailed` with an explanatory
-   message. PID 1 would then be `pause` or the node's init, so `/proc/1/root` names
-   the wrong rootfs and the installer's own `-ef` guard cannot detect it — see
-   [PID 1 in the target container](#pid-1-in-the-target-container). Like the target
-   name resolution in step 1, this is a controller-side check rather than an
-   admission check, because the selector may match sandboxes that do not exist yet.
-3. **Require a live target.** The Pod must be `Running` and the target's
+4. **Require a live target.** The Pod must be `Running` and the target's
    `ContainerStatus.State.Running` must be non-nil. Otherwise wait — do not fail,
    since a transient restart should not abort the batch.
-4. **Do not inject twice.** Scan `pod.Spec.EphemeralContainers` for the exact name
-   `installer-<hash8(patchVersion)>`. If it is already present, skip injection and
-   go straight to step 6. The name is a deterministic function of `patchVersion`,
-   so a requeue after a partial write cannot append a second container — that
-   guard is the whole reason the name is derived rather than generated, and it
-   replaces any need for an attempt counter.
-5. **Inject.** Append one `EphemeralContainer` named `installer-<hash8>`, carrying
+5. **Inject.** Append one `EphemeralContainer` named
+   `installer-<hash8(patchVersion)>` for the first injection of that version.
+   When entries for the same version already exist but a newer installer was
+   appended after them (a re-install of an older version), the new entry takes
+   the next sequence number after the existing ones: `-1`, `-2`, ... If any
+   existing container — regular, init, or a plain ephemeral container such as
+   `kubectl debug` — already occupies the candidate name, the sequence number
+   is bumped until the name is free. The name
+   stays deterministic so a rollback re-install is reproducible. The container
+   carries
    the resolved image, command, env, security context and image pull policy, with
-   `TargetContainerName` set. Write it through the `ephemeralcontainers`
-   subresource — the same pattern already used for `pods/resize` at
-   `pkg/utils/inplaceupdate/inplace_update.go:524`. A `Conflict` means the Pod
+   `TargetContainerName` set. The write is a
+   `client.StrategicMergeFrom(pod, client.MergeFromWithOptimisticLock{})` patch
+   of a Pod copy with the installer appended, sent through the
+   `ephemeralcontainers` subresource: the strategic merge diff contains only the
+   new entry, leaving existing entries untouched as the subresource requires,
+   and the `resourceVersion` precondition rejects a write computed from a stale
+   informer cache. A `Conflict` means the Pod
    changed underneath us: requeue and retry the whole step, recomputing from the
    fresh Pod rather than injecting twice. This is one injection per
    `patchVersion`; there is no second attempt.
@@ -1115,7 +1158,7 @@ transition directly to `PreUpgrade`; the abandonment check keys off
    name. Every outcome below is terminal for this `patchVersion` — the controller
    never re-injects, because an ephemeral container cannot be removed, restarted or
    replaced, so a second one would only add a second entry to `pod.spec` without
-   undoing the first. Recovery is a new ops object, which carries a new
+   undoing the first. Recovery is a new ops object with a different user-supplied
    `patchVersion` and therefore a new container name.
    - `State.Waiting.Reason == "ImagePullBackOff" | "ErrImagePull"` → keep waiting.
      The kubelet retries the pull on its own backoff and no new ephemeral container
@@ -1123,7 +1166,10 @@ transition directly to `PreUpgrade`; the abandonment check keys off
      the same `installer.timeoutSeconds` deadline, measured from when the
      `Upgrading` condition entered the `Installing` reason rather than from
      `State.Running.StartedAt`, which never exists for a container that never
-     started.
+     started. When the deadline turns a waiting container into
+     `InstallingFailed`, the durable message carries the container name and the
+     kubelet's last waiting reason and message, so an operator can distinguish
+     a stuck image pull from a running installer that timed out.
    - `State.Terminated.ExitCode == 0` → success; proceed.
    - `State.Terminated.ExitCode == 125` → `InstallingFailed`, message "container
      runtime does not support namespace targeting". Reported distinctly because no
@@ -1141,8 +1187,10 @@ transition directly to `PreUpgrade`; the abandonment check keys off
      re-running it is not obviously safe.
    - `State.Running` past `installer.timeoutSeconds` → `InstallingFailed`, message
      noting the container cannot be terminated.
-7. **Record completion.** Copy `spec.upgradePolicy.patchVersion` into
-   `status.completedPatchVersion`, then fall through to `PostUpgrade`.
+7. **Record the installed version.** Copy `spec.upgradePolicy.patchVersion` into
+   `status.installedPatchVersion`, then fall through to `PostUpgrade`. This
+   records that the changes are applied, not that the sandbox starts normally at
+   that version; `PostUpgrade` can still fail.
 
 On success the existing tail of `EnsureSandboxUpgraded` (lines 291-305) already
 does the right thing: `Upgrading=True/Succeeded`, `Phase=Running`,
@@ -1252,12 +1300,13 @@ operator's choice.
   that logic anyway.
 - **Ephemeral containers accumulate permanently.** Each install appends an entry
   to `pod.spec.ephemeralContainers` that can never be removed, along with its
-  `ephemeralContainerStatuses` entry. Because the name is a deterministic function
-  of `patchVersion` and the controller injects at most once per `patchVersion`, the
-  growth is exactly one entry per successful or failed operation applied to that
-  Pod — bounded in practice by the one-ops-per-namespace rule, and auditable
-  because the names encode the patch version. There is no attempt counter, so a
-  single operation can never append more than one.
+  `ephemeralContainerStatuses` entry. Because the newest installer's
+  `SANDBOX_INSTALLER_PATCH_VERSION` env records the applied version and the
+  controller injects at most once per `patchVersion`, the growth is exactly one
+  entry per successful or failed operation applied to that Pod — bounded in
+  practice by the one-ops-per-namespace rule, and auditable because the names
+  encode the patch version hash. There is no attempt counter, so a single
+  operation can never append more than one.
 - **`RestartPolicy` must not be set** on the injected container. Ephemeral
   containers are never restarted; requesting otherwise is rejected by the API
   server.
@@ -1267,12 +1316,18 @@ operator's choice.
   controller copies into the condition message.
 - **Container name validity.** The generated name must be a DNS label: lowercase
   alphanumerics and `-`, at most 63 characters, and unique across the Pod's
-  containers, init containers and ephemeral containers. `installer-<8 hex>`
-  satisfies this; hash `patchVersion` rather than embedding it, since the value is
-  opaque and today is a 36-character UID, which would crowd the budget. Deriving
-  the name from `patchVersion` is also what makes it unique per operation: two
-  successive ops objects produce two different names, and one operation can never
-  produce two.
+  containers, init containers and ephemeral containers.
+  `installer-<8 hex>` (plus a `-N` sequence number for re-installs) satisfies
+  this; hash `patchVersion` rather than
+  embedding it, since the value is opaque and may be up to 63 characters, which
+  would crowd the budget. The hash prefix keeps the name auditable per version.
+  Stale-cache safety comes from the optimistic-lock `resourceVersion`
+  precondition on the injection patch: a write computed from a pre-injection
+  snapshot is rejected with a `Conflict` and retried from a fresh Pod, so no
+  resourceVersion-expectation guard is needed for this path. Deterministic
+  naming keeps rollback re-installs reproducible. Uniqueness against
+  regular, init and plain ephemeral containers is enforced by bumping the `-N`
+  sequence number whenever the candidate name is already occupied.
 - **No probes, no ports, no lifecycle hooks** on the installer container — all
   rejected by the API server. Readiness is judged solely from
   `ephemeralContainerStatuses`.
@@ -1391,8 +1446,8 @@ fail-stops the batch, matching existing SUO semantics. The contract requires
 idempotent installers and recommends staging into a temporary directory and
 switching atomically, so the common failure leaves the live tree untouched rather
 than half-written. Recovery is the operator's decision: delete and recreate the
-sandbox, or re-run a corrected ops — which carries a new `patchVersion` and
-therefore a new container name.
+sandbox, or create a corrected ops with a different user-supplied `patchVersion`
+and therefore a new container name.
 
 **Result is not durable across Pod replacement.** See
 [Durability](#durability-of-the-result).
@@ -1505,7 +1560,7 @@ used:
   not by the API server, and does not change.
 - New optional fields only: `updateStrategy.installer`,
   `upgradePolicy.patchVersion`, `upgradePolicy.installer`,
-  `status.completedPatchVersion`. Absent means unused.
+  `status.installedPatchVersion`. Absent means unused.
 - `SandboxInstallerUpdateGate` defaults to `false`, so a controller upgraded
   without configuration change behaves exactly as before, and the webhook rejects
   the new strategy.
@@ -1532,12 +1587,13 @@ used:
 **Unit — `pkg/controller/sandboxupdateops/`** (table-driven, extending the
 existing tables per the repository's test rules):
 
-- `patch_test.go`: `InstallerUpdate` sets `Type`, `PatchVersion = ops.UID` and a
+- `patch_test.go`: `InstallerUpdate` sets `Type`, copies the user-supplied
+  `ops.Spec.UpdateStrategy.PatchVersion`, and stores a
   deep-copied `Installer`; does not merge the template; still sets the tracking
   label and clears the stale failure label; a `Paused` sandbox gets the resume
   trigger *and* the full policy.
 - `sandboxupdateops_controller_test.go`: classification of a sandbox whose
-  `CompletedPatchVersion` matches (→ `NoNeedUpdate`) and does not match (→
+  `InstalledPatchVersion` matches (→ `NoNeedUpdate`) and does not match (→
   `Candidate`); an empty `spec.patch` still yields candidates; a labelled
   `Running` sandbox with no `Upgrading` condition classifies as `Updating`, not
   `ResumeSucceed`; `InstallingFailed` classifies as `Failed` and consumes budget;
@@ -1555,23 +1611,37 @@ existing tables per the repository's test rules):
   `TargetContainerName`, default `SYS_PTRACE`); operator `securityContext`
   overrides the default; subresource `Conflict` → error without a second
   injection.
-- Status evaluation: exit 0 → `CompletedPatchVersion` set and advance to
+- Status evaluation: exit 0 → `InstalledPatchVersion` set and advance to
   `PostUpgrade`; exit 125 → `InstallingFailed` with the namespace-targeting
   message; exit 126 → `InstallingFailed` with the absolute-path message; exit 1 →
   `InstallingFailed` with truncated stdout/stderr; `ImagePullBackOff` → stays in
-  `Installing` until the deadline, then `InstallingFailed`; running past
-  `timeoutSeconds` → `InstallingFailed`.
-- Single-injection guarantee: reconciling a sandbox whose Pod already contains
-  `installer-<hash8(patchVersion)>` performs no second injection and evaluates the
-  existing entry instead; two different `patchVersion` values produce two
-  differently named entries.
+  `Installing` until the deadline, then `InstallingFailed` with the container
+  name and the kubelet's last waiting reason and message in the condition; a
+  container with no status yet still names the container at the deadline;
+  running past `timeoutSeconds` → `InstallingFailed`.
+- Single-injection guarantee: reconciling a sandbox whose newest installer entry
+  records the current `patchVersion` in `SANDBOX_INSTALLER_PATCH_VERSION` performs
+  no second injection and evaluates the existing entry instead, regardless of its
+  container name; a newer installer recording a different version triggers an
+  append that preserves the older entries, and ephemeral containers without the
+  contract env are ignored by the decision. Re-installing a version whose
+  installer is buried under a newer one appends a `-N` sequence entry after the
+  highest existing suffix, and a second reconcile from a stale pre-injection
+  Pod is rejected with a `Conflict` by the `resourceVersion` precondition
+  without creating a duplicate. The test interceptor applies the generated
+  patch through the real strategic merge path, enforces the precondition, and
+  rejects modifications to existing ephemeral containers as the API server does.
+  Observation precedes target resolution: a completed or failed installer is
+  evaluated even when the referenced `SandboxTemplate` no longer exists, with
+  no API lookup and no patch on that path. The PID-namespace guards run before
+  observation, together with the missing- and terminating-Pod guards.
 - `EnsureSandboxUpgraded` under installer policy: `PreUpgrade` → `Installing` →
   `PostUpgrade` → `Succeeded`, with `Checkpointing` skipped and
   `CleanupCheckpoints` not called; `ResumeSucceed` advances to `PreUpgrade`
   without a template patch.
 - `sandbox_controller_test.go`: the upgrade-trigger predicate's truth table; the
   trigger fires on a new `PatchVersion` and does not re-fire once
-  `CompletedPatchVersion` matches; the `SandboxUpgrading` re-entry path resets the
+  `InstalledPatchVersion` matches; the `SandboxUpgrading` re-entry path resets the
   condition for a changed `PatchVersion`.
 
 **Unit — `pkg/webhook/sandboxupdateops/validating/`:** extend the existing
@@ -1589,7 +1659,7 @@ populate `ephemeralContainerStatuses`):
   the Pod is never replaced (`pod.UID` and `resourceVersion` continuity,
   `restartCount` unchanged), `spec.template` container image is unchanged, the Pod
   spec container image is unchanged, `Upgrading=Succeeded`,
-  `status.completedPatchVersion` matches, `spec.upgradePolicy` is cleared, and the
+  `status.installedPatchVersion` matches, `spec.upgradePolicy` is cleared, and the
   ops reaches `Completed` with `updatedReplicas == replicas`.
 - Installer exits non-zero → `InstallingFailed`, the `upgrade-failed` label is
   set, the ops fail-stops at `Failed`, and the second sandbox is never touched.
@@ -1792,6 +1862,81 @@ individually.
       ephemeral container cannot be removed, restarted or replaced — so a second
       attempt only added a permanent entry to `pod.spec` on top of a filesystem
       whose state was already unknown.
+- [ ] 11/24/2026: Made `patchVersion` user-defined through
+      `spec.updateStrategy.patchVersion` (a Kubernetes label value) instead of the
+      ops UID, and renamed `status.completedPatchVersion` →
+      **`status.installedPatchVersion`**. The new name states what the field
+      records — the payload already applied to the sandbox — and avoids implying
+      that the sandbox starts normally at that version, since it is written before
+      `postUpgrade` runs.
+- [ ] 11/26/2026: Changed the injection to an explicit append and the
+      already-injected guard to a backwards scan. The patch now carries the
+      existing ephemeral containers unchanged plus the new installer at the end,
+      because the `ephemeralcontainers` subresource only accepts appends. The
+      guard scans from the newest entry for the first container carrying
+      `SANDBOX_INSTALLER_PATCH_VERSION` and compares only that entry's name with
+      `installer-<hash8(patchVersion)>`, so unrelated ephemeral containers (for
+      example `kubectl debug`) neither block nor satisfy the check, and a newer
+      installer for a different version always triggers a fresh append.
+- [ ] 11/26/2026: Moved the already-injected guard from the container name to the
+      `SANDBOX_INSTALLER_PATCH_VERSION` env **value**, and appended a random
+      suffix to the generated name (`installer-<hash8>-<random>`). Detection no
+      longer compares names at all: the newest installer entry whose env value
+      equals `patchVersion` is evaluated as-is, so an existing container is
+      recognized even if its name differs from what the current code would
+      generate, and a new injection can never collide with an existing entry.
+      The hash prefix is kept for auditability only.
+- [ ] 11/26/2026: Replaced the random name suffix with deterministic naming.
+      The first injection of a version uses `installer-<hash8(patchVersion)>`;
+      re-installing a version whose entries are buried under a newer installer
+      appends the next sequence number (`-1`, `-2`, ...) after the existing
+      entries for that version. This restores stale-cache idempotency without a
+      `ResourceVersionExpectations` guard: two reconciles reading the same
+      pre-injection Pod compute the same name, and the `ephemeralcontainers`
+      strategic merge by name collapses the repeated patch into the existing
+      entry instead of appending a duplicate (the CI failure mode of the
+      random-suffix scheme). The env-value guard remains the already-injected
+      decision; the name only needs to be unique and reproducible.
+- [ ] 11/26/2026: Made the candidate name collision-aware against plain
+      ephemeral containers: when a non-installer entry (for example a `kubectl
+      debug` container) already occupies the candidate name, the `-N` sequence
+      number is bumped until the name is free. The choice stays deterministic
+      for a given observed Pod, so stale-cache idempotency is preserved.
+- [ ] 11/26/2026: Extended the collision check to regular and init containers,
+      matching the API server's Pod-wide container-name uniqueness rule.
+- [ ] 11/26/2026: Replaced the hand-built append JSON with
+      `client.StrategicMergeFrom(pod, client.MergeFromWithOptimisticLock{})`
+      over a Pod copy with the installer appended. The `resourceVersion`
+      precondition now rejects stale-cache writes with a `Conflict` instead of
+      relying on merge idempotency; deterministic naming is kept for
+      reproducible rollback re-installs. The unit-test interceptor applies
+      patches through the real strategic merge path and enforces
+      ephemeral-container immutability, which the previous hand merge silently
+      bypassed.
+- [ ] 11/26/2026: Moved the already-injected observation ahead of target
+      resolution. After the missing- and terminating-Pod guards, the controller
+      looks for the newest installer and evaluates its status before any
+      template or target lookup; resolution and the PID-namespace guards run
+      only on the injection path. The observation needs no API reads, and an
+      unavailable `TemplateRef` can no longer mask an installer that already
+      exited successfully — previously a deleted template kept a completed
+      install stuck retrying resolution until the deadline turned it into a
+      false `InstallingFailed`.
+- [ ] 11/26/2026: Preserved the kubelet's last waiting reason and message in the
+      `InstallingFailed` condition when a never-started installer hits the
+      deadline. Previously the `ImagePullBackOff` reason was only logged and the
+      durable message said merely "did not start within timeoutSeconds", so an
+      operator could not distinguish a stuck image pull from a running
+      installer timing out. The message now names the container and appends
+      `last waiting reason: <reason>: <kubelet message>` when a waiting status
+      exists.
+- [ ] 11/26/2026: Moved the `shareProcessNamespace`/`hostPID` guards ahead of
+      installer observation, grouped with the missing- and terminating-Pod
+      guards and before the deadline computation. Both fields are immutable on
+      a running Pod, so the check is a static spec guard with no API reads and
+      cannot mask a completed install the way a failing `TemplateRef` lookup
+      could; the controller never injects into such a Pod, so no legitimate
+      installer outcome is lost by failing first.
 - [ ] Verify the prefix-redirect pattern end-to-end against a real OpenClaw and a
       real Hermes Agent sandbox, including whether lifecycle scripts and native
       builds survive the libc-family match requirement, and whether

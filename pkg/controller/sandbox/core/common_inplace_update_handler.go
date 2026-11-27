@@ -139,7 +139,27 @@ func handleInPlaceUpdateCommon(
 			}
 			return false, nil
 		}
-		return true, nil
+		// A completed in-place update must not suppress later metadata changes.
+		if !isMetadataOnlyChange(pod, box) {
+			return true, nil
+		}
+		metadataChanged := false
+		for key, value := range box.Spec.Template.Labels {
+			current, exists := pod.Labels[key]
+			if !agentsv1alpha1.IsPodIdentityLabel(key) && (!exists || current != value) {
+				metadataChanged = true
+				break
+			}
+		}
+		for key, value := range box.Spec.Template.Annotations {
+			if current, exists := pod.Annotations[key]; !exists || current != value {
+				metadataChanged = true
+				break
+			}
+		}
+		if !metadataChanged {
+			return true, nil
+		}
 	}
 
 	// Memory downscale is rejected at the claim write path (SetResources) and

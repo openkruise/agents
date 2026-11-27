@@ -71,7 +71,7 @@ func TestApplySandboxPatch_SuccessfulTemplatePatch(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	// Verify the sandbox was patched
@@ -112,7 +112,7 @@ func TestApplySandboxPatch_SetsUpgradePolicyRecreate(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
@@ -160,7 +160,7 @@ func TestApplySandboxPatch_CopiesLifecycle(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
@@ -199,7 +199,7 @@ func TestApplySandboxPatch_AddsTrackingLabel(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
@@ -235,7 +235,7 @@ func TestApplySandboxPatch_InvalidPatchJSON(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to apply strategic merge patch")
 }
@@ -280,7 +280,7 @@ func TestApplySandboxPatch_PatchAPIError(t *testing.T) {
 		Recorder: record.NewFakeRecorder(100),
 	}
 
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "simulated patch error")
 }
@@ -309,7 +309,7 @@ func TestApplySandboxPatch_NilLabelsCreatesMap(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
@@ -352,7 +352,7 @@ func TestApplySandboxPatch_PausedSetsResumeTriggerAnnotation(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
@@ -587,7 +587,7 @@ func TestApplySandboxPatch_AnnotationOnlyPatchKeepsContainers(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
@@ -665,7 +665,9 @@ func TestApplySandboxPatch_HookOnly_MergesHooksWithoutUpgrade(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	require.NoError(t, r.applySandboxPatch(context.Background(), sbx, ops))
+	unclaimed, err := r.applySandboxPatch(context.Background(), sbx, ops)
+	require.NoError(t, err)
+	assert.False(t, unclaimed, "pause/resume-only writes claim the sandbox")
 
 	updated := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated))
@@ -714,7 +716,8 @@ func TestApplySandboxPatch_PausedSandbox_OperationModes(t *testing.T) {
 					sbx.Spec.Paused = true
 
 					r := newTestReconciler(sbx)
-					require.NoError(t, r.applySandboxPatch(t.Context(), sbx, ops))
+					_, err := r.applySandboxPatch(t.Context(), sbx, ops)
+					require.NoError(t, err)
 
 					updated := &agentsv1alpha1.Sandbox{}
 					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
@@ -773,7 +776,8 @@ func TestApplySandboxPatch_MixedOps_AppliesHooksWithUpgrade(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
-	require.NoError(t, r.applySandboxPatch(context.Background(), sbx, ops))
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
+	require.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated))
@@ -856,7 +860,8 @@ func TestApplySandboxPatch_MixedOps_PausedSandbox_Phase1CarriesHooks(t *testing.
 	}
 
 	r := newTestReconciler(sbx)
-	require.NoError(t, r.applySandboxPatch(context.Background(), sbx, ops))
+	_, err := r.applySandboxPatch(context.Background(), sbx, ops)
+	require.NoError(t, err)
 
 	updated := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated))
@@ -1018,7 +1023,9 @@ func TestApplySandboxPatch_UpgradeOwnership(t *testing.T) {
 			sbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] = agentsv1alpha1.True
 
 			r := newTestReconciler(sbx)
-			require.NoError(t, r.applySandboxPatch(t.Context(), sbx, ops))
+			unclaimed, err := r.applySandboxPatch(t.Context(), sbx, ops)
+			require.NoError(t, err)
+			assert.Equal(t, !tt.wantUpgrade, unclaimed)
 			updated := &agentsv1alpha1.Sandbox{}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
 			assert.Equal(t, "busybox:1.0", updated.Spec.Template.Spec.Containers[0].Image)
@@ -1174,4 +1181,189 @@ func TestReconcile_RecoveryOpsCountsPreviouslyFailedSandbox(t *testing.T) {
 		assert.Nil(t, updated.Spec.UpgradePolicy)
 		assert.Empty(t, updated.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
 	}
+}
+
+func newInstallerOpsAndSandbox() (*agentsv1alpha1.SandboxUpdateOps, *agentsv1alpha1.Sandbox) {
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ops-installer",
+			Namespace: "default",
+			UID:       types.UID("ops-uid-1"),
+		},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
+				Type:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+				PatchVersion: "1.4.0",
+				Installer: &agentsv1alpha1.InstallerSpec{
+					Image:               "installer:1.4.0",
+					TargetContainerName: "main",
+					Command:             []string{"/install.sh"},
+				},
+			},
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      map[string]string{"harness-version": "v2"},
+					Annotations: map[string]string{"harness-version": "v2"},
+				},
+			}),
+		},
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "test"},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels:      map[string]string{"harness-version": "v1", "app": "test"},
+						Annotations: map[string]string{"harness-version": "v1", "keep": "value"},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main", Image: "nginx:1.0"}},
+					},
+				},
+			},
+		},
+	}
+	return ops, sbx
+}
+
+func TestApplySandboxPatch_InstallerUpdate(t *testing.T) {
+	prePause := &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}
+	tests := []struct {
+		name        string
+		mutate      func(*agentsv1alpha1.SandboxUpdateOps)
+		paused      bool
+		templateRef bool
+		wantVersion string
+	}{
+		{name: "TemplateRef patch rejected before claiming", templateRef: true},
+		{name: "paused TemplateRef patch rejected before waking", templateRef: true, paused: true},
+		{name: "metadata patch applied", wantVersion: "v2"},
+		{name: "paused metadata patch deferred until resume", paused: true, wantVersion: "v2"},
+		{
+			name:        "paused empty patch still consumes resume trigger",
+			paused:      true,
+			wantVersion: "v1",
+			mutate: func(ops *agentsv1alpha1.SandboxUpdateOps) {
+				ops.Spec.Patch.Raw = nil
+			},
+		},
+		{
+			name:        "pause and resume hooks alone still upgrade",
+			wantVersion: "v1",
+			mutate: func(ops *agentsv1alpha1.SandboxUpdateOps) {
+				ops.Spec.Patch.Raw = nil
+				ops.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{PrePause: prePause}
+			},
+		},
+		{
+			name:        "matching metadata still upgrades",
+			wantVersion: "v1",
+			mutate: func(ops *agentsv1alpha1.SandboxUpdateOps) {
+				ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels:      map[string]string{"harness-version": "v1"},
+						Annotations: map[string]string{"harness-version": "v1"},
+					},
+				})
+				ops.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{PrePause: prePause}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops, sbx := newInstallerOpsAndSandbox()
+			if tt.mutate != nil {
+				tt.mutate(ops)
+			}
+			if tt.paused {
+				sbx.Status.Phase = agentsv1alpha1.SandboxPaused
+				sbx.Spec.Paused = true
+			}
+			if tt.templateRef {
+				sbx.Spec.Template = nil
+				sbx.Spec.TemplateRef = &agentsv1alpha1.SandboxTemplateRef{Name: "shared-template"}
+			}
+			t.Cleanup(func() { ResourceVersionExpectations.Delete(sbx) })
+			r := newTestReconciler(sbx)
+			if tt.templateRef {
+				_, err := r.applySandboxPatch(t.Context(), sbx, ops)
+				require.ErrorContains(t, err, "requires an inline template")
+				updated := &agentsv1alpha1.Sandbox{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+				assert.Equal(t, sbx.Spec, updated.Spec)
+				assert.Equal(t, sbx.Labels, updated.Labels)
+				assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+				require.ErrorContains(t, r.applyTemplatePatch(t.Context(), sbx, ops), "requires an inline template")
+				return
+			}
+			_, err := r.applySandboxPatch(t.Context(), sbx, ops)
+			require.NoError(t, err)
+
+			updated := &agentsv1alpha1.Sandbox{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+			if tt.paused {
+				assert.Equal(t, sbx.Spec.Template, updated.Spec.Template)
+				assert.Equal(t, agentsv1alpha1.True, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+				require.NoError(t, r.applyTemplatePatch(t.Context(), updated, ops))
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+			}
+			assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+			assert.Equal(t, tt.wantVersion, updated.Spec.Template.Labels["harness-version"])
+			assert.Equal(t, tt.wantVersion, updated.Spec.Template.Annotations["harness-version"])
+			assert.Equal(t, "test", updated.Spec.Template.Labels["app"])
+			assert.Equal(t, "value", updated.Spec.Template.Annotations["keep"])
+
+			require.NotNil(t, updated.Spec.UpgradePolicy)
+			assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate, updated.Spec.UpgradePolicy.Type)
+			assert.Equal(t, ops.Spec.UpdateStrategy.PatchVersion, updated.Spec.UpgradePolicy.PatchVersion)
+			require.NotNil(t, updated.Spec.UpgradePolicy.Installer)
+			assert.Equal(t, "installer:1.4.0", updated.Spec.UpgradePolicy.Installer.Image)
+			assert.Equal(t, "main", updated.Spec.UpgradePolicy.Installer.TargetContainerName)
+			assert.Equal(t, sbx.Spec.Template.Spec, updated.Spec.Template.Spec)
+			assert.Equal(t, "ops-installer", updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+			assert.Equal(t, ops.Spec.Lifecycle, updated.Spec.Lifecycle)
+			// Mutating the persisted copy must not alias back into the ops spec.
+			updated.Spec.UpgradePolicy.Installer.Image = "mutated:0.0"
+			assert.Equal(t, "installer:1.4.0", ops.Spec.UpdateStrategy.Installer.Image)
+		})
+	}
+}
+
+func TestIsSandboxOpsApplied_InstallerUpdate(t *testing.T) {
+	ops, sbx := newInstallerOpsAndSandbox()
+	ops.UID = types.UID("another-ops-uid")
+
+	sbx.Status.InstalledPatchVersion = ops.Spec.UpdateStrategy.PatchVersion
+	assert.False(t, isSandboxOpsApplied(sbx, ops), "installed patch version still needs its metadata patch")
+	sbx.Spec.Template.Labels["harness-version"] = "v2"
+	sbx.Spec.Template.Annotations["harness-version"] = "v2"
+	assert.True(t, isSandboxOpsApplied(sbx, ops),
+		"sandbox that completed this patch version and metadata must be skipped")
+
+	sbx.Status.InstalledPatchVersion = "ops-uid-other"
+	assert.False(t, isSandboxOpsApplied(sbx, ops),
+		"sandbox that completed a different patch version still needs the install")
+
+	sbx.Status.InstalledPatchVersion = ""
+	assert.False(t, isSandboxOpsApplied(sbx, ops),
+		"sandbox that never installed must not be skipped")
+
+	sbx.Status.InstalledPatchVersion = ""
+	assert.True(t, isSandboxTemplateMatchPatch(sbx, ops))
+	assert.False(t, isSandboxOpsApplied(sbx, ops), "matching metadata alone must not skip installation")
+
+	// Declared hooks must also be present once the install completed.
+	sbx.Status.InstalledPatchVersion = ops.Spec.UpdateStrategy.PatchVersion
+	ops.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{
+		PrePause: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}},
+	}
+	assert.False(t, isSandboxOpsApplied(sbx, ops))
+	sbx.Spec.Lifecycle = ops.Spec.Lifecycle.DeepCopy()
+	assert.True(t, isSandboxOpsApplied(sbx, ops))
+	assert.False(t, isPauseResumeOnly(ops), "installer ops always enters the upgrade flow")
 }

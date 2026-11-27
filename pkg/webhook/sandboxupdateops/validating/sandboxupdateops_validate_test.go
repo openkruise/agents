@@ -19,6 +19,7 @@ package validating
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -530,4 +532,241 @@ func TestCreate_PauseResumeHooks(t *testing.T) {
 			})
 		}
 	})
+}
+
+func installerOps() *v1alpha1.SandboxUpdateOps {
+	obj := validOps()
+	obj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyInstallerUpdate
+	obj.Spec.UpdateStrategy.PatchVersion = "1.4.0"
+	obj.Spec.UpdateStrategy.Installer = &v1alpha1.InstallerSpec{Image: "installer:1.4.0"}
+	return obj
+}
+
+func TestCreate_InstallerUpdate(t *testing.T) {
+	tests := []struct {
+		name         string
+		mutate       func(*v1alpha1.SandboxUpdateOps)
+		patch        string
+		patchVersion *string
+		allow        bool
+		wantMsg      string
+	}{
+		{
+			name:  "valid installer",
+			allow: true,
+		},
+		{name: "missing patch version", patchVersion: ptr.To(""), wantMsg: "patchVersion is required"},
+		{name: "single character version", patchVersion: ptr.To("1"), allow: true},
+		{name: "label-compatible version", patchVersion: ptr.To("V1.4.0_rc-1"), allow: true},
+		{name: "63 character version", patchVersion: ptr.To(strings.Repeat("v", 63)), allow: true},
+		{name: "64 character version", patchVersion: ptr.To(strings.Repeat("v", 64)), wantMsg: "patchVersion"},
+		{name: "leading punctuation", patchVersion: ptr.To("-v1"), wantMsg: "patchVersion"},
+		{name: "trailing punctuation", patchVersion: ptr.To("v1."), wantMsg: "patchVersion"},
+		{name: "build metadata separator", patchVersion: ptr.To("1.4.0+build"), wantMsg: "patchVersion"},
+		{name: "slash in version", patchVersion: ptr.To("release/v1"), wantMsg: "patchVersion"},
+		{name: "space in version", patchVersion: ptr.To("release v1"), wantMsg: "patchVersion"},
+		{name: "non-ASCII version", patchVersion: ptr.To("v1-é"), wantMsg: "patchVersion"},
+		{
+			name: "valid installer with command and target",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer.Command = []string{"/install.sh"}
+				o.Spec.UpdateStrategy.Installer.TargetContainerName = "sandbox"
+			},
+			allow: true,
+		},
+		{
+			name: "missing installer rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer = nil
+			},
+			allow:   false,
+			wantMsg: "installer is required",
+		},
+		{
+			name: "empty image rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer.Image = ""
+			},
+			allow:   false,
+			wantMsg: "installer.image is required",
+		},
+		{
+			name: "empty command element rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer.Command = []string{"/install.sh", ""}
+			},
+			allow:   false,
+			wantMsg: "command elements must be non-empty",
+		},
+		{
+			name: "non-positive timeout rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer.TimeoutSeconds = ptr.To[int32](0)
+			},
+			allow:   false,
+			wantMsg: "timeoutSeconds must be positive",
+		},
+		{
+			name: "reserved env prefix rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer.Env = []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_HACK", Value: "x"}}
+			},
+			allow:   false,
+			wantMsg: "SANDBOX_INSTALLER_ prefix are reserved",
+		},
+		{
+			name: "privileged security context rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer.SecurityContext = &corev1.SecurityContext{Privileged: ptr.To(true)}
+			},
+			allow:   false,
+			wantMsg: "privileged installer containers are not allowed",
+		},
+		{
+			name: "installer on non-installer strategy rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyRecreate
+			},
+			allow:   false,
+			wantMsg: "installer is only allowed",
+		},
+		{
+			name: "image change in patch rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:1.22"}}},
+				})
+			},
+			allow:   false,
+			wantMsg: "InstallerUpdate only supports metadata-only template patches",
+		},
+		{
+			name: "environment patch rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{{Name: "FOO", Value: "bar"}}}}},
+				})
+			},
+			wantMsg: "metadata-only template patches",
+		},
+		{
+			name: "typed metadata-only patch allowed",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"harness-version": "v2"}, Annotations: map[string]string{"harness-version": "v2"},
+				}})
+			},
+			allow: true,
+		},
+		{name: "raw metadata patch allowed", patch: `{"metadata":{"labels":{"harness-version":"v2"}}}`, allow: true},
+		{name: "empty metadata values allowed", patch: `{"metadata":{"labels":{"custom":""},"annotations":{"custom":""}}}`, allow: true},
+		{name: "metadata deletion rejected", patch: `{"metadata":{"annotations":{"old":null}}}`, wantMsg: "metadata deletion or replacement"},
+		{name: "label map deletion rejected", patch: `{"metadata":{"labels":null}}`, wantMsg: "metadata deletion or replacement"},
+		{name: "metadata map deletion rejected", patch: `{"metadata":null}`, wantMsg: "metadata deletion or replacement"},
+		{name: "label map replacement rejected", patch: `{"metadata":{"labels":{"$patch":"replace","harness-version":"v2"}}}`, wantMsg: "metadata deletion or replacement"},
+		{name: "empty patch allowed", patch: `{}`, allow: true},
+		{name: "empty spec allowed", patch: `{"spec":{}}`, allow: true},
+		{name: "spec deletion rejected", patch: `{"spec":null}`, wantMsg: "metadata-only template patches"},
+		{name: "container deletion rejected", patch: `{"spec":{"containers":[{"name":"main","$patch":"delete"}]}}`, wantMsg: "metadata-only template patches"},
+		{name: "spec replacement rejected", patch: `{"spec":{"$patch":"replace"}}`, wantMsg: "metadata-only template patches"},
+		{name: "unknown spec field rejected", patch: `{"spec":{"unknownField":"value"}}`, wantMsg: "metadata-only template patches"},
+		{name: "root replacement rejected", patch: `{"$patch":"replace","metadata":{"labels":{"harness-version":"v2"}}}`, wantMsg: "metadata-only template patch"},
+		{name: "template identity rejected", patch: `{"metadata":{"name":"replacement"}}`, wantMsg: "only supports template labels and annotations"},
+		{name: "null patch decoded as omitted", patch: `null`, allow: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj := installerOps()
+			if tt.patchVersion != nil {
+				obj.Spec.UpdateStrategy.PatchVersion = *tt.patchVersion
+			}
+			if tt.mutate != nil {
+				tt.mutate(obj)
+			}
+			if tt.patch != "" {
+				obj.Spec.Patch.Raw = []byte(tt.patch)
+			}
+			resp := newTestHandler().Handle(t.Context(), makeCreateRequest(t, obj))
+			if tt.allow {
+				require.True(t, resp.Allowed, "expected allowed, got: %s", resp.Result)
+				return
+			}
+			require.False(t, resp.Allowed)
+			require.Contains(t, resp.Result.Message, tt.wantMsg)
+		})
+	}
+}
+
+func TestUpdate_InstallerImmutable(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		mutate  func(*v1alpha1.SandboxUpdateOps)
+		wantMsg string
+	}{
+		{
+			name: "installer image",
+			mutate: func(obj *v1alpha1.SandboxUpdateOps) {
+				obj.Spec.UpdateStrategy.Installer.Image = "installer:1.5.0"
+			},
+			wantMsg: "installer is immutable",
+		},
+		{
+			name: "patch version changed",
+			mutate: func(obj *v1alpha1.SandboxUpdateOps) {
+				obj.Spec.UpdateStrategy.PatchVersion = "1.5.0"
+			},
+			wantMsg: "patchVersion is immutable",
+		},
+		{
+			name: "patch version removed",
+			mutate: func(obj *v1alpha1.SandboxUpdateOps) {
+				obj.Spec.UpdateStrategy.PatchVersion = ""
+			},
+			wantMsg: "patchVersion is immutable",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			oldObj := installerOps()
+			newObj := oldObj.DeepCopy()
+			tt.mutate(newObj)
+			resp := newTestHandler().Handle(t.Context(), makeUpdateRequest(t, oldObj, newObj))
+			require.False(t, resp.Allowed)
+			require.Contains(t, resp.Result.Message, tt.wantMsg)
+		})
+	}
+}
+
+func TestUpdate_InstallerUnchangedAllowed(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		patch        string
+		patchVersion *string
+		allow        bool
+		wantMsg      string
+	}{
+		{name: "no patch", allow: true},
+		{name: "metadata patch", patch: `{"metadata":{"labels":{"harness-version":"v2"}}}`, allow: true},
+		{name: "spec patch rejected on update", patch: `{"spec":{"containers":[{"name":"main","env":[{"name":"FOO","value":"bar"}]}]}}`, wantMsg: "metadata-only template patches"},
+		{name: "missing version rejected on update", patchVersion: ptr.To(""), wantMsg: "patchVersion is required"},
+		{name: "invalid version rejected on update", patchVersion: ptr.To("v1+build"), wantMsg: "patchVersion"},
+		{name: "oversized version rejected on update", patchVersion: ptr.To(strings.Repeat("v", 64)), wantMsg: "patchVersion"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			oldObj := installerOps()
+			if tt.patchVersion != nil {
+				oldObj.Spec.UpdateStrategy.PatchVersion = *tt.patchVersion
+			}
+			if tt.patch != "" {
+				oldObj.Spec.Patch.Raw = []byte(tt.patch)
+			}
+			newObj := oldObj.DeepCopy()
+			newObj.Spec.Paused = true
+			resp := newTestHandler().Handle(t.Context(), makeUpdateRequest(t, oldObj, newObj))
+			require.Equal(t, tt.allow, resp.Allowed)
+			if !tt.allow {
+				require.Contains(t, resp.Result.Message, tt.wantMsg)
+			}
+		})
+	}
 }

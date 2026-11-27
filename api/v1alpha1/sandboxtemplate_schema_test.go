@@ -28,6 +28,7 @@ import (
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema/cel"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema/defaulting"
+	"k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	celconfig "k8s.io/apiserver/pkg/apis/cel"
 	"sigs.k8s.io/yaml"
@@ -218,6 +219,94 @@ func TestSandboxTemplateCRDCELRules(t *testing.T) {
 				}
 			}
 			t.Fatalf("validation errors %v do not contain %q", errs, tt.wantErr)
+		})
+	}
+}
+
+func TestInstallerPatchVersionSchema(t *testing.T) {
+	tests := []struct {
+		name         string
+		version      string
+		omitVersion  bool
+		strategy     string
+		oldVersion   string
+		wantError    bool
+		wantOpsError bool
+	}{
+		{name: "missing version", omitVersion: true, wantError: true},
+		{name: "empty version", wantError: true},
+		{name: "payload version", version: "1.4.0"},
+		{name: "single character", version: "1"},
+		{name: "label punctuation", version: "V1.4.0_rc-1"},
+		{name: "63 characters", version: strings.Repeat("v", 63)},
+		{name: "64 characters", version: strings.Repeat("v", 64), wantError: true},
+		{name: "leading punctuation", version: "-v1", wantError: true},
+		{name: "trailing punctuation", version: "v1.", wantError: true},
+		{name: "build separator", version: "1.4.0+build", wantError: true},
+		{name: "slash", version: "release/v1", wantError: true},
+		{name: "space", version: "release v1", wantError: true},
+		{name: "non-ASCII", version: "v1-é", wantError: true},
+		{name: "Recreate without version", strategy: "Recreate", omitVersion: true},
+		{name: "CheckpointRestore without version", strategy: "CheckpointRestore", omitVersion: true},
+		{name: "unchanged version", version: "1.4.0", oldVersion: "1.4.0"},
+		{name: "new attempt", version: "1.4.0", oldVersion: "1.3.0", wantOpsError: true},
+		{name: "removed version", omitVersion: true, oldVersion: "1.3.0", wantError: true},
+	}
+	for kind, policyField := range map[string]string{"sandboxes": "upgradePolicy", "sandboxupdateops": "updateStrategy"} {
+		t.Run(kind, func(t *testing.T) {
+			data, err := os.ReadFile("../../config/crd/bases/agents.kruise.io_" + kind + ".yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var external apiextensionsv1.CustomResourceDefinition
+			if err := yaml.UnmarshalStrict(data, &external); err != nil {
+				t.Fatal(err)
+			}
+			var crd apiextensions.CustomResourceDefinition
+			if err := apiextensionsv1.Convert_v1_CustomResourceDefinition_To_apiextensions_CustomResourceDefinition(&external, &crd, nil); err != nil {
+				t.Fatal(err)
+			}
+			crd.Status.StoredVersions = []string{"v1alpha1"}
+			if errs := crdvalidation.ValidateCustomResourceDefinition(t.Context(), &crd); len(errs) != 0 {
+				t.Fatalf("CRD admission: %v", errs)
+			}
+			policySchema := crd.Spec.Validation.OpenAPIV3Schema.Properties["spec"].Properties[policyField]
+			validator, _, err := validation.NewSchemaValidator(&policySchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			structural, err := schema.NewStructural(&policySchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			celValidator := cel.NewValidator(structural, false, celconfig.PerCallLimit)
+			if celValidator == nil {
+				t.Fatal("installer version CEL validation is missing")
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					strategy := tt.strategy
+					if strategy == "" {
+						strategy = "InstallerUpdate"
+					}
+					obj := map[string]interface{}{"type": strategy}
+					if !tt.omitVersion {
+						obj["patchVersion"] = tt.version
+					}
+					var oldObj interface{}
+					if tt.oldVersion != "" {
+						oldObj = map[string]interface{}{"type": strategy, "patchVersion": tt.oldVersion}
+					}
+					path := field.NewPath("spec", policyField)
+					errs := validation.ValidateCustomResource(path, obj, validator)
+					celErrs, _ := celValidator.Validate(t.Context(), path, structural, obj, oldObj, celconfig.RuntimeCELCostBudget)
+					errs = append(errs, celErrs...)
+					wantError := tt.wantError || (kind == "sandboxupdateops" && tt.wantOpsError)
+					if (len(errs) > 0) != wantError {
+						t.Fatalf("validation errors = %v, wantError = %v", errs, wantError)
+					}
+				})
+			}
 		})
 	}
 }
