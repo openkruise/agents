@@ -22,13 +22,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -1373,4 +1376,277 @@ func TestGoStringAndJSONRedactSecrets(t *testing.T) {
 			t.Error("the user subject did not survive marshalling")
 		}
 	})
+}
+
+// TestResealDelegations covers the half of a key rotation the keyring cannot
+// do alone. After a sweep the retired key is dropped, and every delegation
+// must still open, which is the only evidence that matters: a sweep that
+// re-sealed most records would pass any count-based check and still strand a
+// user.
+func TestResealDelegations(t *testing.T) {
+	previous := aead.Key{ID: "2026-05", Secret: bytes.Repeat([]byte{0x22}, aead.KeySize)}
+	current := aead.Key{ID: "2026-11", Secret: bytes.Repeat([]byte{0x11}, aead.KeySize)}
+	stranger := aead.Key{ID: "2025-11", Secret: bytes.Repeat([]byte{0x33}, aead.KeySize)}
+	keyringOf := func(active aead.Key, retained ...aead.Key) *aead.Keyring {
+		t.Helper()
+		keyring, err := aead.NewKeyring(active, retained...)
+		if err != nil {
+			t.Fatalf("build keyring: %v", err)
+		}
+		return keyring
+	}
+	keyFor := func(agent string) DelegationKey {
+		key := testDelegationKey()
+		key.AgentIdentity = agent
+		return key
+	}
+	// Two delegations predate the rotation and one follows it.
+	retiredA, retiredB, fresh := keyFor("checkout-agent"), keyFor("billing-agent"), keyFor("support-agent")
+	// listedFirst lists the named record ahead of the rest, so a sweep that
+	// gave up at a bad record would visibly leave good ones behind.
+	listedFirst := func(name string) *interceptor.Funcs {
+		return &interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList,
+			opts ...client.ListOption) error {
+			if err := c.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			secrets := list.(*corev1.SecretList).Items
+			if i := slices.IndexFunc(secrets, func(s corev1.Secret) bool { return s.Name == name }); i > 0 {
+				secrets[0], secrets[i] = secrets[i], secrets[0]
+			}
+			return nil
+		}}
+	}
+	failUpdateOf := func(name string, err error) *interceptor.Funcs {
+		return &interceptor.Funcs{Update: func(ctx context.Context, c client.WithWatch, obj client.Object,
+			opts ...client.UpdateOption) error {
+			if obj.GetName() == name {
+				return err
+			}
+			return c.Update(ctx, obj, opts...)
+		}}
+	}
+
+	tests := []struct {
+		name string
+		// strangerRecord adds a delegation sealed under a key the rotated
+		// keyring never held.
+		strangerRecord bool
+		// tamper corrupts the ciphertext of retiredA before the sweep.
+		tamper    bool
+		intercept *interceptor.Funcs
+		cancelled bool
+		sweeps    int
+
+		wantResealed int
+		wantErr      error
+		wantErrText  string
+		// stranded must still need the retired key afterwards.
+		stranded []DelegationKey
+	}{
+		{
+			name:         "every delegation under the retired key moves, and the key can be dropped",
+			wantResealed: 2,
+		},
+		{
+			name:         "a second sweep finds nothing left",
+			sweeps:       2,
+			wantResealed: 0,
+		},
+		{
+			name:           "a delegation under a key nobody holds is reported and the rest still move",
+			strangerRecord: true,
+			intercept:      listedFirst(DelegationSecretName(keyFor("stranger-agent"))),
+			wantResealed:   2,
+			wantErr:        aead.ErrUnknownKey,
+			wantErrText:    DelegationSecretName(keyFor("stranger-agent")),
+		},
+		{
+			name:         "a delegation that does not open is reported and the rest still move",
+			tamper:       true,
+			intercept:    listedFirst(DelegationSecretName(retiredA)),
+			wantResealed: 1,
+			wantErr:      aead.ErrNotAuthentic,
+			wantErrText:  DelegationSecretName(retiredA),
+			stranded:     []DelegationKey{retiredA},
+		},
+		{
+			// A real write lands between the sweep reading the record and
+			// writing it back, so only an actual compare-and-swap leaves the
+			// other writer alone.
+			name: "a delegation another writer moves mid-sweep is left to that writer",
+			intercept: &interceptor.Funcs{Update: func(ctx context.Context, c client.WithWatch, obj client.Object,
+				opts ...client.UpdateOption) error {
+				if obj.GetName() == DelegationSecretName(retiredA) && obj.GetAnnotations()["moved"] == "" {
+					meanwhile := &corev1.Secret{}
+					if err := c.Get(ctx, client.ObjectKeyFromObject(obj), meanwhile); err != nil {
+						return err
+					}
+					meanwhile.Annotations = map[string]string{"moved": "by another writer"}
+					if err := c.Update(ctx, meanwhile); err != nil {
+						return err
+					}
+				}
+				return c.Update(ctx, obj, opts...)
+			}},
+			wantResealed: 1,
+			stranded:     []DelegationKey{retiredA},
+		},
+		{
+			name: "a delegation withdrawn mid-sweep stays withdrawn",
+			intercept: failUpdateOf(DelegationSecretName(retiredA),
+				apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, DelegationSecretName(retiredA))),
+			wantResealed: 1,
+			stranded:     []DelegationKey{retiredA},
+		},
+		{
+			name:         "a failed write is reported and the rest still move",
+			intercept:    failUpdateOf(DelegationSecretName(retiredA), errors.New("the API server is unavailable")),
+			wantResealed: 1,
+			wantErrText:  "write re-sealed " + DelegationSecretName(retiredA),
+			stranded:     []DelegationKey{retiredA},
+		},
+		{
+			name: "a failed list re-seals nothing",
+			intercept: &interceptor.Funcs{List: func(context.Context, client.WithWatch, client.ObjectList,
+				...client.ListOption) error {
+				return errors.New("the cache is unavailable")
+			}},
+			wantErrText: "list delegations",
+			stranded:    []DelegationKey{retiredA, retiredB},
+		},
+		{
+			name:      "a cancelled sweep stops",
+			cancelled: true,
+			wantErr:   context.Canceled,
+			stranded:  []DelegationKey{retiredA, retiredB},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			builder := fake.NewClientBuilder().WithScheme(testScheme(t))
+			if tt.intercept != nil {
+				builder = builder.WithInterceptorFuncs(*tt.intercept)
+			}
+			c := builder.Build()
+			storeUnder := func(keyring *aead.Keyring) *SecretDelegationStore {
+				t.Helper()
+				store, err := NewSecretDelegationStore(c, keyring, storeNamespace)
+				if err != nil {
+					t.Fatalf("NewSecretDelegationStore: %v", err)
+				}
+				return store
+			}
+			put := func(store *SecretDelegationStore, key DelegationKey) {
+				t.Helper()
+				record := testDelegation(time.Now())
+				record.Key = key
+				record.AccessToken = "gho_" + key.AgentIdentity
+				if err := store.Put(ctx, record); err != nil {
+					t.Fatalf("seed %s: %v", key.AgentIdentity, err)
+				}
+			}
+			versionOf := func(name string) string {
+				t.Helper()
+				secret := &corev1.Secret{}
+				if err := c.Get(ctx, client.ObjectKey{Namespace: storeNamespace, Name: name}, secret); err != nil {
+					t.Fatalf("read %s: %v", name, err)
+				}
+				return secret.ResourceVersion
+			}
+
+			put(storeUnder(keyringOf(previous)), retiredA)
+			put(storeUnder(keyringOf(previous)), retiredB)
+			rotated := storeUnder(keyringOf(current, previous))
+			put(rotated, fresh)
+			if tt.strangerRecord {
+				put(storeUnder(keyringOf(stranger)), keyFor("stranger-agent"))
+			}
+			// A session sealed under the retired key, which the sweep must not
+			// touch: sessions are waited out, not re-sealed.
+			sessions, err := NewSecretSessionStore(c, keyringOf(previous), storeNamespace)
+			if err != nil {
+				t.Fatalf("NewSecretSessionStore: %v", err)
+			}
+			if err := sessions.Create(ctx, testSession(time.Now())); err != nil {
+				t.Fatalf("seed session: %v", err)
+			}
+			freshVersion := versionOf(DelegationSecretName(fresh))
+			sessionVersion := versionOf(SessionSecretName(testSessionKey()))
+
+			if tt.tamper {
+				secret := &corev1.Secret{}
+				name := client.ObjectKey{Namespace: storeNamespace, Name: DelegationSecretName(retiredA)}
+				if err := c.Get(ctx, name, secret); err != nil {
+					t.Fatalf("read: %v", err)
+				}
+				var envelope map[string]any
+				if err := json.Unmarshal(secret.Data[payloadKey], &envelope); err != nil {
+					t.Fatalf("decode envelope: %v", err)
+				}
+				envelope["ct"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+				if secret.Data[payloadKey], err = json.Marshal(envelope); err != nil {
+					t.Fatalf("encode envelope: %v", err)
+				}
+				if err := c.Update(ctx, secret); err != nil {
+					t.Fatalf("tamper: %v", err)
+				}
+			}
+
+			sweepCtx := ctx
+			if tt.cancelled {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				sweepCtx = cancelled
+			}
+			var resealed int
+			for range max(tt.sweeps, 1) {
+				resealed, err = rotated.ResealDelegations(sweepCtx)
+			}
+
+			if resealed != tt.wantResealed {
+				t.Errorf("re-sealed: got %d, want %d", resealed, tt.wantResealed)
+			}
+			if tt.wantErr == nil && tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("ResealDelegations: %v", err)
+				}
+			} else {
+				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+					t.Errorf("error: got %v, want %v", err, tt.wantErr)
+				}
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Errorf("error: got %v, want one containing %q", err, tt.wantErrText)
+				}
+			}
+
+			// Drop the retired key. Everything not stranded opens, still
+			// holding what was sealed into it.
+			afterDrop := storeUnder(keyringOf(current))
+			for _, key := range []DelegationKey{retiredA, retiredB, fresh} {
+				got, err := afterDrop.Get(ctx, key)
+				if slices.Contains(tt.stranded, key) {
+					if err == nil {
+						t.Errorf("%s opened without the retired key, want it still needing it", key.AgentIdentity)
+					}
+					continue
+				}
+				if err != nil {
+					t.Errorf("%s does not open once the retired key is dropped: %v", key.AgentIdentity, err)
+					continue
+				}
+				if want := "gho_" + key.AgentIdentity; got.AccessToken != want {
+					t.Errorf("%s access token: got %q, want %q", key.AgentIdentity, got.AccessToken, want)
+				}
+			}
+			if got := versionOf(DelegationSecretName(fresh)); got != freshVersion {
+				t.Error("a delegation already under the active key was rewritten")
+			}
+			if got := versionOf(SessionSecretName(testSessionKey())); got != sessionVersion {
+				t.Error("the sweep rewrote a session")
+			}
+		})
+	}
 }

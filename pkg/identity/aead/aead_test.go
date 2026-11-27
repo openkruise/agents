@@ -463,3 +463,121 @@ func TestNewKeyGeneratesDistinctKeys(t *testing.T) {
 		t.Error("expected an empty key ID to be rejected")
 	}
 }
+
+// TestReseal covers moving a record onto the active key. Everything that makes
+// Open refuse a record still applies, since a re-seal must not launder a
+// record that would not open into one that does.
+func TestReseal(t *testing.T) {
+	previous := mustKey(t, "2026-05")
+	current := mustKey(t, "2026-11")
+	context := delegationContext("team-a", "principal-1", "sample-agent", "github-3lo")
+	elsewhere := delegationContext("team-a", "principal-1", "billing-agent", "github-3lo")
+	plaintext := []byte("refresh token")
+
+	sealWith := func(keyring *Keyring) []byte {
+		t.Helper()
+		stored, err := keyring.Seal(plaintext, context...)
+		if err != nil {
+			t.Fatalf("Seal: %v", err)
+		}
+		return stored
+	}
+	rotated := mustKeyring(t, current, previous)
+
+	tests := []struct {
+		name        string
+		stored      []byte
+		context     []string
+		wantChanged bool
+		wantErr     error
+		wantErrText string
+	}{
+		{
+			name:        "a record under a retained key moves to the active one",
+			stored:      sealWith(mustKeyring(t, previous)),
+			context:     context,
+			wantChanged: true,
+		},
+		{
+			name:    "a record under the active key is left as it is",
+			stored:  sealWith(rotated),
+			context: context,
+		},
+		{
+			name:    "a record under a key the keyring no longer holds",
+			stored:  sealWith(mustKeyring(t, mustKey(t, "2025-11"))),
+			context: context,
+			wantErr: ErrUnknownKey,
+		},
+		{
+			name:    "a record re-sealed for another address does not open",
+			stored:  sealWith(mustKeyring(t, previous)),
+			context: elsewhere,
+			wantErr: ErrNotAuthentic,
+		},
+		{
+			// The shortcut for active-key records requires the whole envelope
+			// to match, so a schema this code cannot read is not passed
+			// through as if it had been re-sealed.
+			name: "a record naming the active key under an unknown schema",
+			stored: func() []byte {
+				var sealed record
+				if err := json.Unmarshal(sealWith(rotated), &sealed); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				sealed.Schema = SchemaVersion + 1
+				out, err := json.Marshal(sealed)
+				if err != nil {
+					t.Fatalf("encode: %v", err)
+				}
+				return out
+			}(),
+			context: context,
+			wantErr: ErrUnsupportedSchema,
+		},
+		{
+			name:        "a record that is not an envelope",
+			stored:      []byte("{"),
+			context:     context,
+			wantErrText: "decode record",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, changed, err := rotated.Reseal(tt.stored, tt.context...)
+			if tt.wantErr != nil || tt.wantErrText != "" {
+				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+					t.Fatalf("error: got %v, want %v", err, tt.wantErr)
+				}
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Fatalf("error: got %v, want one containing %q", err, tt.wantErrText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Reseal: %v", err)
+			}
+			if changed != tt.wantChanged {
+				t.Errorf("changed: got %v, want %v", changed, tt.wantChanged)
+			}
+			if !tt.wantChanged && !bytes.Equal(got, tt.stored) {
+				t.Error("a record already under the active key was rewritten")
+			}
+
+			// Whatever came back opens with the previous key dropped, which is
+			// the point, and still only at its own address.
+			dropped := mustKeyring(t, current)
+			opened, err := dropped.Open(got, context...)
+			if err != nil {
+				t.Fatalf("open with the previous key dropped: %v", err)
+			}
+			if !bytes.Equal(opened, plaintext) {
+				t.Errorf("round trip: got %q", opened)
+			}
+			if _, err := dropped.Open(got, elsewhere...); !errors.Is(err, ErrNotAuthentic) {
+				t.Errorf("opened at another address: got %v, want %v", err, ErrNotAuthentic)
+			}
+		})
+	}
+}

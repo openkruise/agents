@@ -163,8 +163,8 @@ func (r *Keyring) add(key Key) (Key, error) {
 	return owned, nil
 }
 
-// ActiveKeyID is the key new records are sealed under. Useful for deciding
-// whether a record needs re-sealing after a rotation.
+// ActiveKeyID is the key new records are sealed under, and the one Reseal
+// moves older records onto.
 func (r *Keyring) ActiveKeyID() string {
 	return r.active.ID
 }
@@ -248,6 +248,33 @@ func (r *Keyring) Open(stored []byte, context ...string) ([]byte, error) {
 		return nil, ErrNotAuthentic
 	}
 	return plaintext, nil
+}
+
+// Reseal returns stored sealed under the active key, and whether that took a
+// new seal.
+//
+// This is what lets a retained key be dropped: a record sealed under it is
+// opened and sealed again under the active key, with the same context, so it
+// stays bound to the same place. A record the active key already sealed is
+// returned unchanged without being opened, which is what makes a sweep over
+// every record cheap once most of them have been re-sealed.
+func (r *Keyring) Reseal(stored []byte, context ...string) ([]byte, bool, error) {
+	var sealed record
+	if err := json.Unmarshal(stored, &sealed); err != nil {
+		return nil, false, fmt.Errorf("aead: decode record: %w", err)
+	}
+	if sealed.Schema == SchemaVersion && sealed.Algorithm == AlgorithmAESGCM && sealed.KeyID == r.active.ID {
+		return stored, false, nil
+	}
+	plaintext, err := r.Open(stored, context...)
+	if err != nil {
+		return nil, false, err
+	}
+	resealed, err := r.Seal(plaintext, context...)
+	if err != nil {
+		return nil, false, err
+	}
+	return resealed, true, nil
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {
