@@ -902,16 +902,22 @@ func TestSandbox_GetResource(t *testing.T) {
 						{
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    cpuQuantity1,
-									corev1.ResourceMemory: memoryQuantity1,
+									corev1.ResourceCPU:              cpuQuantity1,
+									corev1.ResourceMemory:           memoryQuantity1,
+									corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceMemory:           resource.MustParse("0"),
+									corev1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
 								},
 							},
 						},
 						{
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    cpuQuantity2,
-									corev1.ResourceMemory: memoryQuantity2,
+									corev1.ResourceCPU:              cpuQuantity2,
+									corev1.ResourceMemory:           memoryQuantity2,
+									corev1.ResourceEphemeralStorage: resource.MustParse("256Mi"),
 								},
 							},
 						},
@@ -920,9 +926,11 @@ func TestSandbox_GetResource(t *testing.T) {
 			},
 			want: infra.SandboxResource{
 				Requests: infra.ResourceList{
-					CPUMilli: 1500,
-					MemoryMB: 1536,
+					CPUMilli:   1500,
+					MemoryMB:   1536,
+					DiskSizeMB: 1280,
 				},
+				Limits: infra.ResourceList{DiskSizeMB: 2048},
 			},
 		},
 		{

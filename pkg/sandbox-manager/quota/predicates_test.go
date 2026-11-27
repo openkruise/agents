@@ -19,9 +19,6 @@ package quota
 import (
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 
@@ -60,17 +57,4 @@ func TestFootprintFromResourceUsesLimits(t *testing.T) {
 			assert.Equal(t, tt.want, FootprintFromResource(tt.in))
 		})
 	}
-}
-
-func TestFootprintFromCalculatedResourceRoundsLimitMemoryUp(t *testing.T) {
-	res := infra.CalculateResourceFromContainers([]corev1.Container{{
-		Resources: corev1.ResourceRequirements{
-			Limits: corev1.ResourceList{
-				corev1.ResourceMemory: *resource.NewQuantity(1024*1024+1, resource.BinarySI),
-			},
-		},
-	}})
-
-	got := FootprintFromResource(res)
-	assert.Equal(t, int64(2), got[quotaspec.DimLimitsMemory])
 }

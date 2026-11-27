@@ -254,10 +254,10 @@ lives in Redis and is owned by sandbox-manager quota.
 
   The neutral lifecycle predicate lives outside both cache and quota, so cache imports it directly and quota wraps
   it as `IsLiveForQuota`. `FootprintOf` is implemented by first resolving a Sandbox CR into the same
-  `infra.SandboxResource` shape used by the hot-path Admission, using the shared infra resource extraction helper
-  (today `infra.CalculateResourceFromContainers`, already used by `sandboxcr.Sandbox.GetResource`), then passing
-  that resource through one shared `quota.FootprintFromResource` dimension mapper. There must not be separate
-  hot-path and anti-drift resource extraction or dimension maps.
+  `infra.SandboxResource` shape used by the hot-path Admission. The backend uses the shared `claim.GetResource`
+  helper for both Sandbox reads and quota snapshots, then passes the result through the shared
+  `quota.FootprintFromResource` dimension mapper. Both paths must use the same resource extraction and dimension
+  mapping.
 
   `IsLiveForQuota` is **deliberately narrower** than `CountActiveSandboxes`'s "not `Dead`" filter (which *also*
   excludes Failed/Succeeded): quota frees a slot only when deletion is requested or the sandbox is

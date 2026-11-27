@@ -297,6 +297,14 @@ func (m *SandboxManager) DeleteCheckpoint(ctx context.Context, user string, opts
 	return nil
 }
 
+func (m *SandboxManager) ListTemplates(ctx context.Context, namespace string) ([]infra.TemplateInfo, error) {
+	return m.infra.ListTemplates(ctx, namespace)
+}
+
+func (m *SandboxManager) GetTemplate(ctx context.Context, namespace, name string) (infra.TemplateInfo, error) {
+	return m.infra.GetTemplate(ctx, namespace, name)
+}
+
 func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
 	route, ok := m.proxy.LoadRoute(sandboxID)
 	return route.Owner, ok

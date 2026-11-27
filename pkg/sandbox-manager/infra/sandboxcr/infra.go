@@ -385,6 +385,47 @@ func (i *Infra) HasCheckpoint(ctx context.Context, opts infra.HasCheckpointOptio
 	return err == nil, err
 }
 
+func (i *Infra) ListTemplates(ctx context.Context, namespace string) ([]infra.TemplateInfo, error) {
+	if i.Cache == nil {
+		return nil, managererrors.NewError(managererrors.ErrorUnavailable, "template cache unavailable")
+	}
+	sandboxSets, err := i.Cache.ListSandboxSets(ctx, cache.ListSandboxSetsOptions{Namespace: namespace})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]infra.TemplateInfo, 0, len(sandboxSets))
+	for _, sandboxSet := range sandboxSets {
+		out = append(out, templateInfoOf(sandboxSet))
+	}
+	return out, nil
+}
+
+func (i *Infra) GetTemplate(ctx context.Context, namespace, name string) (infra.TemplateInfo, error) {
+	if i.Cache == nil {
+		return infra.TemplateInfo{}, managererrors.NewError(managererrors.ErrorUnavailable, "template cache unavailable")
+	}
+	template, err := i.Cache.PickSandboxSet(ctx, cache.PickSandboxSetOptions{Namespace: namespace, Name: name})
+	if err != nil {
+		if errors.Is(err, cache.ErrSandboxSetNotFound) {
+			return infra.TemplateInfo{}, managererrors.WrapError(managererrors.ErrorNotFound, err, "template %s not found", name)
+		}
+		return infra.TemplateInfo{}, managererrors.WrapError(managererrors.ErrorInternal, err, "failed to get template %s: %v", name, err)
+	}
+	return templateInfoOf(template), nil
+}
+
+func templateInfoOf(tmpl *v1alpha1.SandboxSet) infra.TemplateInfo {
+	resource := templateResourceFromSandboxSet(tmpl)
+	return infra.TemplateInfo{
+		Name:        tmpl.Name,
+		CPUMilli:    resource.CPUMilli,
+		MemoryMB:    resource.MemoryMB,
+		DiskSizeMB:  resource.DiskSizeMB,
+		CreatedAt:   tmpl.CreationTimestamp.Time,
+		Terminating: !tmpl.DeletionTimestamp.IsZero(),
+	}
+}
+
 func (i *Infra) SelectSandboxes(ctx context.Context, opts infra.SelectSandboxesOptions) ([]infra.Sandbox, error) {
 	objects, err := i.Cache.ListSandboxes(ctx, cache.ListSandboxesOptions{
 		Namespace: opts.Namespace,

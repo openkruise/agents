@@ -177,20 +177,19 @@ func e2bSandboxState(state string) string {
 	return models.SandboxStateRunning
 }
 
+// e2bResource renders a footprint as E2B display numbers. The limits-win /
+// requests-fill rule lives on infra.SandboxResource.Effective; the only lossy
+// step here is truncating milli-CPU to whole cores.
 func e2bResource(resource infra.SandboxResource) (int64, int64, int64) {
-	cpuMilli := resource.Limits.CPUMilli
-	if cpuMilli == 0 {
-		cpuMilli = resource.Requests.CPUMilli
-	}
-	memoryMB := resource.Limits.MemoryMB
-	if memoryMB == 0 {
-		memoryMB = resource.Requests.MemoryMB
-	}
-	diskSizeMB := resource.Limits.DiskSizeMB
-	if diskSizeMB == 0 {
-		diskSizeMB = resource.Requests.DiskSizeMB
-	}
-	return cpuMilli / 1000, memoryMB, diskSizeMB
+	effective := resource.Effective()
+	return e2bCPUCount(effective.CPUMilli), effective.MemoryMB, effective.DiskSizeMB
+}
+
+// e2bCPUCount renders milli-CPU as the whole-core count E2B reports;
+// sub-core values truncate toward zero. Both the sandbox and template
+// responses share this rule, so it has exactly one definition.
+func e2bCPUCount(milliCPU int64) int64 {
+	return milliCPU / 1000
 }
 
 func ValidateMetadataKey(key string) bool {
