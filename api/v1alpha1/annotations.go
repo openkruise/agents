@@ -76,13 +76,17 @@ const (
 	// Sandbox Manager or Sandbox Claim creates high-priority sandboxes by default.
 	SandboxAnnotationPriority = "agents.kruise.io/sandbox-priority"
 
+	// SandboxPrefix is the annotation key prefix reserved for keys owned by the
+	// sandbox controller. User-supplied metadata must never carry it.
+	SandboxPrefix = "sandbox." + InternalPrefix
+
 	// SandboxHashWithoutImageAndResources represents the key of sandbox hash without image and resources.
 	// Deprecated, use SandboxHashImmutablePart instead
-	SandboxHashWithoutImageAndResources = "sandbox.agents.kruise.io/hash-without-image-resources"
+	SandboxHashWithoutImageAndResources = SandboxPrefix + "hash-without-image-resources"
 
 	// SandboxHashImmutablePart represents the key of sandbox hash than exclude immutable part of sandbox
 	// e.g. metadata, image and resources
-	SandboxHashImmutablePart = "sandbox.agents.kruise.io/hash-immutable-part"
+	SandboxHashImmutablePart = SandboxPrefix + "hash-immutable-part"
 )
 
 // Values of AnnotationTemplateBuildState.

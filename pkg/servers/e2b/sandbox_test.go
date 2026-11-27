@@ -143,6 +143,25 @@ func TestConvertToE2BSandboxPodIPMetadata(t *testing.T) {
 	}
 }
 
+func TestConvertToE2BSandboxFiltersInternalMetadata(t *testing.T) {
+	const internalLabel = "sandbox.agents.kruise.io/custom"
+	const publicKey = "sandbox.agents.kruise.io.example/team"
+	sbx := &sandboxcr.Sandbox{Sandbox: &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+		Labels: map[string]string{internalLabel: "internal", publicKey: "label"},
+		Annotations: map[string]string{
+			agentsv1alpha1.SandboxHashImmutablePart: "fingerprint",
+			publicKey:                               "annotation",
+		},
+	}}}
+
+	got := (&Controller{}).convertToE2BSandbox(sbx, "", "")
+	assert.NotContains(t, got.Metadata, internalLabel)
+	assert.NotContains(t, got.Metadata, agentsv1alpha1.SandboxHashImmutablePart)
+	assert.Equal(t, "annotation", got.Metadata[publicKey])
+	assert.Equal(t, "internal", sbx.GetLabels()[internalLabel])
+	assert.Equal(t, "fingerprint", sbx.GetAnnotations()[agentsv1alpha1.SandboxHashImmutablePart])
+}
+
 func TestConvertToE2BSandboxClaimMethodMetadata(t *testing.T) {
 	tests := []struct {
 		name        string

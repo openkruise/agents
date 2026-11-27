@@ -816,8 +816,12 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 	})
 
 	t.Run("forbidden metadata key prefix", func(t *testing.T) {
-		// covers both blacklisted prefixes, including the reserved claim-method key
-		for _, key := range []string{v1alpha1.E2BPrefix + "custom-key", agentsv1alpha1.LabelSandboxClaimMethod} {
+		// covers every blacklisted prefix, including the reserved claim-method key
+		for _, key := range []string{
+			v1alpha1.E2BPrefix + "custom-key",
+			agentsv1alpha1.SandboxPrefix + "custom-key",
+			agentsv1alpha1.LabelSandboxClaimMethod,
+		} {
 			raw, err := json.Marshal(models.NewSandboxRequest{
 				TemplateID: "t1",
 				Metadata:   map[string]string{key: "v"},

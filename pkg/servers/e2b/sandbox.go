@@ -132,15 +132,12 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain
 
 	sandbox.Metadata = make(map[string]string, len(annotations)+len(labels))
 
-	// try to read labels as metadata for backward compatibility
-	for key, val := range labels {
-		if ValidateMetadataKey(key) {
-			sandbox.Metadata[key] = val
-		}
-	}
-
-	for key, val := range annotations {
-		if ValidateMetadataKey(key) {
+	// Read legacy labels first so annotations take precedence.
+	for _, source := range []map[string]string{labels, annotations} {
+		for key, val := range source {
+			if !ValidateMetadataKey(key) {
+				continue
+			}
 			sandbox.Metadata[key] = val
 		}
 	}
