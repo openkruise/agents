@@ -319,10 +319,11 @@ func TestManagedSandboxStates(t *testing.T) {
 
 func TestConvertToE2BSandboxIdentityMetadata(t *testing.T) {
 	tests := []struct {
-		name        string
-		labels      map[string]string
-		annotations map[string]string
-		expectID    string
+		name             string
+		labels           map[string]string
+		annotations      map[string]string
+		expectID         string
+		expectTemplateID string
 	}{
 		{
 			name:     "legacy ID and protected resource context",
@@ -339,6 +340,24 @@ func TestConvertToE2BSandboxIdentityMetadata(t *testing.T) {
 			},
 			expectID: "short-id",
 		},
+		{
+			name: "template ID is the SandboxSet name with an embedded template",
+			labels: map[string]string{
+				agentsv1alpha1.LabelSandboxPool:     "code-interpreter",
+				agentsv1alpha1.LabelSandboxTemplate: "code-interpreter",
+			},
+			expectID:         "team-a--sandbox-a",
+			expectTemplateID: "code-interpreter",
+		},
+		{
+			name: "template ID is the SandboxSet name with a referenced template",
+			labels: map[string]string{
+				agentsv1alpha1.LabelSandboxPool:     "code-interpreter",
+				agentsv1alpha1.LabelSandboxTemplate: "shared-template",
+			},
+			expectID:         "team-a--sandbox-a",
+			expectTemplateID: "code-interpreter",
+		},
 	}
 
 	for _, tt := range tests {
@@ -352,6 +371,7 @@ func TestConvertToE2BSandboxIdentityMetadata(t *testing.T) {
 
 			got := (&Controller{}).convertToE2BSandbox(sbx, "", "")
 			assert.Equal(t, tt.expectID, got.SandboxID)
+			assert.Equal(t, tt.expectTemplateID, got.TemplateID)
 			assert.Equal(t, "team-a/sandbox-a", got.Metadata[models.MetadataKeySandboxResource])
 		})
 	}
