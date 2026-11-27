@@ -343,7 +343,7 @@ func (i *Issuer) IssueAgentToken(binding AgentBinding, validity time.Duration) (
 
 	issuedAt, expiry := i.window(validity)
 
-	claims := agentTokenClaims{
+	claims := AgentTokenClaims{
 		Claims: jwt.Claims{
 			Issuer: i.issuerURL,
 			// The subject names the logical agent, not the sandbox running it.
@@ -371,15 +371,145 @@ func (i *Issuer) IssueAgentToken(binding AgentBinding, validity time.Duration) (
 	return rawJWT, expiry, nil
 }
 
-// agentTokenClaims carries the workload identity the control plane derived.
+// AgentTokenClaims carries the workload identity the control plane derived.
 // Claim names follow the proposal rather than the camelCase the traffic access
 // token uses, because this token has a different consumer.
-type agentTokenClaims struct {
+//
+// Exported so VerifyAgentToken can hand its result straight to a caller: the
+// identity provider's ExchangePrincipalToken handler reads Namespace,
+// AgentIdentityName and SandboxUID off of it to look up the AgentIdentity and
+// build the AgentBinding for the principal token it mints in exchange.
+type AgentTokenClaims struct {
 	jwt.Claims
 	TokenType         string `json:"token_type"`
 	Namespace         string `json:"namespace"`
 	AgentIdentityName string `json:"agent_identity_name"`
 	SandboxUID        string `json:"sandbox_uid"`
+}
+
+// agentTokenClockSkew bounds how far a clock may drift when checking an agent
+// token's time claims.
+//
+// This package has no existing skew constant of its own: oidc.DefaultClockSkew
+// is what the gateway's verifier uses for traffic access tokens, but that
+// package verifies tokens fetched from elsewhere and is not something this
+// one, the issuing side, should start depending on just to share one constant.
+// One minute matches it anyway, since the two verifiers run in the same
+// cluster and the justification is the same: ordinary clock drift between
+// replicas, not a security boundary.
+const agentTokenClockSkew = time.Minute
+
+// maxAgentTokenSize bounds how large a presented agent token may be before it
+// is parsed at all. Matches oidc.DefaultMaxTokenSize: an agent token is a
+// small, flat JWT, and nothing legitimate needs more.
+const maxAgentTokenSize = 64 << 10
+
+// agentTokenSignatureAlgorithms lists the algorithms VerifyAgentToken accepts.
+// Kept in step with signatureAlgorithmFor's cases, so a key this issuer could
+// mint with is never unverifiable here.
+var agentTokenSignatureAlgorithms = []jose.SignatureAlgorithm{
+	jose.RS256, jose.ES256, jose.ES384, jose.ES512, jose.EdDSA,
+}
+
+// VerifyAgentToken verifies a raw agent token against this issuer's own active
+// and retained keys and returns its claims.
+//
+// Unlike oidc.Verifier, which checks a traffic access token against a JWKS
+// snapshot fetched from a separate issuer, this checks a token against the
+// very keys this process signs with: the identity provider is both the
+// issuer and the only intended verifier of an agent token, per
+// AgentTokenAudience, so no network fetch is involved.
+func (i *Issuer) VerifyAgentToken(rawJWT string) (*AgentTokenClaims, error) {
+	if rawJWT == "" {
+		return nil, fmt.Errorf("agent token must not be empty")
+	}
+	if len(rawJWT) > maxAgentTokenSize {
+		return nil, fmt.Errorf("agent token exceeds maximum size of %d bytes", maxAgentTokenSize)
+	}
+
+	keySet, err := i.PublicKeySet()
+	if err != nil {
+		return nil, fmt.Errorf("build key set: %w", err)
+	}
+
+	token, err := jwt.ParseSigned(rawJWT, agentTokenSignatureAlgorithms)
+	if err != nil {
+		return nil, fmt.Errorf("parse agent token: %w", err)
+	}
+	header := token.Headers[0]
+	if header.KeyID == "" {
+		return nil, fmt.Errorf("agent token header must contain a kid")
+	}
+	key, ok := publicKeyByID(keySet, header.KeyID)
+	if !ok {
+		return nil, fmt.Errorf("agent token references unknown kid %q", header.KeyID)
+	}
+	if key.Algorithm != "" && key.Algorithm != header.Algorithm {
+		return nil, fmt.Errorf("agent token algorithm %q does not match key algorithm %q",
+			header.Algorithm, key.Algorithm)
+	}
+
+	claims := &AgentTokenClaims{}
+	if err := token.Claims(key.Key, claims); err != nil {
+		return nil, fmt.Errorf("verify agent token signature and decode claims: %w", err)
+	}
+
+	if claims.Expiry == nil {
+		return nil, fmt.Errorf("agent token is missing exp claim")
+	}
+	if claims.IssuedAt == nil {
+		return nil, fmt.Errorf("agent token is missing iat claim")
+	}
+	if claims.NotBefore == nil {
+		return nil, fmt.Errorf("agent token is missing nbf claim")
+	}
+	if claims.Issuer != i.issuerURL {
+		return nil, fmt.Errorf("agent token issuer %q does not match expected issuer %q",
+			claims.Issuer, i.issuerURL)
+	}
+	if !audienceContains(claims.Audience, AgentTokenAudience) {
+		return nil, fmt.Errorf("agent token audience %v does not contain %q",
+			claims.Audience, AgentTokenAudience)
+	}
+	if err := claims.Claims.ValidateWithLeeway(
+		jwt.Expected{Issuer: i.issuerURL, Time: i.now()}, agentTokenClockSkew); err != nil {
+		return nil, fmt.Errorf("validate agent token claims: %w", err)
+	}
+
+	if claims.TokenType != AgentTokenType {
+		return nil, fmt.Errorf("agent token token_type is %q, want %q", claims.TokenType, AgentTokenType)
+	}
+	if claims.Namespace == "" {
+		return nil, fmt.Errorf("agent token is missing namespace")
+	}
+	if claims.AgentIdentityName == "" {
+		return nil, fmt.Errorf("agent token is missing agent_identity_name")
+	}
+	if claims.SandboxUID == "" {
+		return nil, fmt.Errorf("agent token is missing sandbox_uid")
+	}
+
+	return claims, nil
+}
+
+// publicKeyByID finds a key in a key set by its kid.
+func publicKeyByID(keySet jose.JSONWebKeySet, kid string) (jose.JSONWebKey, bool) {
+	for _, key := range keySet.Keys {
+		if key.KeyID == kid {
+			return key, true
+		}
+	}
+	return jose.JSONWebKey{}, false
+}
+
+// audienceContains reports whether an aud claim names want.
+func audienceContains(audience jwt.Audience, want string) bool {
+	for _, value := range audience {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // PrincipalBinding identifies the user a principal token speaks for and the
@@ -557,7 +687,7 @@ type principalTokenClaims struct {
 // actorClaim names the party acting on the subject behalf.
 type actorClaim struct {
 	Subject string `json:"sub"`
-	// Named to match agentTokenClaims, so the same value has the same name
+	// Named to match AgentTokenClaims, so the same value has the same name
 	// wherever it appears.
 	Namespace         string `json:"namespace"`
 	AgentIdentityName string `json:"agent_identity_name"`
@@ -591,6 +721,19 @@ func randomTokenID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
+// idTokenSignatureAlgorithms are the algorithms checkIDTokenMatchesBinding
+// reads an ID token with: every one oidc.SignatureAlgorithms lets a caller
+// verify with. A narrower list would refuse, as a 500 after verification, an
+// ID token the caller had just accepted. It is a copy rather than an import
+// because the two packages' tests already import each other;
+// TestIssuePrincipalTokenAcceptsEveryProviderAlgorithm holds them together.
+var idTokenSignatureAlgorithms = []jose.SignatureAlgorithm{
+	jose.RS256, jose.RS384, jose.RS512,
+	jose.PS256, jose.PS384, jose.PS512,
+	jose.ES256, jose.ES384, jose.ES512,
+	jose.EdDSA,
+}
+
 // checkIDTokenMatchesBinding confirms IDToken, Issuer and Subject agree.
 //
 // A caller supplies all three. If they came from mismatched verifications, the
@@ -602,9 +745,7 @@ func randomTokenID() (string, error) {
 // and this only confirms the other two fields were not swapped for a different
 // token's.
 func checkIDTokenMatchesBinding(binding PrincipalBinding) error {
-	parsed, err := jwt.ParseSigned(binding.IDToken, []jose.SignatureAlgorithm{
-		jose.RS256, jose.ES256, jose.ES384, jose.ES512, jose.EdDSA,
-	})
+	parsed, err := jwt.ParseSigned(binding.IDToken, idTokenSignatureAlgorithms)
 	if err != nil {
 		return fmt.Errorf("parse ID token: %w", err)
 	}

@@ -51,6 +51,11 @@ spec:
             # projected volume, a secret driver and a KMS sidecar all present a
             # directory of files.
             # - --encryption-key-dir=/etc/agent-identity/encryption
+            # ExchangePrincipalToken is opt-in on a key set of its own, laid
+            # out the same way. It seals the user's identity inside every
+            # principal token so that only this process can read it back, which
+            # is why it is neither the signing key nor the credential keys.
+            # - --userinfo-key-dir=/etc/agent-identity/userinfo
           # volumeMounts:
           #   - name: signing-key
           #     mountPath: /etc/agent-identity/signing
@@ -60,6 +65,9 @@ spec:
           #     readOnly: true
           #   - name: encryption-keys
           #     mountPath: /etc/agent-identity/encryption
+          #     readOnly: true
+          #   - name: userinfo-keys
+          #     mountPath: /etc/agent-identity/userinfo
           #     readOnly: true
           ports:
             - containerPort: 8080
@@ -111,4 +119,7 @@ spec:
       #     # Use a source whose read access is separable from Secrets in this
       #     # namespace: a CSI secret driver, a KMS-backed projection, or a
       #     # Secret in a namespace only this ServiceAccount can read.
+      #   - name: userinfo-keys
+      #     secret:
+      #       secretName: agent-identity-userinfo-keys
       terminationGracePeriodSeconds: 10

@@ -29,14 +29,20 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4/jwt"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/openkruise/agents/pkg/identity/aead"
 	"github.com/openkruise/agents/pkg/identity/jwtissuer"
 )
 
@@ -100,10 +106,14 @@ func writeServingPair(t *testing.T) (certFile, keyFile string) {
 func TestAddIssuer(t *testing.T) {
 	signingKey := writeSigningKey(t)
 	certFile, keyFile := writeServingPair(t)
+	userInfoKeys := userInfoKeyringForTest(t)
 
 	tests := []struct {
 		name string
 		cfg  IssuerConfig
+		// withoutBindingCRD runs against a cluster with no AgentRoleBinding
+		// mapping, where the exchange handler's field index cannot exist.
+		withoutBindingCRD bool
 		// wantIssuer expects issuance to be enabled.
 		wantIssuer bool
 		wantErr    string
@@ -170,6 +180,33 @@ func TestAddIssuer(t *testing.T) {
 			wantErr: "watch issuer serving certificate",
 		},
 		{
+			name: "a missing AgentRoleBinding CRD fails startup rather than every exchange",
+			cfg: IssuerConfig{
+				IssuerURL:       "https://issuer.test",
+				SigningKeyFile:  signingKey,
+				TLSCertFile:     certFile,
+				TLSKeyFile:      keyFile,
+				BindAddress:     "127.0.0.1:0",
+				UserInfoKeyring: userInfoKeys,
+			},
+			withoutBindingCRD: true,
+			wantErr:           "index AgentRoleBinding",
+		},
+		{
+			// Without a userinfo key there is no exchange endpoint, so there
+			// is nothing to index AgentRoleBindings for either.
+			name: "no userinfo key serves discovery without the exchange or its index",
+			cfg: IssuerConfig{
+				IssuerURL:      "https://issuer.test",
+				SigningKeyFile: signingKey,
+				TLSCertFile:    certFile,
+				TLSKeyFile:     keyFile,
+				BindAddress:    "127.0.0.1:0",
+			},
+			withoutBindingCRD: true,
+			wantIssuer:        true,
+		},
+		{
 			name: "a full configuration enables issuance",
 			cfg: IssuerConfig{
 				IssuerURL:      "https://issuer.test",
@@ -184,7 +221,13 @@ func TestAddIssuer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			issuer, err := AddIssuer(newTestManager(t), tt.cfg)
+			var mgr ctrl.Manager
+			if tt.withoutBindingCRD {
+				mgr = newTestManagerWithMapper(t, apiMeta.NewDefaultRESTMapper(nil))
+			} else {
+				mgr = newTestManager(t)
+			}
+			issuer, err := AddIssuer(mgr, tt.cfg)
 
 			if tt.wantErr != "" {
 				if err == nil {
@@ -209,6 +252,60 @@ func TestAddIssuer(t *testing.T) {
 				t.Error("expected issuance to be disabled, got an issuer")
 			}
 		})
+	}
+}
+
+// TestAddIssuerWiresTheUserInfoKeyring covers the gap a live deployment would
+// otherwise only find the first time an agent called ExchangePrincipalToken:
+// IssuePrincipalToken refuses to mint anything without a userinfo keyring, so
+// IssuerConfig.UserInfoKeyring has to actually reach the Issuer AddIssuer
+// builds, not just sit on the config struct unread.
+func TestAddIssuerWiresTheUserInfoKeyring(t *testing.T) {
+	signingKey := writeSigningKey(t)
+	certFile, keyFile := writeServingPair(t)
+	cfg := IssuerConfig{
+		IssuerURL:      "https://issuer.test",
+		SigningKeyFile: signingKey,
+		TLSCertFile:    certFile,
+		TLSKeyFile:     keyFile,
+		BindAddress:    "127.0.0.1:0",
+	}
+
+	without, err := AddIssuer(newTestManager(t), cfg)
+	if err != nil {
+		t.Fatalf("AddIssuer without a keyring: %v", err)
+	}
+	if _, _, err := without.IssuePrincipalToken(jwtissuer.PrincipalBinding{
+		IDToken: "placeholder", Issuer: "https://idp.example.com", Subject: "alice",
+		Agent: jwtissuer.AgentBinding{Namespace: "team-a", AgentIdentityName: "checkout-agent", SandboxUID: "sbx-1"},
+	}, 0); err == nil {
+		t.Error("IssuePrincipalToken succeeded without a userinfo keyring configured, want a refusal")
+	}
+
+	secret := make([]byte, aead.KeySize)
+	if _, err := rand.Read(secret); err != nil {
+		t.Fatalf("generate keyring secret: %v", err)
+	}
+	keyring, err := aead.NewKeyring(aead.Key{ID: "userinfo-1", Secret: secret})
+	if err != nil {
+		t.Fatalf("build keyring: %v", err)
+	}
+	cfg.UserInfoKeyring = keyring
+
+	with, err := AddIssuer(newTestManager(t), cfg)
+	if err != nil {
+		t.Fatalf("AddIssuer with a keyring: %v", err)
+	}
+	idTokenKey := mustIDTokenKey(t)
+	rawIDToken := signIDToken(t, idTokenKey, "idp-key-1", jwt.Claims{
+		Issuer: "https://idp.example.com", Subject: "alice",
+	})
+	if _, _, err := with.IssuePrincipalToken(jwtissuer.PrincipalBinding{
+		IDToken: rawIDToken,
+		Issuer:  "https://idp.example.com", Subject: "alice",
+		Agent: jwtissuer.AgentBinding{Namespace: "team-a", AgentIdentityName: "checkout-agent", SandboxUID: "sbx-1"},
+	}, 0); err != nil {
+		t.Errorf("IssuePrincipalToken with a configured keyring: %v", err)
 	}
 }
 
@@ -339,6 +436,62 @@ func TestServeServesTheJWKSOverTLS(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not return after the context was cancelled")
+	}
+}
+
+// TestIssuerMuxRoutesAllThreeEndpoints confirms the combined mux AddIssuer
+// builds still routes discovery and JWKS to the issuer's own handler, and
+// routes ExchangePrincipalToken to its own handler rather than falling
+// through to a 404 - unless there is no exchange handler, which is what
+// AddIssuer passes when no userinfo key is configured. It deliberately
+// presents no Authorization header: the point here is routing, not
+// authentication, and a 401 from the exchange handler is just as good a proof
+// that the request reached it as a 200 would be, without needing a cluster or
+// a real agent token.
+func TestIssuerMuxRoutesAllThreeEndpoints(t *testing.T) {
+	signingKey, err := jwtissuer.LoadSigningKeyFromFile(writeSigningKey(t))
+	if err != nil {
+		t.Fatalf("load signing key: %v", err)
+	}
+	issuer, err := jwtissuer.New("https://issuer.example", signingKey)
+	if err != nil {
+		t.Fatalf("build issuer: %v", err)
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	for _, tt := range []struct {
+		name         string
+		exchange     http.Handler
+		wantExchange int
+	}{
+		{name: "with the exchange", exchange: newExchangePrincipalTokenHandler(fc, issuer),
+			wantExchange: http.StatusUnauthorized},
+		{name: "without the exchange", wantExchange: http.StatusNotFound},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mux, err := issuerMux(issuer, tt.exchange)
+			if err != nil {
+				t.Fatalf("build issuer mux: %v", err)
+			}
+			for _, route := range []struct {
+				path       string
+				method     string
+				wantStatus int
+			}{
+				{path: jwtissuer.DiscoveryPath, method: http.MethodGet, wantStatus: http.StatusOK},
+				{path: jwtissuer.JWKSPath, method: http.MethodGet, wantStatus: http.StatusOK},
+				{path: ExchangePrincipalTokenPath, method: http.MethodPost, wantStatus: tt.wantExchange},
+				{path: "/no-such-path", method: http.MethodGet, wantStatus: http.StatusNotFound},
+			} {
+				req := httptest.NewRequest(route.method, route.path, nil)
+				rec := httptest.NewRecorder()
+				mux.ServeHTTP(rec, req)
+				if rec.Code != route.wantStatus {
+					t.Errorf("%s %s: got %d, want %d; body=%s",
+						route.method, route.path, rec.Code, route.wantStatus, rec.Body.String())
+				}
+			}
+		})
 	}
 }
 

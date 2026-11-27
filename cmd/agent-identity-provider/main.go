@@ -56,7 +56,7 @@ func main() {
 	var metricsAddr, probeAddr string
 	var enableLeaderElection bool
 	var issuerCfg agentidentity.IssuerConfig
-	var encryptionKeyDir string
+	var encryptionKeyDir, userInfoKeyDir string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -74,6 +74,9 @@ func main() {
 	flag.StringVar(&encryptionKeyDir, "encryption-key-dir", "",
 		"Directory of root keys sealing persisted credential records, one file per key ID "+
 			"alongside an \"active\" file naming which of them seals. Empty disables credential storage.")
+	flag.StringVar(&userInfoKeyDir, "userinfo-key-dir", "",
+		"Directory of root keys sealing the userinfo claim of a principal token, laid out like "+
+			"--encryption-key-dir. Empty disables ExchangePrincipalToken.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -123,9 +126,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The returned Issuer is what will mint agent tokens once the issuance RPC
-	// exists. For now it only serves discovery and JWKS, so a verifier can
-	// already fetch the keys it will need.
+	// Loaded before the issuer, which only serves ExchangePrincipalToken when
+	// it has these keys, and loaded at startup for the same reason as the
+	// credential keys below: a broken mount stops the process here.
+	issuerCfg.UserInfoKeyring, err = loadUserInfoKeys(userInfoKeyDir)
+	if err != nil {
+		setupLog.Error(err, "unable to load the userinfo keys")
+		os.Exit(1)
+	}
+
+	// Serves discovery, JWKS, and ExchangePrincipalToken. The returned Issuer
+	// is not otherwise used here: AddIssuer already wires it into that last
+	// endpoint, and nothing else in this process mints or verifies tokens.
 	if _, err := agentidentity.AddIssuer(mgr, issuerCfg); err != nil {
 		setupLog.Error(err, "unable to add the token issuer")
 		os.Exit(1)
@@ -181,4 +193,25 @@ func loadEncryptionKeys(dir string) (*aead.Keyring, error) {
 		return nil, nil
 	}
 	return aead.LoadKeyringFromDir(dir)
+}
+
+// loadUserInfoKeys builds the keyring that seals a principal token's userinfo
+// claim, or reports that ExchangePrincipalToken is disabled.
+//
+// It is its own key set rather than the credential encryption keys: section 4
+// has the userinfo key held by the service alone and managed on its own, and
+// the two rotate on different schedules, since dropping a userinfo key
+// invalidates the principal tokens it sealed while dropping a credential key
+// invalidates stored delegations.
+func loadUserInfoKeys(dir string) (*aead.Keyring, error) {
+	if dir == "" {
+		return nil, nil
+	}
+	keys, err := aead.LoadKeyringFromDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	// The active key ID, never key material, as for the credential keys.
+	setupLog.Info("principal token userinfo sealing is enabled", "activeKeyID", keys.ActiveKeyID())
+	return keys, nil
 }

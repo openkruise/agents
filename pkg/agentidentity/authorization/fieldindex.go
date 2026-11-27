@@ -38,8 +38,10 @@ import (
 // itself, the same freshness the unindexed List already had.
 const IndexFieldAgentIdentityRef = "spec.agentIdentityRef.name"
 
-// agentIdentityRefIndexFunc extracts the index key from an AgentRoleBinding.
-func agentIdentityRefIndexFunc(obj client.Object) []string {
+// AgentIdentityRefIndexFunc extracts the index key from an AgentRoleBinding.
+// It is exported so a fake client can register the same index a real cache
+// gets from SetupFieldIndex.
+func AgentIdentityRefIndexFunc(obj client.Object) []string {
 	binding, ok := obj.(*securityv1alpha1.AgentRoleBinding)
 	if !ok || binding.Spec.AgentIdentityRef.Name == "" {
 		return nil
@@ -58,7 +60,7 @@ func agentIdentityRefIndexFunc(obj client.Object) []string {
 // that forgets this fails loudly instead of just paying for the scan again.
 func SetupFieldIndex(ctx context.Context, c cache.Cache) error {
 	if err := c.IndexField(ctx, &securityv1alpha1.AgentRoleBinding{},
-		IndexFieldAgentIdentityRef, agentIdentityRefIndexFunc); err != nil {
+		IndexFieldAgentIdentityRef, AgentIdentityRefIndexFunc); err != nil {
 		return fmt.Errorf("index AgentRoleBinding by %s: %w", IndexFieldAgentIdentityRef, err)
 	}
 	return nil
