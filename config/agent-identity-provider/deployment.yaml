@@ -39,12 +39,27 @@ spec:
             # - --signing-key-file=/etc/agent-identity/signing/tls.key
             # - --tls-cert-file=/etc/agent-identity/serving/tls.crt
             # - --tls-key-file=/etc/agent-identity/serving/tls.key
+            # Credential storage is opt-in in the same way. The directory holds
+            # one file per key ID beside an "active" file naming which of them
+            # seals new records, so a rotation can be staged.
+            #
+            # These keys must not come from a Secret this process reads through
+            # the API. Session and delegation records live in Secrets in
+            # sandbox-system, and a root key held in a Secret there would be
+            # reachable by the same RBAC grant that reaches the ciphertext it
+            # protects. How the files arrive is a deployment decision: a
+            # projected volume, a secret driver and a KMS sidecar all present a
+            # directory of files.
+            # - --encryption-key-dir=/etc/agent-identity/encryption
           # volumeMounts:
           #   - name: signing-key
           #     mountPath: /etc/agent-identity/signing
           #     readOnly: true
           #   - name: serving-cert
           #     mountPath: /etc/agent-identity/serving
+          #     readOnly: true
+          #   - name: encryption-keys
+          #     mountPath: /etc/agent-identity/encryption
           #     readOnly: true
           ports:
             - containerPort: 8080
@@ -86,4 +101,14 @@ spec:
       #   - name: serving-cert
       #     secret:
       #       secretName: agent-identity-serving-cert
+      #   - name: encryption-keys
+      #     # Source deliberately left unspecified. This Deployment runs in
+      #     # sandbox-system, which is also where session and delegation
+      #     # records are stored, so a Secret here would put the root key
+      #     # behind the same RBAC grant as the ciphertext it protects and
+      #     # encrypting under it would protect nothing.
+      #     #
+      #     # Use a source whose read access is separable from Secrets in this
+      #     # namespace: a CSI secret driver, a KMS-backed projection, or a
+      #     # Secret in a namespace only this ServiceAccount can read.
       terminationGracePeriodSeconds: 10
