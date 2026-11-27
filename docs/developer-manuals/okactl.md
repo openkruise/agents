@@ -108,7 +108,7 @@ okactl set image sandboxset <name> <container=image> [container=image ...] [flag
 
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
-| `--wait` | `-w` | No | Poll every 3s until all replicas are updated and available |
+| `--wait` | `-w` | No | Poll every 3s until all replicas are updated and available. Ctrl+C (SIGINT) cancels the wait. |
 | `--timeout` | | No | Timeout for `--wait` (default: `5m`; `0` disables timeout) |
 | `--namespace` | `-n` | No | Target namespace (default: `default`) |
 
