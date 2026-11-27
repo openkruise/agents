@@ -18,12 +18,14 @@ package agentidentity
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -128,67 +130,47 @@ type exchangeFixture struct {
 	userInfoKeys  *aead.Keyring
 	rawAgentToken string
 	rawIDToken    string
+	// jwksRequests counts requests to the IdP's JWKS endpoint.
+	jwksRequests *atomic.Int32
 }
 
-// newExchangeFixture builds the fixture. objects are added to the cluster
-// alongside the AgentIdentity and AgentAuthenticationConfig every case needs;
-// callers add an AgentRole/AgentRoleBinding to grant access, or leave it out
-// to exercise a denial.
+// exchangeOptions varies the fixture away from a granted, ready ES256 IdP.
+type exchangeOptions struct {
+	// extra objects are added to the cluster alongside the AgentIdentity and
+	// the AgentAuthenticationConfig every case needs: an AgentRole and
+	// AgentRoleBinding to grant access, or nothing to exercise a denial.
+	extra []client.Object
+	// intercept fails chosen reads on the fake client, for the handler's own
+	// internal-error paths rather than its ordinary denials.
+	intercept *interceptor.Funcs
+	// idpAlgorithm signs the ID token; ES256 when empty, and an RSA key for
+	// anything else.
+	idpAlgorithm jose.SignatureAlgorithm
+	// jwksStatus, when set, is what the IdP's JWKS endpoint answers instead
+	// of its keys.
+	jwksStatus int
+	// staleAuthConfig leaves the IdP's AgentAuthenticationConfig Ready only
+	// for an earlier generation.
+	staleAuthConfig bool
+}
+
+// newExchangeFixture builds the fixture with only extra objects varied.
 func newExchangeFixture(t *testing.T, identityObj *securityv1alpha1.AgentIdentity, extra ...client.Object) *exchangeFixture {
 	t.Helper()
-
-	signingKey := mustIDTokenKey(t)
-	userInfoKeys := userInfoKeyringForTest(t)
-	issuer, err := jwtissuer.New("https://issuer.example",
-		jwtissuer.SigningKey{KeyID: "active", PrivateKey: signingKey},
-		jwtissuer.WithUserInfoKeyring(userInfoKeys))
-	if err != nil {
-		t.Fatalf("build issuer: %v", err)
-	}
-
-	idpKey := mustIDTokenKey(t)
-	jwksServer := startJWKSServer(t, publicJWKFor("idp-key-1", idpKey.Public()))
-	now := time.Now()
-	rawIDToken := signIDToken(t, idpKey, "idp-key-1", jwt.Claims{
-		Issuer:    exchangeTestIDPIssuer,
-		Subject:   exchangeTestSubject,
-		Audience:  jwt.Audience{exchangeTestAudience},
-		IssuedAt:  jwt.NewNumericDate(now),
-		NotBefore: jwt.NewNumericDate(now),
-		Expiry:    jwt.NewNumericDate(now.Add(time.Hour)),
-	})
-
-	objects := append([]client.Object{
-		identityObj,
-		resolvedAuthConfig("idp", exchangeTestIDPIssuer, jwksServer.URL, exchangeTestAudience),
-	}, extra...)
-	fc := indexedClientBuilder().WithObjects(objects...).Build()
-
-	rawAgentToken, _, err := issuer.IssueAgentToken(jwtissuer.AgentBinding{
-		Namespace:         testNamespace,
-		AgentIdentityName: exchangeTestIdentity,
-		SandboxUID:        exchangeTestSandboxUID,
-	}, 0)
-	if err != nil {
-		t.Fatalf("issue agent token: %v", err)
-	}
-
-	return &exchangeFixture{
-		handler:       newExchangePrincipalTokenHandler(fc, issuer),
-		issuer:        issuer,
-		userInfoKeys:  userInfoKeys,
-		rawAgentToken: rawAgentToken,
-		rawIDToken:    rawIDToken,
-	}
+	return buildExchangeFixture(t, identityObj, exchangeOptions{extra: extra})
 }
 
-// newExchangeFixtureWithInterceptor is newExchangeFixture plus the ability to
-// fail a specific read on the underlying fake client, for exercising the
-// handler's own internal-error paths (a read failure that is not a plain
-// absence) rather than its ordinary denial paths.
+// newExchangeFixtureWithInterceptor builds the fixture over a client that
+// fails the reads funcs choose.
 func newExchangeFixtureWithInterceptor(t *testing.T, identityObj *securityv1alpha1.AgentIdentity,
 	funcs interceptor.Funcs, extra ...client.Object) *exchangeFixture {
 	t.Helper()
+	return buildExchangeFixture(t, identityObj, exchangeOptions{extra: extra, intercept: &funcs})
+}
+
+func buildExchangeFixture(t *testing.T, identityObj *securityv1alpha1.AgentIdentity,
+	opts exchangeOptions) *exchangeFixture {
+	t.Helper()
 
 	signingKey := mustIDTokenKey(t)
 	userInfoKeys := userInfoKeyringForTest(t)
@@ -199,10 +181,33 @@ func newExchangeFixtureWithInterceptor(t *testing.T, identityObj *securityv1alph
 		t.Fatalf("build issuer: %v", err)
 	}
 
-	idpKey := mustIDTokenKey(t)
-	jwksServer := startJWKSServer(t, publicJWKFor("idp-key-1", idpKey.Public()))
+	alg := opts.idpAlgorithm
+	var idpKey crypto.Signer = mustIDTokenKey(t)
+	if alg == "" {
+		alg = jose.ES256
+	} else {
+		idpKey = mustRSAIDTokenKey(t)
+	}
+	keySet, err := json.Marshal(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+		Key: idpKey.Public(), KeyID: "idp-key-1", Use: "sig", Algorithm: string(alg),
+	}}})
+	if err != nil {
+		t.Fatalf("marshal JWKS: %v", err)
+	}
+	jwksRequests := &atomic.Int32{}
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		jwksRequests.Add(1)
+		if opts.jwksStatus != 0 {
+			w.WriteHeader(opts.jwksStatus)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(keySet)
+	}))
+	t.Cleanup(jwksServer.Close)
+
 	now := time.Now()
-	rawIDToken := signIDToken(t, idpKey, "idp-key-1", jwt.Claims{
+	rawIDToken := signIDTokenWith(t, alg, idpKey, "idp-key-1", jwt.Claims{
 		Issuer:    exchangeTestIDPIssuer,
 		Subject:   exchangeTestSubject,
 		Audience:  jwt.Audience{exchangeTestAudience},
@@ -211,12 +216,15 @@ func newExchangeFixtureWithInterceptor(t *testing.T, identityObj *securityv1alph
 		Expiry:    jwt.NewNumericDate(now.Add(time.Hour)),
 	})
 
-	objects := append([]client.Object{
-		identityObj,
-		resolvedAuthConfig("idp", exchangeTestIDPIssuer, jwksServer.URL, exchangeTestAudience),
-	}, extra...)
-	fc := indexedClientBuilder().WithObjects(objects...).
-		WithInterceptorFuncs(funcs).Build()
+	config := resolvedAuthConfig("idp", exchangeTestIDPIssuer, jwksServer.URL, exchangeTestAudience)
+	if opts.staleAuthConfig {
+		config = staleAuthConfig(config)
+	}
+	builder := indexedClientBuilder().WithObjects(append([]client.Object{identityObj, config}, opts.extra...)...)
+	if opts.intercept != nil {
+		builder = builder.WithInterceptorFuncs(*opts.intercept)
+	}
+	fc := builder.Build()
 
 	rawAgentToken, _, err := issuer.IssueAgentToken(jwtissuer.AgentBinding{
 		Namespace:         testNamespace,
@@ -233,6 +241,7 @@ func newExchangeFixtureWithInterceptor(t *testing.T, identityObj *securityv1alph
 		userInfoKeys:  userInfoKeys,
 		rawAgentToken: rawAgentToken,
 		rawIDToken:    rawIDToken,
+		jwksRequests:  jwksRequests,
 	}
 }
 
@@ -279,6 +288,27 @@ func TestExchangePrincipalTokenInternalFailures(t *testing.T) {
 						return errBoom
 					}
 					return c.List(ctx, list, opts...)
+				},
+			}, grantingObjects...)
+
+		rec := postExchange(fixture.handler, "Bearer "+fixture.rawAgentToken, idTokenRequestBody(fixture))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status: got %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+		}
+		if got := decodeErrorBody(t, rec); got != "internal error" {
+			t.Errorf("error: got %q, want %q", got, "internal error")
+		}
+	})
+
+	t.Run("AgentAuthenticationConfig read fails for a reason other than absence", func(t *testing.T) {
+		fixture := newExchangeFixtureWithInterceptor(t, readyIdentity(exchangeTestIdentity, "idp"),
+			interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+					obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*securityv1alpha1.AgentAuthenticationConfig); ok {
+						return errBoom
+					}
+					return c.Get(ctx, key, obj, opts...)
 				},
 			}, grantingObjects...)
 
@@ -379,15 +409,39 @@ type wirePrincipalClaims struct {
 // verifies against the issuer's own JWKS and decrypts back to the right
 // issuer, subject and ID token.
 func TestExchangePrincipalTokenSucceeds(t *testing.T) {
-	fixture := newExchangeFixture(t, readyIdentity(exchangeTestIdentity, "idp"),
-		agentRole("exchange-role", agentRoleRule(securityv1alpha1.ActionExchangePrincipalToken, "*")),
-		agentRoleBinding("exchange-binding", "exchange-role", exchangeTestIdentity))
+	tests := []struct {
+		name   string
+		alg    jose.SignatureAlgorithm
+		scheme string
+	}{
+		{name: "an ES256 ID token", scheme: "Bearer"},
+		// PS256 passes the verifier's allowlist, and has to pass the one
+		// jwtissuer reads the token with when it mints, too.
+		{name: "a PS256 ID token, end to end", alg: jose.PS256, scheme: "Bearer"},
+		// RFC 7235 makes the scheme case-insensitive.
+		{name: "a lowercase bearer scheme", scheme: "bearer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testExchangePrincipalTokenSucceeds(t, tt.alg, tt.scheme)
+		})
+	}
+}
+
+func testExchangePrincipalTokenSucceeds(t *testing.T, alg jose.SignatureAlgorithm, scheme string) {
+	fixture := buildExchangeFixture(t, readyIdentity(exchangeTestIdentity, "idp"), exchangeOptions{
+		idpAlgorithm: alg,
+		extra: []client.Object{
+			agentRole("exchange-role", agentRoleRule(securityv1alpha1.ActionExchangePrincipalToken, "*")),
+			agentRoleBinding("exchange-binding", "exchange-role", exchangeTestIdentity),
+		},
+	})
 
 	body, err := json.Marshal(exchangePrincipalTokenRequestBody{IDToken: fixture.rawIDToken})
 	if err != nil {
 		t.Fatalf("marshal request body: %v", err)
 	}
-	rec := postExchange(fixture.handler, "Bearer "+fixture.rawAgentToken, string(body))
+	rec := postExchange(fixture.handler, scheme+" "+fixture.rawAgentToken, string(body))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
@@ -445,6 +499,15 @@ func TestExchangePrincipalTokenSucceeds(t *testing.T) {
 	if gotIDToken != fixture.rawIDToken {
 		t.Error("userinfo ID token did not round trip")
 	}
+
+	// A second exchange is verified against the cached key set rather than
+	// another request to the IdP.
+	if rec := postExchange(fixture.handler, scheme+" "+fixture.rawAgentToken, string(body)); rec.Code != http.StatusOK {
+		t.Fatalf("second exchange: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := fixture.jwksRequests.Load(); got != 1 {
+		t.Errorf("JWKS requests across two exchanges: got %d, want 1", got)
+	}
 }
 
 func TestExchangePrincipalTokenFailurePaths(t *testing.T) {
@@ -461,8 +524,13 @@ func TestExchangePrincipalTokenFailurePaths(t *testing.T) {
 		method     string
 		bearer     func(fixture *exchangeFixture) string
 		body       func(fixture *exchangeFixture) string
+		jwksStatus int
+		staleIdP   bool
 		wantStatus int
 		wantError  string
+		// wantNoJWKSFetch expects the request to be answered without the IdP
+		// being asked for anything.
+		wantNoJWKSFetch bool
 	}{
 		{
 			name:       "missing Authorization header",
@@ -531,13 +599,49 @@ func TestExchangePrincipalTokenFailurePaths(t *testing.T) {
 			wantError:  "agent identity is not ready",
 		},
 		{
-			name:       "authorization denied",
+			// Authorization reads only the cache and the verified agent
+			// token, so it is decided before the ID token is, and a denied
+			// agent never makes this process call the IdP.
+			name:            "authorization denied",
+			identity:        grantedIdentity(),
+			extra:           nil, // no AgentRole/AgentRoleBinding at all
+			bearer:          func(f *exchangeFixture) string { return "Bearer " + f.rawAgentToken },
+			body:            func(f *exchangeFixture) string { return idTokenRequestBody(f) },
+			wantStatus:      http.StatusForbidden,
+			wantError:       "not permitted",
+			wantNoJWKSFetch: true,
+		},
+		{
+			// An IdP outage says nothing about the user's credentials, so it
+			// must not read as a 401 that sends the client to log in again.
+			name:       "the IdP's JWKS is unavailable",
 			identity:   grantedIdentity(),
-			extra:      nil, // no AgentRole/AgentRoleBinding at all
+			extra:      grantingObjects,
 			bearer:     func(f *exchangeFixture) string { return "Bearer " + f.rawAgentToken },
 			body:       func(f *exchangeFixture) string { return idTokenRequestBody(f) },
-			wantStatus: http.StatusForbidden,
-			wantError:  "not permitted",
+			jwksStatus: http.StatusBadGateway,
+			wantStatus: http.StatusServiceUnavailable,
+			wantError:  "identity provider unavailable",
+		},
+		{
+			name:            "the ID token's authentication config is not Ready",
+			identity:        grantedIdentity(),
+			extra:           grantingObjects,
+			bearer:          func(f *exchangeFixture) string { return "Bearer " + f.rawAgentToken },
+			body:            func(f *exchangeFixture) string { return idTokenRequestBody(f) },
+			staleIdP:        true,
+			wantStatus:      http.StatusPreconditionFailed,
+			wantError:       "authentication config is not ready",
+			wantNoJWKSFetch: true,
+		},
+		{
+			name:       "a scheme with no separator",
+			identity:   grantedIdentity(),
+			extra:      grantingObjects,
+			bearer:     func(f *exchangeFixture) string { return "Bearer" + f.rawAgentToken },
+			body:       func(f *exchangeFixture) string { return idTokenRequestBody(f) },
+			wantStatus: http.StatusUnauthorized,
+			wantError:  "missing or malformed bearer token",
 		},
 		{
 			name:       "wrong HTTP method",
@@ -584,7 +688,9 @@ func TestExchangePrincipalTokenFailurePaths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fixture := newExchangeFixture(t, tt.identity, tt.extra...)
+			fixture := buildExchangeFixture(t, tt.identity, exchangeOptions{
+				extra: tt.extra, jwksStatus: tt.jwksStatus, staleAuthConfig: tt.staleIdP,
+			})
 			method := tt.method
 			if method == "" {
 				method = http.MethodPost
@@ -602,6 +708,9 @@ func TestExchangePrincipalTokenFailurePaths(t *testing.T) {
 			}
 			if got := decodeErrorBody(t, rec); got != tt.wantError {
 				t.Errorf("error: got %q, want %q", got, tt.wantError)
+			}
+			if got := fixture.jwksRequests.Load(); tt.wantNoJWKSFetch && got != 0 {
+				t.Errorf("JWKS requests: got %d, want none", got)
 			}
 		})
 	}

@@ -28,7 +28,6 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/openkruise/agents/pkg/agentidentity/authorization"
@@ -63,12 +62,11 @@ type IssuerConfig struct {
 	// BindAddress is the address the endpoints listen on.
 	BindAddress string
 
-	// UserInfoKeyring seals the userinfo claim on a minted principal token.
-	// Nil leaves ExchangePrincipalToken unable to mint anything:
-	// IssuePrincipalToken refuses outright rather than issue a token whose
-	// userinfo claim would be absent or unsealed. The caller loads this the
-	// same way it loads the credential encryption keyring, since both come
-	// from the same kind of operator-mounted key directory.
+	// UserInfoKeyring seals the userinfo claim on a minted principal token,
+	// and is what enables ExchangePrincipalToken. Nil leaves that endpoint
+	// unserved: IssuePrincipalToken refuses outright without a keyring rather
+	// than issue a token whose userinfo claim would be absent or unsealed, so
+	// serving the endpoint without one would fail every exchange.
 	UserInfoKeyring *aead.Keyring
 }
 
@@ -85,6 +83,9 @@ type IssuerConfig struct {
 // which keys to trust, so serving it over plaintext would let anyone on the
 // path substitute their own and have forged tokens accepted. There is no flag
 // to turn that off.
+//
+// ExchangePrincipalToken is opt-in the same way, on UserInfoKeyring: without
+// it discovery and JWKS are served and the exchange path is not.
 func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 	if cfg.SigningKeyFile == "" {
 		klog.InfoS("Token issuance is disabled: no signing key configured")
@@ -112,15 +113,22 @@ func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 		return nil, fmt.Errorf("build issuer: %w", err)
 	}
 
-	// The exchange handler authorizes through mgr.GetClient(), whose List over
-	// AgentRoleBindings needs this index on the same cache. It has to be
-	// registered before the manager starts, and failing here keeps a missing
-	// AgentRoleBinding CRD a startup error rather than a 500 on every exchange.
-	if err := authorization.SetupFieldIndex(context.Background(), mgr.GetCache()); err != nil {
-		return nil, err
+	var exchange http.Handler
+	if cfg.UserInfoKeyring == nil {
+		klog.InfoS("ExchangePrincipalToken is disabled: no userinfo key configured")
+	} else {
+		// The exchange handler authorizes through mgr.GetClient(), whose List
+		// over AgentRoleBindings needs this index on the same cache. It has to
+		// be registered before the manager starts, and failing here keeps a
+		// missing AgentRoleBinding CRD a startup error rather than a 500 on
+		// every exchange.
+		if err := authorization.SetupFieldIndex(context.Background(), mgr.GetCache()); err != nil {
+			return nil, err
+		}
+		exchange = newExchangePrincipalTokenHandler(mgr.GetClient(), issuer)
 	}
 
-	handler, err := issuerMux(mgr.GetClient(), issuer)
+	handler, err := issuerMux(issuer, exchange)
 	if err != nil {
 		return nil, fmt.Errorf("build issuer endpoints: %w", err)
 	}
@@ -171,12 +179,13 @@ func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 	}
 
 	klog.InfoS("Token issuance is enabled", "issuerURL", cfg.IssuerURL,
-		"keyID", signingKey.KeyID, "bindAddress", cfg.BindAddress)
+		"keyID", signingKey.KeyID, "bindAddress", cfg.BindAddress, "exchangePrincipalToken", exchange != nil)
 	return issuer, nil
 }
 
 // issuerMux combines issuer's own discovery and JWKS endpoints with
-// ExchangePrincipalToken, so one HTTP server answers all three.
+// ExchangePrincipalToken, when exchange is non-nil, so one HTTP server
+// answers all three.
 //
 // The issuer endpoints are mounted at "/" rather than re-registered here:
 // they already carry their own full paths, including the issuer URL's own
@@ -184,7 +193,7 @@ func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 // decides what those are. ExchangePrincipalToken is mounted at its own exact
 // path instead, since - unlike discovery and JWKS - it is not something an
 // external OIDC consumer needs to find relative to the issuer URL.
-func issuerMux(reader client.Reader, issuer *jwtissuer.Issuer) (http.Handler, error) {
+func issuerMux(issuer *jwtissuer.Issuer, exchange http.Handler) (http.Handler, error) {
 	discoveryHandler, err := issuer.Handler()
 	if err != nil {
 		return nil, err
@@ -192,7 +201,9 @@ func issuerMux(reader client.Reader, issuer *jwtissuer.Issuer) (http.Handler, er
 
 	mux := http.NewServeMux()
 	mux.Handle("/", discoveryHandler)
-	mux.Handle(ExchangePrincipalTokenPath, newExchangePrincipalTokenHandler(reader, issuer))
+	if exchange != nil {
+		mux.Handle(ExchangePrincipalTokenPath, exchange)
+	}
 	return mux, nil
 }
 

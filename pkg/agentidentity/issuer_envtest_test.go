@@ -406,17 +406,8 @@ func TestServingCertificateReloadsWithoutARestart(t *testing.T) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("register the core scheme: %v", err)
 	}
-	// AddIssuer indexes AgentRoleBindings for the exchange endpoint, so the
-	// kind has to be both in the scheme and installed.
-	if err := securityv1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("register the security scheme: %v", err)
-	}
 
-	env := &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
-		ErrorIfCRDPathMissing: true,
-		Scheme:                scheme,
-	}
+	env := &envtest.Environment{Scheme: scheme}
 	restConfig, err := env.Start()
 	if err != nil {
 		t.Fatalf("start the API server: %v", err)

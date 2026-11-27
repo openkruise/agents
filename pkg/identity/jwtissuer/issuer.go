@@ -721,6 +721,19 @@ func randomTokenID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
+// idTokenSignatureAlgorithms are the algorithms checkIDTokenMatchesBinding
+// reads an ID token with: every one oidc.SignatureAlgorithms lets a caller
+// verify with. A narrower list would refuse, as a 500 after verification, an
+// ID token the caller had just accepted. It is a copy rather than an import
+// because the two packages' tests already import each other;
+// TestIssuePrincipalTokenAcceptsEveryProviderAlgorithm holds them together.
+var idTokenSignatureAlgorithms = []jose.SignatureAlgorithm{
+	jose.RS256, jose.RS384, jose.RS512,
+	jose.PS256, jose.PS384, jose.PS512,
+	jose.ES256, jose.ES384, jose.ES512,
+	jose.EdDSA,
+}
+
 // checkIDTokenMatchesBinding confirms IDToken, Issuer and Subject agree.
 //
 // A caller supplies all three. If they came from mismatched verifications, the
@@ -732,9 +745,7 @@ func randomTokenID() (string, error) {
 // and this only confirms the other two fields were not swapped for a different
 // token's.
 func checkIDTokenMatchesBinding(binding PrincipalBinding) error {
-	parsed, err := jwt.ParseSigned(binding.IDToken, []jose.SignatureAlgorithm{
-		jose.RS256, jose.ES256, jose.ES384, jose.ES512, jose.EdDSA,
-	})
+	parsed, err := jwt.ParseSigned(binding.IDToken, idTokenSignatureAlgorithms)
 	if err != nil {
 		return fmt.Errorf("parse ID token: %w", err)
 	}

@@ -106,6 +106,7 @@ func writeServingPair(t *testing.T) (certFile, keyFile string) {
 func TestAddIssuer(t *testing.T) {
 	signingKey := writeSigningKey(t)
 	certFile, keyFile := writeServingPair(t)
+	userInfoKeys := userInfoKeyringForTest(t)
 
 	tests := []struct {
 		name string
@@ -181,6 +182,21 @@ func TestAddIssuer(t *testing.T) {
 		{
 			name: "a missing AgentRoleBinding CRD fails startup rather than every exchange",
 			cfg: IssuerConfig{
+				IssuerURL:       "https://issuer.test",
+				SigningKeyFile:  signingKey,
+				TLSCertFile:     certFile,
+				TLSKeyFile:      keyFile,
+				BindAddress:     "127.0.0.1:0",
+				UserInfoKeyring: userInfoKeys,
+			},
+			withoutBindingCRD: true,
+			wantErr:           "index AgentRoleBinding",
+		},
+		{
+			// Without a userinfo key there is no exchange endpoint, so there
+			// is nothing to index AgentRoleBindings for either.
+			name: "no userinfo key serves discovery without the exchange or its index",
+			cfg: IssuerConfig{
 				IssuerURL:      "https://issuer.test",
 				SigningKeyFile: signingKey,
 				TLSCertFile:    certFile,
@@ -188,7 +204,7 @@ func TestAddIssuer(t *testing.T) {
 				BindAddress:    "127.0.0.1:0",
 			},
 			withoutBindingCRD: true,
-			wantErr:           "index AgentRoleBinding",
+			wantIssuer:        true,
 		},
 		{
 			name: "a full configuration enables issuance",
@@ -426,10 +442,12 @@ func TestServeServesTheJWKSOverTLS(t *testing.T) {
 // TestIssuerMuxRoutesAllThreeEndpoints confirms the combined mux AddIssuer
 // builds still routes discovery and JWKS to the issuer's own handler, and
 // routes ExchangePrincipalToken to its own handler rather than falling
-// through to a 404. It deliberately presents no Authorization header: the
-// point here is routing, not authentication, and a 401 from the exchange
-// handler is just as good a proof that the request reached it as a 200
-// would be, without needing a cluster or a real agent token.
+// through to a 404 - unless there is no exchange handler, which is what
+// AddIssuer passes when no userinfo key is configured. It deliberately
+// presents no Authorization header: the point here is routing, not
+// authentication, and a 401 from the exchange handler is just as good a proof
+// that the request reached it as a 200 would be, without needing a cluster or
+// a real agent token.
 func TestIssuerMuxRoutesAllThreeEndpoints(t *testing.T) {
 	signingKey, err := jwtissuer.LoadSigningKeyFromFile(writeSigningKey(t))
 	if err != nil {
@@ -439,40 +457,42 @@ func TestIssuerMuxRoutesAllThreeEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build issuer: %v", err)
 	}
-
 	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
-	mux, err := issuerMux(fc, issuer)
-	if err != nil {
-		t.Fatalf("build issuer mux: %v", err)
-	}
 
 	for _, tt := range []struct {
-		path       string
-		method     string
-		wantStatus int
+		name         string
+		exchange     http.Handler
+		wantExchange int
 	}{
-		{path: jwtissuer.DiscoveryPath, method: http.MethodGet, wantStatus: http.StatusOK},
-		{path: jwtissuer.JWKSPath, method: http.MethodGet, wantStatus: http.StatusOK},
-		{path: ExchangePrincipalTokenPath, method: http.MethodPost, wantStatus: http.StatusUnauthorized},
+		{name: "with the exchange", exchange: newExchangePrincipalTokenHandler(fc, issuer),
+			wantExchange: http.StatusUnauthorized},
+		{name: "without the exchange", wantExchange: http.StatusNotFound},
 	} {
-		t.Run(tt.path, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, tt.path, nil)
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-			if rec.Code != tt.wantStatus {
-				t.Errorf("status: got %d, want %d; body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+		t.Run(tt.name, func(t *testing.T) {
+			mux, err := issuerMux(issuer, tt.exchange)
+			if err != nil {
+				t.Fatalf("build issuer mux: %v", err)
+			}
+			for _, route := range []struct {
+				path       string
+				method     string
+				wantStatus int
+			}{
+				{path: jwtissuer.DiscoveryPath, method: http.MethodGet, wantStatus: http.StatusOK},
+				{path: jwtissuer.JWKSPath, method: http.MethodGet, wantStatus: http.StatusOK},
+				{path: ExchangePrincipalTokenPath, method: http.MethodPost, wantStatus: tt.wantExchange},
+				{path: "/no-such-path", method: http.MethodGet, wantStatus: http.StatusNotFound},
+			} {
+				req := httptest.NewRequest(route.method, route.path, nil)
+				rec := httptest.NewRecorder()
+				mux.ServeHTTP(rec, req)
+				if rec.Code != route.wantStatus {
+					t.Errorf("%s %s: got %d, want %d; body=%s",
+						route.method, route.path, rec.Code, route.wantStatus, rec.Body.String())
+				}
 			}
 		})
 	}
-
-	t.Run("an unregistered path is still a 404", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/no-such-path", nil)
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("status: got %d, want %d", rec.Code, http.StatusNotFound)
-		}
-	})
 }
 
 func fetchJSON(t *testing.T, client *http.Client, url string, into any) {

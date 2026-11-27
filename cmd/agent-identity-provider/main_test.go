@@ -38,6 +38,16 @@ func writeKeyDir(t *testing.T, files map[string][]byte) string {
 	return dir
 }
 
+// keyLoaders are the two key directories the provider reads at startup. Both
+// are laid out and validated the same way, so every case runs against both.
+var keyLoaders = []struct {
+	name string
+	load func(dir string) (*aead.Keyring, error)
+}{
+	{name: "credential encryption keys", load: loadEncryptionKeys},
+	{name: "userinfo keys", load: loadUserInfoKeys},
+}
+
 // TestLoadEncryptionKeys covers what an operator can get wrong in the mount,
 // and the one case that must not be treated as an error.
 //
@@ -117,58 +127,60 @@ func TestLoadEncryptionKeys(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := ""
-			if !tt.unset {
-				dir = writeKeyDir(t, tt.files)
-			}
-
-			keyring, err := loadEncryptionKeys(dir)
-
-			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected an error containing %q, got nil", tt.wantErr)
+	for _, loader := range keyLoaders {
+		for _, tt := range tests {
+			t.Run(loader.name+"/"+tt.name, func(t *testing.T) {
+				dir := ""
+				if !tt.unset {
+					dir = writeKeyDir(t, tt.files)
 				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Errorf("error: got %q, want it to contain %q", err, tt.wantErr)
-				}
-				if keyring != nil {
-					t.Error("a keyring was returned alongside the error")
-				}
-				return
-			}
 
-			if err != nil {
-				t.Fatalf("loadEncryptionKeys: %v", err)
-			}
-			if !tt.wantKeyring {
-				if keyring != nil {
-					t.Error("a keyring was built even though no directory was configured")
-				}
-				return
-			}
-			if keyring == nil {
-				t.Fatal("no keyring was built")
-			}
-			if got := keyring.ActiveKeyID(); got != tt.wantActiveID {
-				t.Errorf("active key: got %q, want %q", got, tt.wantActiveID)
-			}
+				keyring, err := loader.load(dir)
 
-			// Loading is not the point; sealing is. A keyring that loads but
-			// cannot round trip would pass every check above.
-			sealed, err := keyring.Seal([]byte("refresh-token"), "sandbox-system", "alice", "github")
-			if err != nil {
-				t.Fatalf("Seal: %v", err)
-			}
-			opened, err := keyring.Open(sealed, "sandbox-system", "alice", "github")
-			if err != nil {
-				t.Fatalf("Open: %v", err)
-			}
-			if string(opened) != "refresh-token" {
-				t.Errorf("round trip returned %q", opened)
-			}
-		})
+				if tt.wantErr != "" {
+					if err == nil {
+						t.Fatalf("expected an error containing %q, got nil", tt.wantErr)
+					}
+					if !strings.Contains(err.Error(), tt.wantErr) {
+						t.Errorf("error: got %q, want it to contain %q", err, tt.wantErr)
+					}
+					if keyring != nil {
+						t.Error("a keyring was returned alongside the error")
+					}
+					return
+				}
+
+				if err != nil {
+					t.Fatalf("load %s: %v", loader.name, err)
+				}
+				if !tt.wantKeyring {
+					if keyring != nil {
+						t.Error("a keyring was built even though no directory was configured")
+					}
+					return
+				}
+				if keyring == nil {
+					t.Fatal("no keyring was built")
+				}
+				if got := keyring.ActiveKeyID(); got != tt.wantActiveID {
+					t.Errorf("active key: got %q, want %q", got, tt.wantActiveID)
+				}
+
+				// Loading is not the point; sealing is. A keyring that loads but
+				// cannot round trip would pass every check above.
+				sealed, err := keyring.Seal([]byte("refresh-token"), "sandbox-system", "alice", "github")
+				if err != nil {
+					t.Fatalf("Seal: %v", err)
+				}
+				opened, err := keyring.Open(sealed, "sandbox-system", "alice", "github")
+				if err != nil {
+					t.Fatalf("Open: %v", err)
+				}
+				if string(opened) != "refresh-token" {
+					t.Errorf("round trip returned %q", opened)
+				}
+			})
+		}
 	}
 }
 
@@ -177,11 +189,15 @@ func TestLoadEncryptionKeys(t *testing.T) {
 // at nothing means the mount did not arrive, which is a misconfiguration and
 // has to stop the process.
 func TestLoadEncryptionKeysRejectsAMissingDirectory(t *testing.T) {
-	keyring, err := loadEncryptionKeys(filepath.Join(t.TempDir(), "never-mounted"))
-	if err == nil {
-		t.Fatal("a missing directory was treated as success")
-	}
-	if keyring != nil {
-		t.Error("a keyring was returned alongside the error")
+	for _, loader := range keyLoaders {
+		t.Run(loader.name, func(t *testing.T) {
+			keyring, err := loader.load(filepath.Join(t.TempDir(), "never-mounted"))
+			if err == nil {
+				t.Fatal("a missing directory was treated as success")
+			}
+			if keyring != nil {
+				t.Error("a keyring was returned alongside the error")
+			}
+		})
 	}
 }

@@ -24,10 +24,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
@@ -36,12 +38,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-var asymmetricSignatureAlgorithms = []jose.SignatureAlgorithm{
+// SignatureAlgorithms are the JWS algorithms a token from an OIDC provider may
+// be signed with. The provider chooses, so this is every asymmetric algorithm
+// go-jose verifies. Anything that parses a provider's token, whether to verify
+// it or only to read it, should accept exactly this set, or a token one step
+// accepts fails at the next.
+var SignatureAlgorithms = []jose.SignatureAlgorithm{
 	jose.RS256, jose.RS384, jose.RS512,
 	jose.PS256, jose.PS384, jose.PS512,
 	jose.ES256, jose.ES384, jose.ES512,
 	jose.EdDSA,
 }
+
+// ErrUnknownKeyID means a token names a kid the key set does not hold. It is
+// the one KeyFor failure a fresher copy of the key set can cure, since a
+// provider that rotates keys publishes the new one before signing with it.
+var ErrUnknownKeyID = errors.New("token references an unknown kid")
 
 // Verifier verifies a traffic access token against a fixed OIDC key snapshot.
 type Verifier interface {
@@ -122,17 +134,9 @@ func NewVerifier(ctx context.Context, reader client.Reader, opts Options) (Verif
 		return nil, fmt.Errorf("OIDC discovery document has invalid jwks_uri: %w", err)
 	}
 
-	keySet := jwksDocument{}
-	if err := fetchJSON(ctx, httpClient, discovery.JWKSURI, opts.MaxResponseSize, &keySet); err != nil {
-		return nil, fmt.Errorf("fetch OIDC JWKS: %w", err)
-	}
-	decodedKeys, err := decodeJWKs(keySet.Keys)
+	keys, err := LoadKeySet(ctx, httpClient, discovery.JWKSURI, opts.MaxResponseSize)
 	if err != nil {
-		return nil, fmt.Errorf("decode OIDC JWKS: %w", err)
-	}
-	keys, err := validateKeys(decodedKeys)
-	if err != nil {
-		return nil, fmt.Errorf("validate OIDC JWKS: %w", err)
+		return nil, err
 	}
 
 	return &verifier{
@@ -143,26 +147,75 @@ func NewVerifier(ctx context.Context, reader client.Reader, opts Options) (Verif
 	}, nil
 }
 
+// LoadKeySet fetches the JWKS at jwksURI and returns its verification keys by
+// kid.
+//
+// It is the one JWKS policy for every verifier here. Keys published for
+// something other than verifying signatures are skipped: a use other than sig,
+// key_ops without verify, or an alg that is not a signature algorithm.
+// Providers publish those legitimately, Keycloak's RSA-OAEP encryption key
+// among them, and refusing the whole set over one would make such a provider
+// unusable. A key that is meant for verification is held to every check, and
+// one that fails, or a kid published twice, rejects the set, since a set that
+// cannot be read unambiguously cannot be trusted at all.
+//
+// httpClient should refuse redirects: a JWKS URI validated as HTTPS says
+// nothing about where a redirect leads.
+func LoadKeySet(ctx context.Context, httpClient *http.Client, jwksURI string,
+	maxSize int64) (map[string]jose.JSONWebKey, error) {
+	keySet := jwksDocument{}
+	if err := fetchJSON(ctx, httpClient, jwksURI, maxSize, &keySet); err != nil {
+		return nil, fmt.Errorf("fetch OIDC JWKS: %w", err)
+	}
+	decodedKeys, err := decodeJWKs(keySet.Keys)
+	if err != nil {
+		return nil, fmt.Errorf("decode OIDC JWKS: %w", err)
+	}
+	keys, err := validateKeys(decodedKeys)
+	if err != nil {
+		return nil, fmt.Errorf("validate OIDC JWKS: %w", err)
+	}
+	return keys, nil
+}
+
+// KeyFor returns the key in keys that header says signed a token, once it is
+// confirmed able to have done so: the kid is present and known, the token's
+// alg matches the alg the key declares, if any, and the alg suits the key's
+// type. An unknown kid is ErrUnknownKeyID.
+func KeyFor(keys map[string]jose.JSONWebKey, header jose.Header) (jose.JSONWebKey, error) {
+	if header.KeyID == "" {
+		return jose.JSONWebKey{}, fmt.Errorf("token header must contain a kid")
+	}
+	key, ok := keys[header.KeyID]
+	if !ok {
+		return jose.JSONWebKey{}, fmt.Errorf("%w %q", ErrUnknownKeyID, header.KeyID)
+	}
+	if key.Algorithm != "" && key.Algorithm != header.Algorithm {
+		return jose.JSONWebKey{}, fmt.Errorf("token algorithm %q does not match JWK algorithm %q",
+			header.Algorithm, key.Algorithm)
+	}
+	if !algorithmSupportsKey(jose.SignatureAlgorithm(header.Algorithm), key.Key) {
+		return jose.JSONWebKey{}, fmt.Errorf("token algorithm %q is incompatible with key %q",
+			header.Algorithm, header.KeyID)
+	}
+	return key, nil
+}
+
+// decodeJWKs decodes the keys meant for verifying signatures and skips the
+// rest; see LoadKeySet.
 func decodeJWKs(rawKeys []json.RawMessage) ([]jose.JSONWebKey, error) {
 	keys := make([]jose.JSONWebKey, 0, len(rawKeys))
 	for index, rawKey := range rawKeys {
 		metadata := struct {
+			Use           string   `json:"use"`
 			KeyOperations []string `json:"key_ops"`
+			Algorithm     string   `json:"alg"`
 		}{}
 		if err := json.Unmarshal(rawKey, &metadata); err != nil {
 			return nil, fmt.Errorf("decode key %d metadata: %w", index, err)
 		}
-		if len(metadata.KeyOperations) > 0 {
-			canVerify := false
-			for _, operation := range metadata.KeyOperations {
-				if operation == "verify" {
-					canVerify = true
-					break
-				}
-			}
-			if !canVerify {
-				return nil, fmt.Errorf("key %d key_ops does not permit verify", index)
-			}
+		if !forVerification(metadata.Use, metadata.KeyOperations, metadata.Algorithm) {
+			continue
 		}
 
 		key := jose.JSONWebKey{}
@@ -174,6 +227,19 @@ func decodeJWKs(rawKeys []json.RawMessage) ([]jose.JSONWebKey, error) {
 	return keys, nil
 }
 
+// forVerification reports whether a published key's own metadata allows it to
+// verify a signature. Absent metadata allows it, since RFC 7517 leaves all of
+// it optional.
+func forVerification(use string, operations []string, algorithm string) bool {
+	if use != "" && use != "sig" {
+		return false
+	}
+	if len(operations) > 0 && !slices.Contains(operations, "verify") {
+		return false
+	}
+	return algorithm == "" || slices.Contains(SignatureAlgorithms, jose.SignatureAlgorithm(algorithm))
+}
+
 // Verify validates a token signature and the required traffic access token claims.
 func (v *verifier) Verify(rawJWT string) (*TrafficAccessTokenClaims, error) {
 	if rawJWT == "" {
@@ -183,23 +249,13 @@ func (v *verifier) Verify(rawJWT string) (*TrafficAccessTokenClaims, error) {
 		return nil, fmt.Errorf("token exceeds maximum size of %d bytes", v.maxTokenSize)
 	}
 
-	token, err := jwt.ParseSigned(rawJWT, asymmetricSignatureAlgorithms)
+	token, err := jwt.ParseSigned(rawJWT, SignatureAlgorithms)
 	if err != nil {
 		return nil, fmt.Errorf("parse signed token: %w", err)
 	}
-	header := token.Headers[0]
-	if header.KeyID == "" {
-		return nil, fmt.Errorf("token header must contain a kid")
-	}
-	key, ok := v.keys[header.KeyID]
-	if !ok {
-		return nil, fmt.Errorf("token references unknown kid %q", header.KeyID)
-	}
-	if key.Algorithm != "" && key.Algorithm != header.Algorithm {
-		return nil, fmt.Errorf("token algorithm %q does not match JWK algorithm %q", header.Algorithm, key.Algorithm)
-	}
-	if !algorithmSupportsKey(jose.SignatureAlgorithm(header.Algorithm), key.Key) {
-		return nil, fmt.Errorf("token algorithm %q is incompatible with key %q", header.Algorithm, header.KeyID)
+	key, err := KeyFor(v.keys, token.Headers[0])
+	if err != nil {
+		return nil, err
 	}
 
 	claims := &TrafficAccessTokenClaims{}

@@ -92,10 +92,14 @@ func TestNewVerifier(t *testing.T) {
 		{name: "JWKS bad key", configure: func(f *loaderFixture, _ *httptest.Server) {
 			f.jwksBody = `{"keys":[{"kty":"oct","kid":"shared","k":"eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg"}]}`
 		}, expectDiscovery: 1, expectJWKS: 1, expectError: "asymmetric public key"},
-		{name: "JWKS key operations do not permit verification", configure: func(f *loaderFixture, _ *httptest.Server) {
+		{name: "JWKS whose only key is not for verification has nothing to verify with", configure: func(f *loaderFixture, _ *httptest.Server) {
 			encoded := mustJSON(t, publicJWK)
 			f.jwksBody = fmt.Sprintf(`{"keys":[%s]}`, strings.TrimSuffix(encoded, "}")+`,"key_ops":["encrypt"]}`)
-		}, expectDiscovery: 1, expectJWKS: 1, expectError: "key_ops does not permit verify"},
+		}, expectDiscovery: 1, expectJWKS: 1, expectError: "key set must contain at least one key"},
+		{name: "JWKS publishing an encryption key beside the signing key, as Keycloak does", configure: func(f *loaderFixture, _ *httptest.Server) {
+			encryption := jose.JSONWebKey{Key: &mustRSAKey(t).PublicKey, KeyID: "rsa-enc", Use: "enc", Algorithm: "RSA-OAEP"}
+			f.jwksBody = mustJSON(t, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{publicJWK, encryption}})
+		}, assertVerifier: true, expectDiscovery: 1, expectJWKS: 1},
 		{name: "JWKS duplicate kid", configure: func(f *loaderFixture, _ *httptest.Server) {
 			f.jwksBody = mustJSON(t, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{publicJWK, publicJWK}})
 		}, expectDiscovery: 1, expectJWKS: 1, expectError: "duplicate kid"},

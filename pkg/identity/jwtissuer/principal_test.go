@@ -18,8 +18,10 @@ package jwtissuer
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -29,6 +31,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/openkruise/agents/pkg/identity/aead"
+	"github.com/openkruise/agents/pkg/identity/oidc"
 )
 
 // userInfoKeyring is the keyring sealing the userinfo claim. It is separate
@@ -559,5 +562,52 @@ func TestIssuePrincipalTokenRejectsAnUnsignedIDTokenShape(t *testing.T) {
 
 	if raw, _, err := issuer.IssuePrincipalToken(binding, time.Minute); err == nil {
 		t.Fatalf("issued a token from an alg:none ID token: %s", raw)
+	}
+}
+
+// TestIssuePrincipalTokenAcceptsEveryProviderAlgorithm holds
+// idTokenSignatureAlgorithms to oidc.SignatureAlgorithms, the set an ID token
+// is verified with before it reaches IssuePrincipalToken. If the two drift, an
+// ID token signed with the difference verifies and then fails to mint.
+func TestIssuePrincipalTokenAcceptsEveryProviderAlgorithm(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	_, edKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate Ed25519 key: %v", err)
+	}
+	ecKeys := map[jose.SignatureAlgorithm]elliptic.Curve{
+		jose.ES256: elliptic.P256(), jose.ES384: elliptic.P384(), jose.ES512: elliptic.P521(),
+	}
+	issuer, _ := principalIssuer(t)
+
+	for _, alg := range oidc.SignatureAlgorithms {
+		t.Run(string(alg), func(t *testing.T) {
+			var key any = rsaKey
+			switch {
+			case alg == jose.EdDSA:
+				key = edKey
+			case ecKeys[alg] != nil:
+				ecKey, err := ecdsa.GenerateKey(ecKeys[alg], rand.Reader)
+				if err != nil {
+					t.Fatalf("generate EC key: %v", err)
+				}
+				key = ecKey
+			}
+			signer, err := jose.NewSigner(jose.SigningKey{Algorithm: alg, Key: key}, nil)
+			if err != nil {
+				t.Fatalf("build signer: %v", err)
+			}
+			binding := verifiedUser()
+			if binding.IDToken, err = jwt.Signed(signer).
+				Claims(jwt.Claims{Issuer: binding.Issuer, Subject: binding.Subject}).Serialize(); err != nil {
+				t.Fatalf("sign ID token: %v", err)
+			}
+			if _, _, err := issuer.IssuePrincipalToken(binding, 0); err != nil {
+				t.Errorf("an ID token signed with %s was refused: %v", alg, err)
+			}
+		})
 	}
 }

@@ -295,6 +295,8 @@ func TestDecodeJWKs(t *testing.T) {
 	rsaKey := mustRSAKey(t)
 	publicJWK := jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "rsa", Use: "sig", Algorithm: string(jose.RS256)}
 	withVerifyOperation := json.RawMessage(strings.TrimSuffix(mustJSON(t, publicJWK), "}") + `,"key_ops":["sign","verify"]}`)
+	encryptionJWK := publicJWK
+	encryptionJWK.Use = "enc"
 
 	tests := []struct {
 		name        string
@@ -303,6 +305,13 @@ func TestDecodeJWKs(t *testing.T) {
 		expectError string
 	}{
 		{name: "verify operation permitted", rawKeys: []json.RawMessage{withVerifyOperation}, expectCount: 1},
+		{name: "encryption use is skipped", rawKeys: []json.RawMessage{json.RawMessage(mustJSON(t, encryptionJWK))}, expectCount: 0},
+		{name: "key operations without verify are skipped",
+			rawKeys: []json.RawMessage{withField(t, publicJWK, `"key_ops":["encrypt"]`)}, expectCount: 0},
+		{name: "a key encryption algorithm is skipped",
+			rawKeys: []json.RawMessage{json.RawMessage(strings.Replace(mustJSON(t, publicJWK), `"alg":"RS256"`, `"alg":"RSA-OAEP"`, 1))}, expectCount: 0},
+		{name: "only the signing key of a mixed set is kept",
+			rawKeys: []json.RawMessage{json.RawMessage(mustJSON(t, encryptionJWK)), json.RawMessage(mustJSON(t, publicJWK))}, expectCount: 1},
 		{name: "malformed metadata", rawKeys: []json.RawMessage{json.RawMessage(`{`)}, expectError: "decode key 0 metadata"},
 		{name: "invalid JWK", rawKeys: []json.RawMessage{json.RawMessage(`{"kty":"unsupported","kid":"bad"}`)}, expectError: "decode key 0"},
 	}
@@ -319,6 +328,13 @@ func TestDecodeJWKs(t *testing.T) {
 			assert.Len(t, keys, tt.expectCount)
 		})
 	}
+}
+
+// withField adds a raw JSON member to a key's encoding, for members such as
+// key_ops that go-jose does not model and so would not encode.
+func withField(t *testing.T, key jose.JSONWebKey, member string) json.RawMessage {
+	t.Helper()
+	return json.RawMessage(strings.TrimSuffix(mustJSON(t, key), "}") + "," + member + "}")
 }
 
 func TestValidateKeys(t *testing.T) {
