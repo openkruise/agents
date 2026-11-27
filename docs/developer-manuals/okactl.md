@@ -48,7 +48,7 @@ okactl scale sbs my-pool --replicas=10 --kubeconfig=/path/to/kubeconfig --contex
 Key Notes:
 
 - kubeconfig resolution order: `--kubeconfig` flag → `KUBECONFIG` environment variable → `~/.kube/config`
-- Namespace defaults to `default`; use `-n` to specify a different namespace
+- Namespace resolution order: `-n` flag → namespace of the selected kubeconfig context → in-cluster ServiceAccount namespace → `default`
 - All commands are stateless client-side API operations — no daemon or local state
 
 Once connected, you can manage sandbox resources:
@@ -87,7 +87,7 @@ okactl scale sbs <name> --replicas=<N> [flags]
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
 | `--replicas` | | Yes | Target replica count |
-| `--namespace` | `-n` | No | Target namespace (default: `default`) |
+| `--namespace` | `-n` | No | Target namespace (default: kubeconfig context namespace, else `default`) |
 
 ### Examples
 
@@ -110,7 +110,7 @@ okactl set image sandboxset <name> <container=image> [container=image ...] [flag
 |------|-------|----------|-------------|
 | `--wait` | `-w` | No | Poll every 3s until all replicas are updated and available |
 | `--timeout` | | No | Timeout for `--wait` (default: `5m`; `0` disables timeout) |
-| `--namespace` | `-n` | No | Target namespace (default: `default`) |
+| `--namespace` | `-n` | No | Target namespace (default: kubeconfig context namespace, else `default`) |
 
 > **Note**: Refuses to operate on SandboxSets using `TemplateRef`. Users should modify the referenced `SandboxTemplate`
 > directly.
@@ -150,7 +150,7 @@ okactl status sandboxset <name> [flags]
 
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
-| `--namespace` | `-n` | No | Target namespace (default: `default`) |
+| `--namespace` | `-n` | No | Target namespace (default: kubeconfig context namespace, else `default`) |
 
 **Output format**: `my-pool  Updating  1/3 updated  1/3 available`
 
@@ -175,7 +175,7 @@ okactl status sandboxupdateops <name> [flags]
 
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
-| `--namespace` | `-n` | No | Target namespace (default: `default`) |
+| `--namespace` | `-n` | No | Target namespace (default: kubeconfig context namespace, else `default`) |
 
 **Output format**: `suo-zk7h7  Updating   0/2 updated  1 updating  0 failed`
 
@@ -204,7 +204,7 @@ okactl restart sandbox <name> -c <container> [-c <container> ...] [--all] [--fai
 | `--container` | `-c` | No | Container name(s) to restart (repeatable) |
 | `--all` | | No | Restart all containers in the sandbox |
 | `--failure-policy` | | No | Failure policy: `Fail` (stop on error, default) or `Ignore` (continue on error) |
-| `--namespace` | `-n` | No | Target namespace (default: `default`) |
+| `--namespace` | `-n` | No | Target namespace (default: kubeconfig context namespace, else `default`) |
 
 > **Note**: At least one of `-c` or `--all` must be specified. Running without either
 > will print available container names and exit with an error. The two flags are
@@ -245,7 +245,7 @@ okactl create suo -l <key=value> <container=image> [container=image ...] [flags]
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
 | `--selector` | `-l` | Yes | Label selector to match target sandboxes |
-| `--namespace` | `-n` | No | Target namespace (default: `default`) |
+| `--namespace` | `-n` | No | Target namespace (default: kubeconfig context namespace, else `default`) |
 
 ### Validation
 
@@ -273,7 +273,7 @@ Applied via root command persistent flags, available to all subcommands:
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--kubeconfig` | | `~/.kube/config` | Path to kubeconfig file |
-| `--namespace` | `-n` | `default` | Target namespace |
+| `--namespace` | `-n` | kubeconfig context namespace, else `default` | Target namespace |
 | `--context` | | | Kubeconfig context to use |
 
 ---
