@@ -41,6 +41,11 @@ func TestIsBlackListed(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "sandbox prefix is blacklisted",
+			key:  agentsv1alpha1.SandboxHashImmutablePart,
+			want: true,
+		},
+		{
 			name: "plain user key is allowed",
 			key:  "team.example.com/owner",
 			want: false,

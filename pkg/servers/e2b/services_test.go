@@ -193,7 +193,7 @@ func TestCreateSandbox(t *testing.T) {
 			},
 			expectError: &web.ApiError{
 				Code:    400,
-				Message: "Forbidden metadata key [e2b.agents.kruise.io/key]: cannot contain prefixes: [e2b.agents.kruise.io/ agents.kruise.io/",
+				Message: "Forbidden metadata key [e2b.agents.kruise.io/key]: cannot contain prefixes:",
 			},
 		},
 		{

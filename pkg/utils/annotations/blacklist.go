@@ -27,7 +27,11 @@ import (
 // sandbox-manager themselves, so user-supplied metadata must never carry
 // them and they must never be propagated onto user-facing resources such
 // as the pod template.
-var BlackListPrefix = []string{agentsv1alpha1.E2BPrefix, agentsv1alpha1.InternalPrefix}
+var BlackListPrefix = []string{
+	agentsv1alpha1.E2BPrefix,
+	agentsv1alpha1.SandboxPrefix,
+	agentsv1alpha1.InternalPrefix,
+}
 
 // IsBlackListed reports whether the given annotation key matches one of the
 // internal reserved prefixes in BlackListPrefix.
