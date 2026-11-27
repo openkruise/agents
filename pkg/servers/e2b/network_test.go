@@ -18,6 +18,7 @@ package e2b
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -392,6 +393,42 @@ func TestValidateAndBuildNetworkConfig(t *testing.T) {
 			wantNil:     false,
 			expectError: "",
 		},
+		{
+			name: "empty dnsServers with domain allowOut rejected",
+			network: &models.SandboxNetworkConfig{
+				AllowOut:   []string{"api.example.com"},
+				DNSServers: json.RawMessage(`[]`),
+			},
+			wantNil:     true,
+			expectError: "network.dnsServers is not supported",
+		},
+		{
+			name: "custom dnsServers rejected",
+			network: &models.SandboxNetworkConfig{
+				AllowOut:   []string{"api.example.com"},
+				DNSServers: json.RawMessage(`["1.1.1.1"]`),
+			},
+			wantNil:     true,
+			expectError: "network.dnsServers is not supported",
+		},
+		{
+			name: "dnsServers-only network config rejected, not nilled",
+			network: &models.SandboxNetworkConfig{
+				DNSServers: json.RawMessage(`["1.1.1.1"]`),
+			},
+			wantNil:     true,
+			expectError: "network.dnsServers is not supported",
+		},
+		{
+			name: "null dnsServers treated as absent",
+			network: &models.SandboxNetworkConfig{
+				AllowOut:   []string{"10.0.0.0/8"},
+				DNSServers: json.RawMessage(`null`),
+			},
+			wantNil:     false,
+			wantAllow:   []string{"10.0.0.0/8"},
+			expectError: "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -483,6 +520,22 @@ func TestUpdateSandboxNetwork_ValidationError(t *testing.T) {
 				DenyOut: generateCIDREntries(maxNetworkEntriesPerList + 1),
 			},
 			expectError: "denyOut list exceeds maximum",
+		},
+		{
+			name: "empty dnsServers rejected",
+			req: models.SandboxNetworkUpdateConfig{
+				AllowOut:   []string{"api.example.com"},
+				DNSServers: json.RawMessage(`[]`),
+			},
+			expectError: "network.dnsServers is not supported",
+		},
+		{
+			name: "custom dnsServers rejected",
+			req: models.SandboxNetworkUpdateConfig{
+				AllowOut:   []string{"api.example.com"},
+				DNSServers: json.RawMessage(`["1.1.1.1"]`),
+			},
+			expectError: "network.dnsServers is not supported",
 		},
 	}
 
