@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/openkruise/agents/pkg/agent-runtime/common"
 )
 
@@ -93,4 +95,48 @@ func TestInitFunction(t *testing.T) {
 // resetInitializeProviderFuncs resets the global initializeProviderFuncs slice for testing
 func resetInitializeProviderFuncs() {
 	initializeProviderFuncs = []initProviderFunc{}
+}
+
+func TestDriverListFromEnv(t *testing.T) {
+	tests := []struct {
+		name        string
+		onDemandEnv string
+		dynamicEnv  string
+		expect      []string
+	}{
+		{
+			name:        "current env var",
+			onDemandEnv: "driver1,driver2",
+			expect:      []string{"driver1", "driver2"},
+		},
+		{
+			name:       "deprecated env var is still honoured",
+			dynamicEnv: "driver1,driver2",
+			expect:     []string{"driver1", "driver2"},
+		},
+		{
+			name:        "current env var wins when both are set",
+			onDemandEnv: "new-driver",
+			dynamicEnv:  "old-driver",
+			expect:      []string{"new-driver"},
+		},
+		{
+			name:   "neither set configures no drivers",
+			expect: nil,
+		},
+		{
+			name:        "blank entries are dropped",
+			onDemandEnv: "driver1,, driver2 ,",
+			expect:      []string{"driver1", "driver2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(common.ENV_ON_DEMAND_MOUNT_DRIVER_LIST, tt.onDemandEnv)
+			t.Setenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST, tt.dynamicEnv)
+
+			assert.Equal(t, tt.expect, driverListFromEnv())
+		})
+	}
 }
