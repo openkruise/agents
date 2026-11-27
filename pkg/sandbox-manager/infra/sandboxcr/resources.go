@@ -22,20 +22,9 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 )
 
-const bytesPerMiB = int64(1024 * 1024)
-
-// templateResourceFromSandboxSet calculates the resource view of a template,
-// including the storage requested by its volume claim templates, which stacks
-// on top of the effective container footprint.
 func templateResourceFromSandboxSet(tmpl *agentsv1alpha1.SandboxSet) infra.ResourceList {
 	if tmpl == nil || tmpl.Spec.Template == nil {
 		return infra.ResourceList{}
 	}
-	out := claim.CalculateResourceFromContainers(tmpl.Spec.Template.Spec.Containers).Effective()
-	for _, pvc := range tmpl.Spec.VolumeClaimTemplates {
-		if storage := pvc.Spec.Resources.Requests.Storage(); storage != nil && !storage.IsZero() {
-			out.DiskSizeMB += storage.Value() / bytesPerMiB
-		}
-	}
-	return out
+	return claim.CalculateResourceFromContainers(tmpl.Spec.Template.Spec.Containers).Effective()
 }

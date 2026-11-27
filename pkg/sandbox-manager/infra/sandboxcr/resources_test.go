@@ -41,7 +41,7 @@ func TestTemplateResourceFromSandboxSet(t *testing.T) {
 		want       infra.ResourceList
 	}{
 		{
-			name: "cpu limits with memory and disk requests plus claims",
+			name: "cpu limits with memory and ephemeral storage requests exclude PVC capacity",
 			containers: []corev1.Container{
 				{Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
@@ -56,7 +56,7 @@ func TestTemplateResourceFromSandboxSet(t *testing.T) {
 				}},
 			},
 			claims: []corev1.PersistentVolumeClaim{claim("1Gi"), {}, claim("2Gi")},
-			want:   infra.ResourceList{CPUMilli: 1500, MemoryMB: 512, DiskSizeMB: 7168},
+			want:   infra.ResourceList{CPUMilli: 1500, MemoryMB: 512, DiskSizeMB: 4096},
 		},
 		{
 			name: "cpu request with memory and disk limits",
