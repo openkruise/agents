@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -321,12 +322,19 @@ func sessionContext(key SessionKey) []string {
 }
 
 // delegationContext is the associated data a delegation is sealed under, for
-// the same reason, over all four parts of its key.
-func delegationContext(key DelegationKey) []string {
-	return []string{
-		"delegation", key.Namespace, normalizeIssuer(key.UserIssuer), key.UserSubject,
-		key.AgentIdentity, key.CredentialProvider,
-	}
+// the same reason: its Secret name, which is the digest of every part of its
+// key.
+//
+// The name rather than the parts themselves, because the parts include the
+// user's issuer and subject, which a delegation deliberately keeps nowhere
+// outside the seal. Bound to them, a record could only be opened by a caller
+// already holding its key, so ResealDelegations could not re-seal one after a
+// rotation until its user came back, and a refresh token lives for months.
+// The name binds the record to its address just as firmly: it is a
+// collision-resistant digest of the same length-prefixed parts, so a record
+// copied to another delegation's name still fails to open.
+func delegationContext(secretName string) []string {
+	return []string{"delegation", secretName}
 }
 
 func (s *SecretSessionStore) Create(ctx context.Context, session *Session) error {
@@ -647,7 +655,7 @@ func (s *SecretDelegationStore) Get(ctx context.Context, key DelegationKey) (*De
 	}
 
 	var payload delegationPayload
-	if err := s.open(secret.Data[payloadKey], &payload, delegationContext(key)...); err != nil {
+	if err := s.open(secret.Data[payloadKey], &payload, delegationContext(secret.Name)...); err != nil {
 		return nil, err
 	}
 	return &Delegation{
@@ -676,7 +684,7 @@ func (s *SecretDelegationStore) Put(ctx context.Context, record *Delegation) err
 		State:                string(record.State),
 		UpdatedAt:            record.UpdatedAt,
 	}
-	sealed, err := s.seal(payload, delegationContext(record.Key)...)
+	sealed, err := s.seal(payload, delegationContext(DelegationSecretName(record.Key))...)
 	if err != nil {
 		return err
 	}
@@ -721,6 +729,64 @@ func (s *SecretDelegationStore) Put(ctx context.Context, record *Delegation) err
 	}
 	record.Version = secret.ResourceVersion
 	return nil
+}
+
+// ResealDelegations re-seals, under the keyring's active key, every delegation
+// still sealed under another one, and returns how many it re-sealed.
+//
+// This is what lets a retired encryption key actually be dropped. A rotation
+// makes the new key active at once, but a delegation is only sealed again
+// when something writes it, and one whose user has not been back keeps
+// needing the old key for as long as its refresh token lives. A sweep that
+// returns no error has left nothing sealed under any other key, apart from
+// records a replica still running the old keyring writes meanwhile.
+//
+// Each record is rewritten with compare-and-swap, so one that a refresh or a
+// callback writes during the sweep is left to that writer, which seals under
+// the active key too. A record that cannot be re-sealed, because it was
+// sealed under a key this keyring no longer holds or does not open, is
+// reported and the sweep carries on: one bad record must not keep the rest on
+// a key that is being retired.
+//
+// Sessions are not swept. They live for minutes, so a rotation waits them out.
+// Like SweepExpiredSessions, this package schedules nothing; a caller runs it
+// after a rotation, and periodically.
+func (s *SecretDelegationStore) ResealDelegations(ctx context.Context) (int, error) {
+	var delegations corev1.SecretList
+	if err := s.client.List(ctx, &delegations, client.InNamespace(s.namespace),
+		client.MatchingLabels{LabelRecordKind: delegationRecordKind}); err != nil {
+		return 0, fmt.Errorf("delegation: list delegations: %w", err)
+	}
+
+	resealed := 0
+	var errs []error
+	for i := range delegations.Items {
+		if err := ctx.Err(); err != nil {
+			return resealed, errors.Join(append(errs, err)...)
+		}
+		secret := delegations.Items[i].DeepCopy()
+		payload, changed, err := s.keyring.Reseal(secret.Data[payloadKey], delegationContext(secret.Name)...)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("delegation: re-seal %s: %w", secret.Name, err))
+			continue
+		}
+		if !changed {
+			continue
+		}
+		secret.Data[payloadKey] = payload
+		if err := s.client.Update(ctx, secret); err != nil {
+			// A conflict or a deletion means another writer got there first,
+			// and whatever it wrote was sealed under the active key, or was a
+			// withdrawal. Neither is this sweep's to undo.
+			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("delegation: write re-sealed %s: %w", secret.Name, err))
+			continue
+		}
+		resealed++
+	}
+	return resealed, errors.Join(errs...)
 }
 
 func (s *SecretDelegationStore) Delete(ctx context.Context, key DelegationKey) error {
