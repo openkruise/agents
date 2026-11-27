@@ -797,9 +797,13 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	core.ResourceVersionExpectations.Expect(rcvObject)
 	if r.syncRouteWithPeers != nil {
 		newRoute, routeErr := sandboxroute.RouteFromSandbox(rcvObject)
+		// spec.paused may already be set on the old object, so both routes can project as Paused.
+		// Also sync on the persisted phase transition into pause, preserving the returned object's route projection.
+		enteringPause := oldPhase == agentsv1alpha1.SandboxRunning &&
+			rcvObject.Status.Phase == agentsv1alpha1.SandboxPaused && newRoute.State == sandboxstate.Paused
 		if routeErr := cmp.Or(oldRouteErr, routeErr); routeErr != nil {
 			klog.FromContext(ctx).Error(routeErr, "failed to project Sandbox route, skipping peer sync", "sandbox", klog.KObj(box))
-		} else if newRoute.State != sandboxstate.Dead && (oldRoute.CanRouteTraffic() != newRoute.CanRouteTraffic() || oldRoute.IP != newRoute.IP) {
+		} else if newRoute.State != sandboxstate.Dead && (oldRoute.CanRouteTraffic() != newRoute.CanRouteTraffic() || oldRoute.IP != newRoute.IP || enteringPause) {
 			// Status is already persisted; peer sync is best-effort acceleration, while informers ensure eventual convergence.
 			syncCtx, cancel := context.WithTimeout(ctx, controllerRouteSyncTimeout)
 			err := r.syncRouteWithPeers(syncCtx, newRoute)
