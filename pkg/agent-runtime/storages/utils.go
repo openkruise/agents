@@ -17,8 +17,8 @@ limitations under the License.
 package storages
 
 import (
-	"math/rand"
-	"time"
+	"math/rand/v2"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -26,24 +26,42 @@ import (
 const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 func generateRandomString(length int) string {
-	rand.Seed(time.Now().UnixNano())
+	// math/rand/v2's global source is seeded automatically and is safe
+	// for concurrent use; the deprecated rand.Seed re-seed per call
+	// could produce identical sequences when calls land in the same
+	// nanosecond.
 	b := make([]byte, length)
 	for i := range b {
-		b[i] = charset[rand.Intn(len(charset))] // #nosec G404 -- non-security random for temp names
+		b[i] = charset[rand.IntN(len(charset))] // #nosec G404 -- non-security random for temp names
 	}
 	return string(b)
 }
 
+// IsPureReadOnly reports whether the volume is read-only by its access
+// modes. Any writable mode (ReadWriteOnce/Many/OncePod) makes the volume
+// writable; otherwise a non-empty mode list is treated as read-only so that
+// an unknown future mode defaults to the conservative direction instead of
+// silently weakening to writable. An empty mode list (no declaration) stays
+// writable, matching the mount request's own readOnly flag as the only
+// signal.
 func IsPureReadOnly(accessModes []corev1.PersistentVolumeAccessMode) bool {
+	if len(accessModes) == 0 {
+		return false
+	}
 	for _, mode := range accessModes {
-		if mode == corev1.ReadWriteOnce || mode == corev1.ReadWriteMany || mode == corev1.ReadWriteOncePod {
+		switch mode {
+		case corev1.ReadWriteOnce, corev1.ReadWriteMany, corev1.ReadWriteOncePod:
 			return false
+		case corev1.ReadOnlyMany:
+			// known read-only mode
+		default:
+			// Unknown mode: keep the conservative read-only default.
 		}
 	}
-	for _, mode := range accessModes {
-		if mode == corev1.ReadOnlyMany {
-			return true
-		}
-	}
-	return false
+	return true
+}
+
+// hasAccessMode reports whether the PV declares the given access mode.
+func hasAccessMode(pv *corev1.PersistentVolume, mode corev1.PersistentVolumeAccessMode) bool {
+	return slices.Contains(pv.Spec.AccessModes, mode)
 }
