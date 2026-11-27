@@ -522,7 +522,87 @@ func TestManagerRetryAndPublication(t *testing.T) {
 			expectCalls := int32(len(tt.failedResults) + 1)
 			assert.Equal(t, expectCalls, calls.Load())
 			time.Sleep(20 * time.Millisecond)
-			assert.Equal(t, expectCalls, calls.Load(), "loader must not refresh after readiness")
+			assert.Equal(t, expectCalls, calls.Load(), "loader must not refresh before the refresh interval elapses")
+			stopManager(t, cancel, done)
+		})
+	}
+}
+
+func TestManagerRefresh(t *testing.T) {
+	rotated := &fakeVerifier{name: "rotated"}
+	tests := []struct {
+		name            string
+		refreshInterval time.Duration
+		refreshResult   func() (oidc.Verifier, error)
+		expectRefresh   bool
+		expectCurrent   func(initial oidc.Verifier) oidc.Verifier
+	}{
+		{
+			name:            "rotated keys are published without a restart",
+			refreshInterval: time.Millisecond,
+			refreshResult:   func() (oidc.Verifier, error) { return rotated, nil },
+			expectRefresh:   true,
+			expectCurrent:   func(oidc.Verifier) oidc.Verifier { return rotated },
+		},
+		{
+			name:            "failed refresh keeps the last published verifier",
+			refreshInterval: time.Millisecond,
+			refreshResult:   func() (oidc.Verifier, error) { return nil, errors.New("JWKS unavailable") },
+			expectRefresh:   true,
+			expectCurrent:   func(initial oidc.Verifier) oidc.Verifier { return initial },
+		},
+		{
+			name:            "nil verifier from refresh keeps the last published verifier",
+			refreshInterval: time.Millisecond,
+			refreshResult:   func() (oidc.Verifier, error) { return nil, nil },
+			expectRefresh:   true,
+			expectCurrent:   func(initial oidc.Verifier) oidc.Verifier { return initial },
+		},
+		{
+			name:            "non-positive interval disables refresh",
+			refreshInterval: 0,
+			refreshResult:   func() (oidc.Verifier, error) { return rotated, nil },
+			expectRefresh:   false,
+			expectCurrent:   func(initial oidc.Verifier) oidc.Verifier { return initial },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initial := &fakeVerifier{name: "initial"}
+			var calls atomic.Int32
+			manager := newManager(func() (oidc.Options, error) {
+				return testOptions("refresh"), nil
+			}, func(context.Context, client.Reader, oidc.Options) (oidc.Verifier, error) {
+				if calls.Add(1) == 1 {
+					return initial, nil
+				}
+				return tt.refreshResult()
+			}, time.Millisecond, time.Millisecond, tt.refreshInterval)
+			require.NoError(t, manager.Configure(true))
+			require.NoError(t, manager.SetReader(&fakeReader{name: "refresh"}))
+			cancel, done := startManager(t, manager)
+
+			waitForState(t, manager, Ready)
+			assert.NotNil(t, manager.Current())
+
+			if tt.expectRefresh {
+				// Wait for several refresh attempts so the failure cases below
+				// assert that repeated failures never drop the good verifier.
+				require.Eventually(t, func() bool {
+					return calls.Load() > 2
+				}, testTimeout, time.Millisecond, "verifier was never refreshed")
+			} else {
+				time.Sleep(20 * time.Millisecond)
+				assert.Equal(t, int32(1), calls.Load(), "refresh must stay disabled")
+			}
+
+			require.Eventually(t, func() bool {
+				return manager.Current() == tt.expectCurrent(initial)
+			}, testTimeout, time.Millisecond, "unexpected published verifier")
+			// A refresh must never revoke authentication that already works.
+			assert.NoError(t, manager.Ready())
+			assert.Equal(t, Ready, manager.State())
 			stopManager(t, cancel, done)
 		})
 	}
