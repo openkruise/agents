@@ -463,14 +463,14 @@ func (r *Reconciler) findConflictingAutoscaler(ctx context.Context, pa *agentsv1
 	return true, winner.Name, nil
 }
 
-// persistConditions best-effort patches the status so that condition changes
+// persistConditions best-effort writes the status so that condition changes
 // on error paths remain visible on the object. Failures are logged and never
 // override the primary error.
 func (r *Reconciler) persistConditions(ctx context.Context, pa, paOriginal *agentsv1alpha1.PoolAutoscaler) {
 	if reflect.DeepEqual(pa.Status, paOriginal.Status) {
 		return
 	}
-	if err := r.Status().Patch(ctx, pa, client.MergeFrom(paOriginal)); err != nil {
+	if err := r.writeStatus(ctx, pa, paOriginal); err != nil {
 		klog.FromContext(ctx).Error(err, "Failed to persist PoolAutoscaler status conditions",
 			"poolautoscaler", klog.KObj(pa))
 	}
@@ -554,6 +554,15 @@ func (r *Reconciler) updateStatus(ctx context.Context, pa, paOriginal *agentsv1a
 		return nil
 	}
 
+	return r.writeStatus(ctx, pa, paOriginal)
+}
+
+func (r *Reconciler) writeStatus(ctx context.Context, pa, paOriginal *agentsv1alpha1.PoolAutoscaler) error {
+	// A merge patch omits unchanged zero replica counts. When status is absent,
+	// the API server requires both counts, so initialize it with a full update.
+	if reflect.DeepEqual(paOriginal.Status, agentsv1alpha1.PoolAutoscalerStatus{}) {
+		return r.Status().Update(ctx, pa)
+	}
 	patch := client.MergeFrom(paOriginal)
 	return r.Status().Patch(ctx, pa, patch)
 }
