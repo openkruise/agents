@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
@@ -44,7 +45,14 @@ func TruncateConditionMessage(msg string) string {
 	if len(msg) <= MaxConditionMessageLen {
 		return msg
 	}
-	return msg[:MaxConditionMessageLen] + "..."
+	// Back off to a rune boundary. The limit counts bytes, and these messages
+	// carry paths and mount helper output, so a cut landing mid-character would
+	// put a replacement character in the very field this exists to make readable.
+	cut := MaxConditionMessageLen
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut] + "..."
 }
 
 func SetSandboxCondition(status *agentsv1alpha1.SandboxStatus, condition metav1.Condition) {
