@@ -101,6 +101,7 @@ func main() {
 	var clientBurst int
 	var defaultPersistentContents string
 	var runtimeClientCertDir string
+	var templateBuildTimeout time.Duration
 	var peerSelector string
 	var networkInterface string
 	var memberlistBindPort int
@@ -144,6 +145,7 @@ func main() {
 		"supporting three states: ip, memory, and filesystem. Format: comma-separated, e.g.: memory,filesystem")
 	flag.StringVar(&metricLabelsAllowlist, "metric-labels-allowlist", "",
 		"Comma-separated list of Sandbox label keys to expose as sandbox_labels metric labels (e.g., app,env,version)")
+	flag.DurationVar(&templateBuildTimeout, "template-build-timeout", 30*time.Minute, "Timeout for Draft upload/submission and, separately, build execution plus checkpoint capture")
 	flag.StringVar(&runtimeClientCertDir, "runtime-client-cert-dir", "",
 		"Directory holding the agent-runtime client TLS material (ca.crt, client.crt, client.key). "+
 			"When set, the controller reaches TLS-capable agent-runtimes over HTTPS and advertises the runtime "+
@@ -421,7 +423,7 @@ func main() {
 
 	ctx, cancelRun := context.WithCancel(ctrl.SetupSignalHandler())
 	defer cancelRun()
-	deps := controller.Deps{MetricsCleanup: metricsGC, RuntimeTLSBundle: runtimeTLSBundle}
+	deps := controller.Deps{MetricsCleanup: metricsGC, RuntimeTLSBundle: runtimeTLSBundle, TemplateBuildTimeout: templateBuildTimeout}
 	var peerManager *peers.MemberlistPeers
 	var peerOutbound *refresh.PeerOutbound
 	if utilfeature.DefaultFeatureGate.Enabled(features.SandboxRouteSyncGate) && peerSelector != "" {

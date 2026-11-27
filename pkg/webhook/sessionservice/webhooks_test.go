@@ -88,7 +88,7 @@ func TestValidation(t *testing.T) {
 			p.Spec.SandboxTemplateSpec.BuildOptions = &agents.SandboxTemplateBuildOptions{}
 		}},
 		{name: "build options", edit: func(p *agents.SessionService) {
-			p.Spec.SandboxTemplateSpec.BuildOptions = &agents.SandboxTemplateBuildOptions{FromTemplate: "base"}
+			p.Spec.SandboxTemplateSpec.BuildOptions = &agents.SandboxTemplateBuildOptions{StartCommand: &agents.TemplateBuildCommand{Command: "serve"}}
 		}},
 		{name: "duplicate probes", edit: func(p *agents.SessionService) {
 			p.Spec.Probes = append(p.Spec.Probes, p.Spec.Probes[0])

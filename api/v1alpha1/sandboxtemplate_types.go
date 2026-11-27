@@ -60,6 +60,14 @@ type SandboxTemplateSpec struct {
 	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`
 
+	// Checkpoint captures the completed build as a restorable artifact.
+	// +optional
+	Checkpoint *CheckpointStrategy `json:"checkpoint,omitempty"`
+
+	// ImageAcceleration requests best-effort image pre-warming.
+	// +optional
+	ImageAcceleration *ImageAccelerationStrategy `json:"imageAcceleration,omitempty"`
+
 	// Runtimes - Runtime configuration for sandbox object
 	// +optional
 	// +listType=atomic
@@ -110,10 +118,6 @@ type SandboxTemplateSpec struct {
 // SandboxTemplateBuildOptions is the immutable declarative input of one
 // Template Build.
 type SandboxTemplateBuildOptions struct {
-	// FromTemplate names an existing logical Template used as the build base.
-	// +optional
-	FromTemplate string `json:"fromTemplate,omitempty"`
-
 	// Steps is the ordered provisioning sequence.
 	// +listType=atomic
 	// +optional
@@ -126,14 +130,6 @@ type SandboxTemplateBuildOptions struct {
 	// ReadyCommand checks business process readiness before capture.
 	// +optional
 	ReadyCommand *TemplateBuildCommand `json:"readyCommand,omitempty"`
-
-	// Checkpoint captures the completed build as a restorable artifact.
-	// +optional
-	Checkpoint *CheckpointStrategy `json:"checkpoint,omitempty"`
-
-	// ImageAcceleration requests best-effort image pre-warming.
-	// +optional
-	ImageAcceleration *ImageAccelerationStrategy `json:"imageAcceleration,omitempty"`
 }
 
 // CheckpointStrategy configures artifact capture. Future options such as
@@ -264,6 +260,12 @@ type SandboxTemplateStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
+
+// SandboxTemplateConditionBuildReady reports Build execution and capture progress.
+const SandboxTemplateConditionBuildReady = "BuildReady"
+
+// SandboxTemplateArtifactCheckpoint references a Checkpoint whose status checkpoint ID restores the artifact.
+const SandboxTemplateArtifactCheckpoint = "checkpoint"
 
 // +genclient
 // +kubebuilder:object:root=true

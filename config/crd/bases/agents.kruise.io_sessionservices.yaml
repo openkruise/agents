@@ -252,26 +252,6 @@ spec:
                 description: BuildOptions stores the accepted build recipe; admission
                   freezes finalized Versions.
                 properties:
-                  checkpoint:
-                    description: Checkpoint captures the completed build as a restorable
-                      artifact.
-                    properties:
-                      enable:
-                        description: Enable turns artifact capture on for the Build.
-                        type: boolean
-                    type: object
-                  fromTemplate:
-                    description: FromTemplate names an existing logical Template used
-                      as the build base.
-                    type: string
-                  imageAcceleration:
-                    description: ImageAcceleration requests best-effort image pre-warming.
-                    properties:
-                      enable:
-                        description: Enable turns best-effort image acceleration on
-                          for the Build.
-                        type: boolean
-                    type: object
                   readyCommand:
                     description: ReadyCommand checks business process readiness before
                       capture.
@@ -397,6 +377,22 @@ spec:
                         rule: has(self.command) != has(self.copy)
                     type: array
                     x-kubernetes-list-type: atomic
+                type: object
+              checkpoint:
+                description: Checkpoint captures the completed build as a restorable
+                  artifact.
+                properties:
+                  enable:
+                    description: Enable turns artifact capture on for the Build.
+                    type: boolean
+                type: object
+              imageAcceleration:
+                description: ImageAcceleration requests best-effort image pre-warming.
+                properties:
+                  enable:
+                    description: Enable turns best-effort image acceleration on for
+                      the Build.
+                    type: boolean
                 type: object
               lifecycle:
                 description: |-
