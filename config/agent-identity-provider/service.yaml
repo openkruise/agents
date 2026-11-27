@@ -1,0 +1,30 @@
+# The address the issuer advertises as its own.
+#
+# --issuer-url in the Deployment names this Service, and that value becomes the
+# iss claim and the issuer a verifier compares against the discovery document.
+# Without this object nothing in the cluster answers that name, so discovery and
+# JWKS are unreachable and every AgentAuthenticationConfig pointing at the
+# in-cluster issuer fails to resolve.
+#
+# Only the issuer port is published. Metrics and health are scraped from the pod
+# and have no reason to be reachable through a Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-identity-provider
+  namespace: sandbox-system
+  labels:
+    component: agent-identity-provider
+    app.kubernetes.io/name: agent-identity-provider
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    component: agent-identity-provider
+    app.kubernetes.io/name: agent-identity-provider
+  ports:
+    - name: issuer
+      port: 8443
+      protocol: TCP
+      # By name rather than number, so changing --issuer-bind-address and the
+      # containerPort together cannot leave the Service pointing at the old one.
+      targetPort: issuer
