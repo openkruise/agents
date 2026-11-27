@@ -17,6 +17,7 @@ limitations under the License.
 package discovery
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	clientdiscovery "k8s.io/client-go/discovery"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
@@ -52,10 +54,16 @@ func DiscoverGVK(gvk schema.GroupVersionKind) bool {
 	if genericClient == nil {
 		return false
 	}
-	discoveryClient := genericClient.DiscoveryClient
+	return discoverGVKWithClient(genericClient.DiscoveryClient, gvk)
+}
 
+func discoverGVKWithClient(discoveryClient clientdiscovery.DiscoveryInterface, gvk schema.GroupVersionKind) bool {
 	startTime := time.Now()
-	err := retry.OnError(backOff, func(err error) bool { return true }, func() error {
+	// errKindNotFound means discovery answered and the kind is absent, which no
+	// amount of retrying can change. Retry only the errors that reaching the API
+	// server can still resolve, so an uninstalled optional CRD is reported at
+	// once instead of after the whole backoff.
+	err := retry.OnError(backOff, func(err error) bool { return !errors.Is(err, errKindNotFound) }, func() error {
 		resourceList, err := discoveryClient.ServerResourcesForGroupVersion(gvk.GroupVersion().String())
 		if err != nil {
 			return err
@@ -69,7 +77,7 @@ func DiscoverGVK(gvk schema.GroupVersionKind) bool {
 	})
 
 	if err != nil {
-		if err == errKindNotFound {
+		if errors.Is(err, errKindNotFound) {
 			klog.InfoS("Not found kind in group version", "kind", gvk.Kind, "groupVersion", gvk.GroupVersion().String(), "cost", time.Since(startTime))
 			return false
 		}
