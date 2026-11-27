@@ -38,6 +38,8 @@ type Paginator[T any] struct {
 	GetUniqueKey func(T) string
 	// Return true if the object should be included
 	Filter func(T) bool
+	// Descending sorts by key descending (newest first) instead of the default ascending order.
+	Descending bool
 }
 
 func (p *Paginator[T]) Apply(objs []T) ([]T, string) {
@@ -64,6 +66,9 @@ func (p *Paginator[T]) sortObjects(items []T) []T {
 		if p.hasStableCursor() && iSortKey == jSortKey {
 			return p.GetUniqueKey(items[i]) < p.GetUniqueKey(items[j])
 		}
+		if p.Descending {
+			return iSortKey > jSortKey
+		}
 		return iSortKey < jSortKey
 	})
 
@@ -84,8 +89,12 @@ func (p *Paginator[T]) paginateResults(items []T) ([]T, string) {
 	// Find start index using binary search
 	startIdx := 0
 	if p.NextToken != "" {
-		// Find the first item with sortKey > startSortKey(nextToken) in O(log n)
+		// Find the first item past the cursor in O(log n). Items are sorted
+		// ascending by default, or descending when Descending is set.
 		startIdx = sort.Search(len(items), func(i int) bool {
+			if p.Descending {
+				return p.GetKey(items[i]) < p.NextToken
+			}
 			return p.GetKey(items[i]) > p.NextToken
 		})
 	}
@@ -123,6 +132,9 @@ func (p *Paginator[T]) paginateStableResults(items []T) ([]T, string) {
 			startIdx = sort.Search(len(items), func(i int) bool {
 				itemKey := p.GetKey(items[i])
 				if itemKey != token.Key {
+					if p.Descending {
+						return itemKey < token.Key
+					}
 					return itemKey > token.Key
 				}
 				return p.GetUniqueKey(items[i]) > token.ID
@@ -130,6 +142,9 @@ func (p *Paginator[T]) paginateStableResults(items []T) ([]T, string) {
 		} else {
 			// Backward compatibility with tokens generated before stable cursors.
 			startIdx = sort.Search(len(items), func(i int) bool {
+				if p.Descending {
+					return p.GetKey(items[i]) < p.NextToken
+				}
 				return p.GetKey(items[i]) > p.NextToken
 			})
 		}
