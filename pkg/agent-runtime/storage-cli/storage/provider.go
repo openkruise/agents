@@ -49,7 +49,10 @@ type Provider interface {
 	// in log output. Pass true only in non-production environments.
 	Mount(ctx context.Context, req *csi.NodePublishVolumeRequest, debug bool) error
 
-	// Unmount performs the driver-specific unmount. Drivers that have not
-	// implemented unmount yet may return nil.
-	Unmount(ctx context.Context, req *csi.NodePublishVolumeRequest) error
+	// Unmount performs the driver-specific unmount. The default open-source
+	// implementation forwards to the CSI plugin via NodeUnpublishVolume; see
+	// RunNodeUnpublishVolume. The request carries the staging path the volume
+	// was published with. Drivers that have not implemented unmount yet may
+	// return nil.
+	Unmount(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) error
 }

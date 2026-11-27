@@ -37,7 +37,7 @@ func (f *fakeProvider) Validate(_ *csi.NodePublishVolumeRequest) error { return 
 func (f *fakeProvider) Mount(_ context.Context, _ *csi.NodePublishVolumeRequest, _ bool) error {
 	return nil
 }
-func (f *fakeProvider) Unmount(_ context.Context, _ *csi.NodePublishVolumeRequest) error {
+func (f *fakeProvider) Unmount(_ context.Context, _ *csi.NodeUnpublishVolumeRequest) error {
 	return nil
 }
 
