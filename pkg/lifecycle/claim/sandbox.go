@@ -22,6 +22,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -181,6 +182,9 @@ func InplaceRefresh(ctx context.Context, c cache.Provider, cur *v1alpha1.Sandbox
 			return cur, err
 		}
 	}
+	if err = assertSameIncarnation(cur, newSbx); err != nil {
+		return cur, err
+	}
 	if expectations.IsResourceVersionStrictlyNewer(cur.GetResourceVersion(), newSbx.GetResourceVersion()) {
 		if deepcopy {
 			return newSbx.DeepCopy(), nil
@@ -239,6 +243,9 @@ func retryWrite(ctx context.Context, c cache.Provider, cur *v1alpha1.Sandbox, mo
 		if err != nil {
 			return err
 		}
+		if err = assertSameIncarnation(cur, latest); err != nil {
+			return err
+		}
 
 		copied := latest.DeepCopy()
 		shouldUpdate, err := modifier(copied)
@@ -291,6 +298,9 @@ func RefreshFromAPIReader(ctx context.Context, c cache.Provider, cur *v1alpha1.S
 	if err := c.GetAPIReader().Get(ctx, client.ObjectKeyFromObject(cur), latest); err != nil {
 		return cur, err
 	}
+	if err := assertSameIncarnation(cur, latest); err != nil {
+		return cur, err
+	}
 	return latest, nil
 }
 
@@ -298,8 +308,35 @@ func RefreshFromAPIReader(ctx context.Context, c cache.Provider, cur *v1alpha1.S
 // intercept deletion.
 var DefaultDeleteSandbox = deleteSandbox
 
-func deleteSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, client client.Client) error {
-	return client.Delete(ctx, sbx)
+func deleteSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) error {
+	// Bind the delete to the incarnation the caller was authorized for. The API
+	// server otherwise resolves this by namespace and name alone, so a Sandbox
+	// recreated under the same name after authorization would be deleted in its
+	// place. A synthetic object without a UID keeps the old behaviour.
+	if sbx.UID == "" {
+		return c.Delete(ctx, sbx)
+	}
+	return c.Delete(ctx, sbx, client.Preconditions{UID: &sbx.UID})
+}
+
+// assertSameIncarnation guards a re-read that resolved by namespace and name.
+// Authorization is performed against one specific Sandbox, but InplaceRefresh,
+// every attempt of retryWrite and RefreshFromAPIReader look the object up by
+// ObjectKey, so a same-name Sandbox created in the window between the two
+// would otherwise be adopted and mutated in its place.
+//
+// A mismatch is reported as NotFound: from the caller's point of view the
+// Sandbox it was authorized for no longer exists, which is what the API layer
+// should surface rather than acting on the replacement.
+//
+// An empty UID on either side means the caller is holding a synthetic object
+// that was never read from the API server, so there is nothing to compare and
+// the check is skipped.
+func assertSameIncarnation(want, got *v1alpha1.Sandbox) error {
+	if want.UID == "" || got.UID == "" || want.UID == got.UID {
+		return nil
+	}
+	return apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("sandboxes").GroupResource(), want.Name)
 }
 
 // Kill deletes the sandbox CR unless it is already terminating. When tracing is
